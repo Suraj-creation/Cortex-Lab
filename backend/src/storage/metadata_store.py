@@ -264,13 +264,13 @@ class MetadataStore:
     # ─── Conversation Storage ────────────────────────────────────────────
 
     def store_conversation_turn(self, session_id: str, role: str, content: str,
-                                 thinking: str = "", memory_id: str = ""):
+                                 thinking: str = "", memory_id: str = None):
         """Store a conversation turn."""
         turn_id = f"{session_id}-{role}-{datetime.now().timestamp()}"
         if self._use_duckdb:
             self.conn.execute(
                 "INSERT INTO conversations VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                [turn_id, session_id, role, content, thinking, memory_id,
+                [turn_id, session_id, role, content, thinking, memory_id or "",
                  datetime.now(), json.dumps({})]
             )
 

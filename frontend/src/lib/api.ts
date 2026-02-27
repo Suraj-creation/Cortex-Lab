@@ -1,4 +1,4 @@
-import { ChatMessage, ChatSettings, DEFAULT_SETTINGS, MemoryObject, GraphData, RAGStats, EvidenceCard } from "./types";
+import { ChatSettings, DEFAULT_SETTINGS, MemoryObject, GraphData, RAGStats, EvidenceCard, AmbientState, AmbientConfig, ConversationRecord, VoiceQueryResult, ConversationTurn } from "./types";
 
 const API_BASE = "/api";
 
@@ -330,5 +330,138 @@ export async function getRAGHealth(): Promise<{
 }> {
   const res = await fetch(`${API_BASE}/rag/health`);
   if (!res.ok) throw new Error(`Failed to fetch RAG health: ${res.status}`);
+  return res.json();
+}
+
+// ── Ambient Voice Service ───────────────────────────────────────
+
+export async function startAmbient(): Promise<{ success: boolean; error?: string; status: string }> {
+  const res = await fetch(`${API_BASE}/ambient/start`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to start ambient: ${res.status}`);
+  return res.json();
+}
+
+export async function stopAmbient(): Promise<{ success: boolean; status: string }> {
+  const res = await fetch(`${API_BASE}/ambient/stop`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to stop ambient: ${res.status}`);
+  return res.json();
+}
+
+export async function pauseAmbient(): Promise<{ success: boolean; status: string }> {
+  const res = await fetch(`${API_BASE}/ambient/pause`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to pause ambient: ${res.status}`);
+  return res.json();
+}
+
+export async function resumeAmbient(): Promise<{ success: boolean; status: string }> {
+  const res = await fetch(`${API_BASE}/ambient/resume`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to resume ambient: ${res.status}`);
+  return res.json();
+}
+
+export async function getAmbientStatus(): Promise<AmbientState> {
+  const res = await fetch(`${API_BASE}/ambient/status`);
+  if (!res.ok) throw new Error(`Failed to fetch ambient status: ${res.status}`);
+  return res.json();
+}
+
+export async function getAmbientConfig(): Promise<AmbientConfig> {
+  const res = await fetch(`${API_BASE}/ambient/config`);
+  if (!res.ok) throw new Error(`Failed to fetch ambient config: ${res.status}`);
+  return res.json();
+}
+
+export async function updateAmbientConfig(updates: Partial<AmbientConfig>): Promise<AmbientConfig> {
+  const res = await fetch(`${API_BASE}/ambient/config`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  if (!res.ok) throw new Error(`Failed to update ambient config: ${res.status}`);
+  return res.json();
+}
+
+export async function startEnrollment(durationSeconds: number = 20): Promise<{
+  success: boolean;
+  message: string;
+  samples_used?: number;
+  consistency?: number;
+}> {
+  const res = await fetch(`${API_BASE}/ambient/enroll`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ duration_seconds: durationSeconds }),
+  });
+  if (!res.ok) throw new Error(`Enrollment failed: ${res.status}`);
+  return res.json();
+}
+
+export async function getEnrollmentStatus(): Promise<{ enrolled: boolean }> {
+  const res = await fetch(`${API_BASE}/ambient/enrollment-status`);
+  if (!res.ok) throw new Error(`Failed to check enrollment: ${res.status}`);
+  return res.json();
+}
+
+export async function setSpeakerAlias(speakerLabel: string, name: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/ambient/speaker-alias`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ speaker_label: speakerLabel, name }),
+  });
+  if (!res.ok) throw new Error(`Failed to set alias: ${res.status}`);
+}
+
+export async function getConversations(
+  limit: number = 50,
+  offset: number = 0
+): Promise<{ conversations: ConversationRecord[]; total: number }> {
+  const res = await fetch(`${API_BASE}/ambient/conversations?limit=${limit}&offset=${offset}`);
+  if (!res.ok) throw new Error(`Failed to fetch conversations: ${res.status}`);
+  return res.json();
+}
+
+export async function getConversation(convId: string): Promise<ConversationRecord> {
+  const res = await fetch(`${API_BASE}/ambient/conversations/${convId}`);
+  if (!res.ok) throw new Error(`Failed to fetch conversation: ${res.status}`);
+  return res.json();
+}
+
+export async function getLiveTranscript(): Promise<{ turns: ConversationTurn[] }> {
+  const res = await fetch(`${API_BASE}/ambient/live-transcript`);
+  if (!res.ok) throw new Error(`Failed to fetch live transcript: ${res.status}`);
+  return res.json();
+}
+
+// ── Text-to-Speech ──────────────────────────────────────────────
+
+export async function synthesizeSpeech(text: string): Promise<ArrayBuffer> {
+  const res = await fetch(`${API_BASE}/tts/synthesize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) throw new Error(`TTS synthesis failed: ${res.status}`);
+  return res.arrayBuffer();
+}
+
+export async function getTTSStatus(): Promise<{
+  available: boolean;
+  voice: string | null;
+  total_syntheses: number;
+}> {
+  const res = await fetch(`${API_BASE}/tts/status`);
+  if (!res.ok) throw new Error(`Failed to fetch TTS status: ${res.status}`);
+  return res.json();
+}
+
+// ── Voice Query ─────────────────────────────────────────────────
+
+export async function voiceQuery(audioBase64: string): Promise<VoiceQueryResult> {
+  const res = await fetch(`${API_BASE}/voice/query`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ audio_base64: audioBase64 }),
+  });
+  if (!res.ok) throw new Error(`Voice query failed: ${res.status}`);
   return res.json();
 }

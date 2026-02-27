@@ -2,19 +2,28 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import { Send, Square, Settings2, Sparkles, Brain } from "lucide-react";
-import { ChatMessage as ChatMessageType, ModelStatus, ChatSettings, DEFAULT_SETTINGS } from "@/lib/types";
+import { ChatMessage as ChatMessageType, ModelStatus, ChatSettings, DEFAULT_SETTINGS, VoiceQueryResult } from "@/lib/types";
 import { sendMessage, streamMessage, ragChat, streamRAGMessage, RAGStreamMeta } from "@/lib/api";
 import { MessageBubble } from "./MessageBubble";
 import { SettingsPanel } from "./SettingsPanel";
 import { EmptyState } from "./EmptyState";
+import { VoiceQueryButton } from "./VoiceQueryButton";
 
 interface Props {
   modelStatus: ModelStatus;
+  conversationId: string;
   onTitleUpdate: (title: string) => void;
 }
 
-export function ChatPanel({ modelStatus, onTitleUpdate }: Props) {
-  const [messages, setMessages] = useState<ChatMessageType[]>([]);
+export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props) {
+  const [messages, setMessages] = useState<ChatMessageType[]>(() => {
+    // Restore messages from localStorage on mount
+    try {
+      const saved = localStorage.getItem(`cortex-messages-${conversationId}`);
+      if (saved) return JSON.parse(saved);
+    } catch { /* ignore */ }
+    return [];
+  });
   const [input, setInput] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -29,6 +38,17 @@ export function ChatPanel({ modelStatus, onTitleUpdate }: Props) {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Persist messages to localStorage (skip while streaming to avoid noise)
+  useEffect(() => {
+    const anyStreaming = messages.some((m) => m.isStreaming);
+    if (!anyStreaming && messages.length > 0) {
+      localStorage.setItem(
+        `cortex-messages-${conversationId}`,
+        JSON.stringify(messages),
+      );
+    }
+  }, [messages, conversationId]);
 
   // Auto-resize textarea
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -92,7 +112,7 @@ export function ChatPanel({ modelStatus, onTitleUpdate }: Props) {
         await streamRAGMessage(
           history,
           settings,
-          "", // session_id
+          conversationId, // session_id
           (meta: RAGStreamMeta) => {
             // Update message with RAG metadata (evidence, agents, etc.)
             setMessages((prev) =>
@@ -139,7 +159,7 @@ export function ChatPanel({ modelStatus, onTitleUpdate }: Props) {
       } else {
         // ── RAG Non-streaming ───────────────────────────────────
         try {
-          const res = await ragChat(history, settings);
+          const res = await ragChat(history, settings, conversationId);
           const assistantMsg: ChatMessageType = {
             id: assistantId,
             role: "assistant",
@@ -225,7 +245,7 @@ export function ChatPanel({ modelStatus, onTitleUpdate }: Props) {
         setIsGenerating(false);
       }
     }
-  }, [input, isGenerating, messages, settings, onTitleUpdate]);
+  }, [input, isGenerating, messages, settings, onTitleUpdate, conversationId]);
 
   const handleStop = () => {
     abortRef.current = true;
@@ -238,6 +258,53 @@ export function ChatPanel({ modelStatus, onTitleUpdate }: Props) {
       handleSend();
     }
   };
+
+  const handleVoiceResult = useCallback((result: VoiceQueryResult) => {
+    // Add user message (transcript)
+    const userMsg: ChatMessageType = {
+      id: `voice-user-${Date.now()}`,
+      role: "user",
+      content: `🎤 ${result.transcript}`,
+      timestamp: Date.now(),
+    };
+    setMessages((prev) => [...prev, userMsg]);
+
+    // Add assistant response
+    const assistantMsg: ChatMessageType = {
+      id: `voice-assistant-${Date.now()}`,
+      role: "assistant",
+      content: result.answer,
+      timestamp: Date.now(),
+      evidence: result.evidence,
+    };
+    setMessages((prev) => [...prev, assistantMsg]);
+
+    // Auto-play TTS if available
+    if (result.audio_base64) {
+      try {
+        const binaryStr = atob(result.audio_base64);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) {
+          bytes[i] = binaryStr.charCodeAt(i);
+        }
+        const blob = new Blob([bytes], { type: "audio/wav" });
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.onended = () => URL.revokeObjectURL(url);
+        audio.onerror = () => URL.revokeObjectURL(url);
+        audio.play().catch(() => URL.revokeObjectURL(url));
+      } catch {
+        // ignore playback errors
+      }
+    }
+
+    // Update title
+    if (messages.length === 0) {
+      onTitleUpdate(
+        "🎤 " + result.transcript.slice(0, 30) + (result.transcript.length > 30 ? "…" : "")
+      );
+    }
+  }, [messages.length, onTitleUpdate]);
 
   const isOnline = modelStatus.model_loaded;
 
@@ -304,6 +371,13 @@ export function ChatPanel({ modelStatus, onTitleUpdate }: Props) {
               >
                 <Settings2 size={18} />
               </button>
+
+              {/* Voice query button */}
+              <VoiceQueryButton
+                onResult={handleVoiceResult}
+                onError={(err) => setError(err)}
+                disabled={!isOnline || isGenerating}
+              />
 
               {/* Input */}
               <textarea

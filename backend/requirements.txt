@@ -16,3 +16,12 @@ duckdb>=0.9.0
 networkx>=3.0
 numpy>=1.24.0
 scikit-learn>=1.3.0
+
+# Voice / Ambient Listening (STT + TTS)
+sounddevice>=0.4.6
+faster-whisper>=1.0.0
+speechbrain>=1.0.0
+piper-tts>=1.2.0
+onnxruntime>=1.17.0
+webrtcvad>=2.0.10
+websockets>=12.0

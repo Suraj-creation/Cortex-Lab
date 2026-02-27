@@ -13,7 +13,6 @@ import {
   Brain,
   Copy,
   Check,
-  Clock,
   Zap,
   Sparkles,
   FileText,
@@ -21,6 +20,7 @@ import {
   Shield,
   Timer,
 } from "lucide-react";
+import { TTSPlayback } from "./TTSPlayback";
 
 interface Props {
   message: ChatMessage;
@@ -32,7 +32,6 @@ export function MessageBubble({ message }: Props) {
   const thinkingEndRef = useRef<HTMLDivElement>(null);
 
   const isUser = message.role === "user";
-  const hasThinking = !!message.thinking;
 
   // Parse thinking from streamed content
   let displayContent = message.content;
@@ -341,6 +340,7 @@ export function MessageBubble({ message }: Props) {
                 {copied ? <Check size={11} /> : <Copy size={11} />}
                 {copied ? "Copied" : "Copy"}
               </button>
+              <TTSPlayback text={displayContent} />
               {message.usage && (
                 <span className="flex items-center gap-1 text-[10px] text-slate-400">
                   <Zap size={10} />

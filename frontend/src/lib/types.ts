@@ -150,3 +150,97 @@ export const DEFAULT_SETTINGS: ChatSettings = {
   stream: true,
   useRAG: true,
 };
+
+// ── Ambient Voice Types ─────────────────────────────────────────
+
+export type AmbientStatusType =
+  | "idle"
+  | "loading"
+  | "listening"
+  | "speech_detected"
+  | "transcribing"
+  | "paused"
+  | "error";
+
+export interface AmbientState {
+  status: AmbientStatusType;
+  uptime_seconds: number;
+  error: string | null;
+  enrolled: boolean;
+  tts_available: boolean;
+  audio_level: number;
+  speech_segments: number;
+  transcriptions: number;
+  vad?: {
+    threshold: number;
+    speech_active: boolean;
+    total_segments: number;
+    total_speech_seconds: number;
+  };
+  speaker_id?: {
+    enrolled: boolean;
+    active_clusters: number;
+    cluster_labels: string[];
+    aliases: Record<string, string>;
+  };
+  transcriber?: {
+    model_size: string;
+    device: string;
+    total_transcriptions: number;
+    total_audio_seconds: number;
+    real_time_factor: number;
+  };
+  conversation?: {
+    total_conversations: number;
+    current_turns: number;
+    total_ingested: number;
+  };
+  tts?: {
+    available: boolean;
+    voice: string;
+    total_syntheses: number;
+  };
+}
+
+export interface AmbientConfig {
+  enabled: boolean;
+  vad_threshold: number;
+  auto_ingest: boolean;
+  silence_timeout_s: number;
+  min_speech_ms: number;
+  tts_enabled: boolean;
+  tts_voice: string;
+  tts_speed: number;
+  whisper_model_size: string;
+  whisper_device: string;
+  whisper_language: string | null;
+  record_raw_audio: boolean;
+}
+
+export interface ConversationTurn {
+  speaker_label: string;
+  speaker_name: string;
+  text: string;
+  timestamp: number;
+  confidence: number;
+}
+
+export interface ConversationRecord {
+  id: string;
+  turns: ConversationTurn[];
+  participants: string[];
+  start_time: string | null;
+  end_time: string | null;
+  duration_seconds: number;
+  memory_ids: string[];
+  auto_ingested: boolean;
+}
+
+export interface VoiceQueryResult {
+  transcript: string;
+  answer: string;
+  evidence?: EvidenceCard[];
+  audio_base64: string | null;
+  language: string;
+  stt_confidence: number;
+}

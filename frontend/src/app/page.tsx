@@ -7,9 +7,10 @@ import { Header } from "@/components/Header";
 import { MemoryBrowser } from "@/components/MemoryBrowser";
 import { KnowledgeGraph } from "@/components/KnowledgeGraph";
 import { RAGDashboard } from "@/components/RAGDashboard";
+import { AmbientPanel } from "@/components/AmbientPanel";
 import { ModelStatus } from "@/lib/types";
 
-type ActiveView = "chat" | "memories" | "graph" | "dashboard";
+type ActiveView = "chat" | "memories" | "graph" | "dashboard" | "ambient";
 
 export default function Home() {
   const [modelStatus, setModelStatus] = useState<ModelStatus>({
@@ -21,29 +22,77 @@ export default function Home() {
   const [activeView, setActiveView] = useState<ActiveView>("chat");
   const [conversations, setConversations] = useState<
     { id: string; title: string; date: string }[]
-  >([{ id: "1", title: "New Chat", date: new Date().toISOString() }]);
-  const [activeConversation, setActiveConversation] = useState("1");
+  >([]);
+  const [activeConversation, setActiveConversation] = useState("");
 
-  // Poll model health
+  // Load conversations from localStorage on mount
   useEffect(() => {
+    try {
+      const saved = localStorage.getItem("cortex-conversations");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setConversations(parsed);
+          setActiveConversation(parsed[0].id);
+          return;
+        }
+      }
+    } catch { /* ignore parse errors */ }
+    // Default: start with one new chat
+    const id = Date.now().toString();
+    const initial = [{ id, title: "New Chat", date: new Date().toISOString() }];
+    setConversations(initial);
+    setActiveConversation(id);
+  }, []);
+
+  // Persist conversations to localStorage whenever they change
+  useEffect(() => {
+    if (conversations.length > 0) {
+      localStorage.setItem("cortex-conversations", JSON.stringify(conversations));
+    }
+  }, [conversations]);
+
+  // Poll model health — retry faster on initial connect, slower once healthy
+  useEffect(() => {
+    let intervalId: ReturnType<typeof setInterval>;
+    let healthy = false;
+
     const check = async () => {
       try {
-        const res = await fetch("/api/health");
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        const res = await fetch("/api/health", { signal: controller.signal });
+        clearTimeout(timeout);
         if (res.ok) {
           const data = await res.json();
           setModelStatus(data);
+          // Once healthy, poll less frequently
+          if (!healthy) {
+            healthy = true;
+            clearInterval(intervalId);
+            intervalId = setInterval(check, 15_000);
+          }
         }
       } catch {
-        setModelStatus({
-          status: "offline",
-          model_loaded: false,
-          model_info: {},
-        });
+        // Don't immediately mark as offline — could be a transient proxy hiccup
+        if (healthy) {
+          // Was healthy before — mark offline only after a second consecutive failure
+          healthy = false;
+          clearInterval(intervalId);
+          intervalId = setInterval(check, 3_000);
+        } else {
+          setModelStatus({
+            status: "offline",
+            model_loaded: false,
+            model_info: {},
+          });
+        }
       }
     };
     check();
-    const interval = setInterval(check, 10_000);
-    return () => clearInterval(interval);
+    // Start with faster polling while connecting
+    intervalId = setInterval(check, 3_000);
+    return () => clearInterval(intervalId);
   }, []);
 
   const handleNewChat = () => {
@@ -86,10 +135,11 @@ export default function Home() {
           sidebarOpen={sidebarOpen}
           onToggleSidebar={() => setSidebarOpen((p) => !p)}
         />
-        {activeView === "chat" && (
+        {activeView === "chat" && activeConversation && (
           <ChatPanel
             key={activeConversation}
             modelStatus={modelStatus}
+            conversationId={activeConversation}
             onTitleUpdate={(title) =>
               setConversations((prev) =>
                 prev.map((c) =>
@@ -107,6 +157,9 @@ export default function Home() {
         )}
         {activeView === "dashboard" && (
           <RAGDashboard onBack={() => setActiveView("chat")} />
+        )}
+        {activeView === "ambient" && (
+          <AmbientPanel onBack={() => setActiveView("chat")} />
         )}
       </div>
     </div>

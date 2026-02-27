@@ -24,9 +24,9 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TextIteratorStreamer
 from threading import Thread
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel, Field
 
 # Add backend dir to path for src imports
@@ -354,6 +354,12 @@ def _split_thinking(text: str):
 
 @app.get("/api/health", response_model=HealthResponse)
 async def health():
+    ambient_status = None
+    if rag_engine.ambient_service:
+        try:
+            ambient_status = rag_engine.ambient_service.get_status()
+        except Exception:
+            pass
     return HealthResponse(
         status="ok" if model_loaded else "loading",
         model_loaded=model_loaded,
@@ -396,13 +402,13 @@ async def chat(req: ChatRequest):
     with torch.no_grad():
         out = model.generate(
             **inputs,
-            max_new_tokens=min(req.max_tokens, 1024),
+            max_new_tokens=min(req.max_tokens, 2048),
             temperature=max(req.temperature, 0.01),
             top_p=req.top_p,
             do_sample=req.temperature > 0,
             pad_token_id=tokenizer.eos_token_id,
             eos_token_id=stop_token_ids,
-            repetition_penalty=1.2,
+            repetition_penalty=1.15,
         )
 
     # Decode with special tokens to extract <think>...</think>
@@ -435,12 +441,14 @@ async def chat(req: ChatRequest):
 
 
 async def _stream_generate(prompt: str, req: ChatRequest):
-    """Yield Server-Sent Events token by token with stop-pattern detection."""
+    """Yield Server-Sent Events token by token with stop-pattern detection.
+    Suppresses <think>…</think> blocks so only the visible answer is streamed."""
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096)
     if torch.cuda.is_available():
         inputs = {k: v.cuda() for k, v in inputs.items()}
 
-    streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+    # Use skip_special_tokens=False so we can detect <think> tags ourselves
+    streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=False)
 
     # Build stop token IDs
     stop_token_ids = [tokenizer.eos_token_id]
@@ -454,13 +462,13 @@ async def _stream_generate(prompt: str, req: ChatRequest):
 
     gen_kwargs = {
         **inputs,
-        "max_new_tokens": min(req.max_tokens, 1024),
+        "max_new_tokens": min(req.max_tokens, 2048),
         "temperature": max(req.temperature, 0.01),
         "top_p": req.top_p,
         "do_sample": req.temperature > 0,
         "pad_token_id": tokenizer.eos_token_id,
         "eos_token_id": stop_token_ids,
-        "repetition_penalty": 1.2,
+        "repetition_penalty": 1.15,
         "streamer": streamer,
     }
 
@@ -469,10 +477,37 @@ async def _stream_generate(prompt: str, req: ChatRequest):
 
     msg_id = f"msg-{uuid.uuid4().hex[:12]}"
     accumulated = ""  # Track full text to detect stop patterns mid-stream
+    in_think = False  # Track <think> block to suppress from stream
+    thinking_text = ""  # Collect thinking for optional later use
 
     for token_text in streamer:
         accumulated += token_text
-        # Check if we've hit a stop pattern in the accumulated text
+
+        # ── Handle <think>…</think> blocks — suppress from visible output ──
+        if "<think>" in accumulated and not in_think:
+            in_think = True
+        if in_think:
+            if "</think>" in accumulated:
+                # Think block complete — extract and continue with answer
+                think_end = accumulated.index("</think>") + len("</think>")
+                thinking_text = accumulated[:think_end]
+                accumulated = accumulated[think_end:]
+                in_think = False
+                # If there's text after </think>, process it below
+                if not accumulated:
+                    continue
+            else:
+                continue  # Don't stream thinking tokens
+
+        # ── Clean special tokens from the visible output ──
+        clean_token = token_text
+        for tok in ["<｜end▁of▁sentence｜>", "<|im_end|>", "<|endoftext|>",
+                     "<｜User｜>", "<｜Assistant｜>", "<think>", "</think>"]:
+            clean_token = clean_token.replace(tok, "")
+        if not clean_token:
+            continue
+
+        # ── Check for stop patterns ──
         should_stop = False
         for pattern in _STOP_PATTERNS:
             if pattern in accumulated:
@@ -486,7 +521,7 @@ async def _stream_generate(prompt: str, req: ChatRequest):
                 break
         if should_stop:
             break
-        chunk = {"id": msg_id, "delta": token_text}
+        chunk = {"id": msg_id, "delta": clean_token}
         yield f"data: {json.dumps(chunk)}\n\n"
         await asyncio.sleep(0)
 
@@ -585,18 +620,37 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
         evidence_texts = [e.get("content", "")[:250] for e in evidence[:5]]
         evidence_block = "\n".join(f"[{i+1}] {e}" for i, e in enumerate(evidence_texts))
 
-        rag_prompt = f"""<|im_start|>system
+        # Check if evidence is actually meaningful (not just greetings)
+        has_meaningful_evidence = any(
+            len(e.strip()) > 10 and e.strip().lower() not in {"hi", "hello", "hey", "hii", "hiii"}
+            for e in evidence_texts
+        )
+
+        if has_meaningful_evidence:
+            rag_prompt = f"""<|im_start|>system
 You are Cortex Lab, a personal AI memory and reasoning assistant.
-Answer the user's question using the provided evidence from their memories.
+Answer the user's question using ONLY the provided evidence from their memories.
 Use inline citations [1], [2] etc. to reference specific memories.
-If the evidence is insufficient, honestly say so — never fabricate information.
+If the evidence does not contain relevant information, say "I don't have memories about that yet."
+NEVER invent, fabricate, or assume information not present in the evidence.
 Keep responses focused and concise.
 <|im_end|>
 <|im_start|>user
 {user_message}
 
 Evidence from memories:
-{evidence_block if evidence_block else "No relevant memories found."}
+{evidence_block}
+<|im_end|>
+<|im_start|>assistant
+"""
+        else:
+            rag_prompt = f"""<|im_start|>system
+You are Cortex Lab, a friendly AI assistant. The user has no stored memories yet, or their message is a casual greeting.
+Respond naturally and conversationally. Do NOT reference any memories or past conversations — there are none.
+Keep your response brief and friendly.
+<|im_end|>
+<|im_start|>user
+{user_message}
 <|im_end|>
 <|im_start|>assistant
 """
@@ -605,7 +659,7 @@ Evidence from memories:
         if torch.cuda.is_available():
             inputs = {k: v.cuda() for k, v in inputs.items()}
 
-        streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+        streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=False)
 
         stop_token_ids = [tokenizer.eos_token_id]
         for stop_str in ["User:", "<|im_end|>", "<|endoftext|>"]:
@@ -618,13 +672,13 @@ Evidence from memories:
 
         gen_kwargs = {
             **inputs,
-            "max_new_tokens": min(req.max_tokens, 1024),
+            "max_new_tokens": min(req.max_tokens, 2048),
             "temperature": max(req.temperature, 0.01),
             "top_p": req.top_p,
             "do_sample": req.temperature > 0,
             "pad_token_id": tokenizer.eos_token_id,
             "eos_token_id": stop_token_ids,
-            "repetition_penalty": 1.2,
+            "repetition_penalty": 1.15,
             "streamer": streamer,
         }
 
@@ -632,8 +686,29 @@ Evidence from memories:
         thread.start()
 
         accumulated = ""
+        in_think = False  # Track <think> block to suppress from stream
         for token_text in streamer:
             accumulated += token_text
+
+            # Handle <think>...</think> blocks — don't stream them
+            if "<think>" in accumulated and not in_think:
+                in_think = True
+            if in_think:
+                if "</think>" in accumulated:
+                    # Think block complete — extract thinking and continue streaming the rest
+                    think_end = accumulated.index("</think>") + len("</think>")
+                    accumulated = accumulated[think_end:]
+                    in_think = False
+                continue  # Don't stream thinking tokens
+
+            # Clean special tokens from the visible output
+            clean_token = token_text
+            for tok in ["<｜end▁of▁sentence｜>", "<|im_end|>", "<|endoftext|>",
+                         "<｜User｜>", "<｜Assistant｜>"]:
+                clean_token = clean_token.replace(tok, "")
+            if not clean_token:
+                continue
+
             should_stop = False
             for pattern in _STOP_PATTERNS:
                 if pattern in accumulated:
@@ -646,12 +721,29 @@ Evidence from memories:
                     break
             if should_stop:
                 break
-            chunk = {"id": msg_id, "delta": token_text}
+            chunk = {"id": msg_id, "delta": clean_token}
             yield f"data: {json.dumps(chunk)}\n\n"
             await asyncio.sleep(0)
 
         yield f"data: {json.dumps({'id': msg_id, 'delta': '', 'done': True})}\n\n"
         thread.join()
+
+        # Store assistant response in conversation history
+        # Clean accumulated text of any leftover special tokens
+        clean_accumulated = accumulated
+        for tok in ["<think>", "</think>", "<｜end▁of▁sentence｜>",
+                     "<|im_end|>", "<|endoftext|>", "<｜User｜>", "<｜Assistant｜>"]:
+            clean_accumulated = clean_accumulated.replace(tok, "")
+        clean_accumulated = clean_accumulated.strip()
+        if clean_accumulated and rag_engine and rag_engine.initialized:
+            try:
+                rag_engine.metadata_store.store_conversation_turn(
+                    session_id=req.session_id or f"session-{int(time.time())}",
+                    role="assistant",
+                    content=clean_accumulated,
+                )
+            except Exception as store_err:
+                print(f"  ⚠️ Failed to store assistant turn: {store_err}")
 
     except Exception as e:
         error_chunk = {"id": msg_id, "delta": f"\n\n⚠️ RAG streaming error: {str(e)}", "done": True}
@@ -754,8 +846,348 @@ async def rag_health():
     }
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  AMBIENT VOICE SERVICE — STT / TTS / Speaker ID
+# ══════════════════════════════════════════════════════════════════════════════
+
+class AmbientConfigUpdate(BaseModel):
+    vad_threshold: Optional[float] = None
+    auto_ingest: Optional[bool] = None
+    silence_timeout_s: Optional[int] = None
+    min_speech_ms: Optional[int] = None
+    tts_enabled: Optional[bool] = None
+    tts_voice: Optional[str] = None
+    tts_speed: Optional[float] = None
+    whisper_model_size: Optional[str] = None
+    whisper_device: Optional[str] = None
+    whisper_language: Optional[str] = None
+    record_raw_audio: Optional[bool] = None
+
+class TTSSynthesizeRequest(BaseModel):
+    text: str
+    voice: Optional[str] = None
+
+class VoiceQueryRequest(BaseModel):
+    audio_base64: str  # Base64-encoded int16 PCM audio at 16kHz
+    settings: Optional[dict] = None
+
+class EnrollmentRequest(BaseModel):
+    duration_seconds: int = Field(20, ge=10, le=30)
+
+class SpeakerAliasRequest(BaseModel):
+    speaker_label: str
+    name: str
+
+
+def _get_ambient():
+    """Helper to get ambient service or raise 503."""
+    if not rag_engine.initialized or not rag_engine.ambient_service:
+        raise HTTPException(503, "Ambient service not available.")
+    return rag_engine.ambient_service
+
+
+# ── Ambient Lifecycle ────────────────────────────────────────────────────────
+
+@app.post("/api/ambient/start")
+async def ambient_start():
+    """Start ambient listening pipeline."""
+    ambient = _get_ambient()
+    result = await ambient.start()
+    return result
+
+
+@app.post("/api/ambient/stop")
+async def ambient_stop():
+    """Stop ambient listening pipeline."""
+    ambient = _get_ambient()
+    result = await ambient.stop()
+    return result
+
+
+@app.post("/api/ambient/pause")
+async def ambient_pause():
+    """Pause ambient listening (keeps models loaded)."""
+    ambient = _get_ambient()
+    return await ambient.pause()
+
+
+@app.post("/api/ambient/resume")
+async def ambient_resume():
+    """Resume ambient listening from pause."""
+    ambient = _get_ambient()
+    return await ambient.resume()
+
+
+@app.get("/api/ambient/status")
+async def ambient_status():
+    """Get current ambient listening status + stats."""
+    ambient = _get_ambient()
+    return ambient.get_status()
+
+
+# ── Ambient Configuration ────────────────────────────────────────────────────
+
+@app.get("/api/ambient/config")
+async def get_ambient_config():
+    """Get current ambient configuration."""
+    ambient = _get_ambient()
+    return ambient.get_config()
+
+
+@app.post("/api/ambient/config")
+async def update_ambient_config(req: AmbientConfigUpdate):
+    """Update ambient configuration."""
+    ambient = _get_ambient()
+    updates = {k: v for k, v in req.model_dump().items() if v is not None}
+    config = ambient.update_config(updates)
+    return config.to_dict()
+
+
+# ── Voice Enrollment ─────────────────────────────────────────────────────────
+
+@app.post("/api/ambient/enroll")
+async def start_enrollment(req: EnrollmentRequest):
+    """Start voice enrollment recording. User speaks for specified duration."""
+    ambient = _get_ambient()
+    if ambient.enrollment is None:
+        # Initialize components if not yet done
+        await ambient._init_components()
+    result = await ambient.enrollment.start_enrollment(req.duration_seconds)
+    return result
+
+
+@app.get("/api/ambient/enrollment-status")
+async def enrollment_status():
+    """Check if user has enrolled their voice."""
+    ambient = _get_ambient()
+    enrolled = False
+    if ambient.speaker_id:
+        enrolled = ambient.speaker_id.is_enrolled()
+    elif ambient.enrollment:
+        enrolled = ambient.enrollment.is_enrolled()
+    return {"enrolled": enrolled}
+
+
+@app.post("/api/ambient/speaker-alias")
+async def set_speaker_alias(req: SpeakerAliasRequest):
+    """Set a human-readable name for a detected speaker."""
+    ambient = _get_ambient()
+    if not ambient.speaker_id:
+        raise HTTPException(503, "Speaker ID not initialized.")
+    ambient.speaker_id.set_alias(req.speaker_label, req.name)
+    return {"success": True, "label": req.speaker_label, "name": req.name}
+
+
+# ── Conversations ────────────────────────────────────────────────────────────
+
+@app.get("/api/ambient/conversations")
+async def get_conversations(limit: int = Query(50, ge=1, le=200),
+                             offset: int = Query(0, ge=0)):
+    """List captured ambient conversations."""
+    ambient = _get_ambient()
+    if not ambient.conversation:
+        return {"conversations": [], "total": 0}
+    convs = ambient.conversation.get_conversations(limit=limit, offset=offset)
+    return {"conversations": convs, "total": len(convs)}
+
+
+@app.get("/api/ambient/conversations/{conv_id}")
+async def get_conversation(conv_id: str):
+    """Get a specific conversation by ID."""
+    ambient = _get_ambient()
+    if not ambient.conversation:
+        raise HTTPException(404, "No conversations available.")
+    conv = ambient.conversation.get_conversation(conv_id)
+    if not conv:
+        raise HTTPException(404, f"Conversation {conv_id} not found.")
+    return conv
+
+
+@app.get("/api/ambient/live-transcript")
+async def get_live_transcript():
+    """Get current in-progress conversation turns."""
+    ambient = _get_ambient()
+    if not ambient.conversation:
+        return {"turns": []}
+    return {"turns": ambient.conversation.get_current_turns()}
+
+
+# ── Text-to-Speech ───────────────────────────────────────────────────────────
+
+@app.post("/api/tts/synthesize")
+async def tts_synthesize(req: TTSSynthesizeRequest):
+    """Synthesize text to speech. Returns WAV audio."""
+    ambient = _get_ambient()
+    if not ambient.tts:
+        # Try to initialize TTS alone
+        await ambient._init_components()
+    if not ambient.tts or not ambient.tts.is_available:
+        raise HTTPException(503, "TTS not available. Voice model may not be downloaded.")
+
+    wav_bytes = ambient.tts.synthesize_to_wav(req.text)
+    if not wav_bytes:
+        raise HTTPException(500, "TTS synthesis failed.")
+
+    return Response(
+        content=wav_bytes,
+        media_type="audio/wav",
+        headers={"Content-Disposition": "inline; filename=speech.wav"},
+    )
+
+
+@app.get("/api/tts/status")
+async def tts_status():
+    """Get TTS availability status."""
+    ambient = _get_ambient()
+    if ambient.tts:
+        return ambient.tts.get_stats()
+    return {"available": False, "voice": None}
+
+
+# ── Voice Query (Speak → STT → RAG → TTS) ───────────────────────────────────
+
+@app.post("/api/voice/query")
+async def voice_query(req: VoiceQueryRequest):
+    """
+    Voice query pipeline:
+    1. Decode base64 audio
+    2. Transcribe with Whisper (STT)
+    3. Run through RAG pipeline
+    4. Synthesize response with TTS
+    5. Return text + audio
+    """
+    import base64
+    import numpy as np
+
+    ambient = _get_ambient()
+    if not ambient.transcriber:
+        await ambient._init_components()
+
+    # 1. Decode audio
+    try:
+        audio_bytes = base64.b64decode(req.audio_base64)
+        audio = np.frombuffer(audio_bytes, dtype=np.int16)
+    except Exception as e:
+        raise HTTPException(400, f"Invalid audio data: {e}")
+
+    if len(audio) < 1600:  # < 0.1s at 16kHz
+        raise HTTPException(400, "Audio too short.")
+
+    # 2. Transcribe
+    transcript = await ambient.transcriber.transcribe(audio)
+    user_text = transcript.get("text", "").strip()
+    if not user_text:
+        return {"transcript": "", "answer": "I couldn't hear anything.", "audio": None}
+
+    # 3. RAG pipeline
+    answer_text = ""
+    evidence = []
+    try:
+        if rag_engine.initialized:
+            rag_result = await rag_engine.rag_chat(
+                user_message=user_text,
+                session_id="voice",
+                conversation_history=[],
+            )
+            answer_text = rag_result.get("answer", "")
+            evidence = rag_result.get("evidence", [])
+    except Exception as e:
+        answer_text = f"I heard you say: '{user_text}', but had trouble processing: {str(e)}"
+
+    if not answer_text:
+        answer_text = f"I heard: '{user_text}'. I don't have enough context to answer that yet."
+
+    # 4. TTS (optional)
+    audio_base64_response = None
+    if ambient.tts and ambient.tts.is_available and ambient.config.tts_enabled:
+        wav_bytes = ambient.tts.synthesize_to_wav(answer_text)
+        if wav_bytes:
+            audio_base64_response = base64.b64encode(wav_bytes).decode("utf-8")
+
+    return {
+        "transcript": user_text,
+        "answer": answer_text,
+        "evidence": evidence,
+        "audio_base64": audio_base64_response,
+        "language": transcript.get("language", ""),
+        "stt_confidence": transcript.get("confidence", 0),
+    }
+
+
+# ── WebSocket: Live Ambient Transcript Stream ───────────────────────────────
+
+_ws_clients: set[WebSocket] = set()
+
+
+async def _broadcast_to_ws_clients(data: dict):
+    """Broadcast ambient events to all connected WebSocket clients."""
+    if not _ws_clients:
+        return
+    msg = json.dumps(data)
+    disconnected = set()
+    for ws in _ws_clients:
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            disconnected.add(ws)
+    _ws_clients -= disconnected
+
+
+@app.websocket("/ws/ambient")
+async def websocket_ambient(ws: WebSocket):
+    """
+    WebSocket for live ambient transcript streaming.
+    Sends:
+      - {"type": "transcript", "speaker_label": ..., "text": ..., ...}
+      - {"type": "vad_activity", "speech_prob": ..., "timestamp": ...}
+      - {"type": "status", "status": "listening"|"transcribing"|...}
+    """
+    await ws.accept()
+    _ws_clients.add(ws)
+
+    # Register broadcast callback with ambient service
+    ambient = rag_engine.ambient_service
+    if ambient:
+        ambient.set_ws_broadcast(_broadcast_to_ws_clients)
+
+    try:
+        # Send initial status
+        if ambient:
+            await ws.send_text(json.dumps({
+                "type": "status",
+                **ambient.get_status(),
+            }))
+
+        # Keep connection alive, listen for client messages
+        while True:
+            try:
+                msg = await asyncio.wait_for(ws.receive_text(), timeout=30)
+                # Handle client commands via WebSocket
+                data = json.loads(msg)
+                if data.get("command") == "ping":
+                    await ws.send_text(json.dumps({"type": "pong"}))
+            except asyncio.TimeoutError:
+                # Send keepalive
+                try:
+                    await ws.send_text(json.dumps({"type": "ping"}))
+                except Exception:
+                    break
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        _ws_clients.discard(ws)
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host=HOST, port=PORT, reload=False)
+    uvicorn.run(
+        "server:app",
+        host=HOST,
+        port=PORT,
+        reload=False,
+        timeout_keep_alive=120,   # Keep proxy connections alive longer
+    )

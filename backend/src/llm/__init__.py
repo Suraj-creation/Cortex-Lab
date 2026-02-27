@@ -83,7 +83,7 @@ class LocalLLM:
             return self._fallback_generate(prompt)
 
         t0 = time.time()
-        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=3072)
         if torch.cuda.is_available():
             inputs = {k: v.cuda() for k, v in inputs.items()}
 
@@ -102,13 +102,13 @@ class LocalLLM:
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=min(max_tokens, 1024),
+                max_new_tokens=min(max_tokens, 2048),
                 temperature=max(temperature, 0.01),
                 top_p=top_p,
                 do_sample=temperature > 0,
                 pad_token_id=self.tokenizer.eos_token_id,
                 eos_token_id=eos_ids,
-                repetition_penalty=1.2,
+                repetition_penalty=1.15,
             )
 
         generated = self.tokenizer.decode(

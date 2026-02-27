@@ -8,11 +8,8 @@ import {
   Trash2,
   Clock,
   Tag,
-  Heart,
-  FileText,
   ArrowLeft,
   Loader2,
-  ChevronDown,
 } from "lucide-react";
 import { MemoryObject } from "@/lib/types";
 import { getMemories, searchMemories, ingestMemory, deleteMemory } from "@/lib/api";

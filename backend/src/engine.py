@@ -63,6 +63,9 @@ class CortexRAGEngine:
         self.ingestion: Optional[MemoryIngestionPipeline] = None
         self.cache: Optional[MultiLevelCache] = None
 
+        # Ambient Voice Service (lazy-initialized after RAG init)
+        self.ambient_service = None
+
         # Session tracking
         self._current_session_id = ""
         self._session_context = ""
@@ -149,87 +152,46 @@ class CortexRAGEngine:
               f"Graph: {self.knowledge_graph.get_stats()}")
         print("=" * 60 + "\n")
 
+        # Initialize Ambient Voice Service (lazy — models load on first start)
+        try:
+            from src.ambient import AmbientService
+            self.ambient_service = AmbientService(
+                ingestion_pipeline=self.ingestion,
+                data_dir=self.data_dir,
+            )
+            print("  🎙️  Ambient voice service initialized (idle, ready to start)")
+        except Exception as e:
+            print(f"  ⚠ Ambient service init skipped: {e}")
+            self.ambient_service = None
+
     def set_model(self, model, tokenizer):
         """Update LLM reference (called when model finishes loading)."""
         if self.llm:
             self.llm.set_model(model, tokenizer)
 
-    # ─── RAG-Enhanced Chat ───────────────────────────────────────────────
+    # ─── Helpers ───────────────────────────────────────────────────────
 
-    async def rag_retrieve(self, user_message: str, session_id: str = "",
-                            conversation_history: List[Dict] = None) -> Dict:
-        """
-        RAG retrieval-only: ingest, retrieve evidence, analyze query.
-        Does NOT generate the final answer — caller will stream generation.
-        Used by the streaming RAG endpoint.
-        """
-        if not self.initialized:
-            return {"evidence": [], "thinking": "", "agents_used": [], "confidence": 0, "query_analysis": {}}
-
-        # Set session
-        if not session_id:
-            session_id = f"session-{int(time.time())}"
-        self._current_session_id = session_id
-
-        # Build session context
-        session_context = ""
-        if conversation_history:
-            recent = conversation_history[-6:]
-            session_context = "\n".join(
-                f"{m.get('role', 'user')}: {m.get('content', '')[:200]}"
-                for m in recent
-            )
-
-        # 1. Ingest user message
-        try:
-            await self.ingestion.ingest(
-                content=user_message,
-                session_id=session_id,
-                source="chat",
-                session_context=session_context,
-            )
-            self.hybrid_retriever.invalidate_caches()
-        except Exception as e:
-            print(f"  ⚠ Ingestion error: {e}")
-
-        # 2. Check cache
-        cached, cache_level = self.cache.get(user_message)
-        if cached:
-            return cached
-
-        # 3. Run orchestrator for retrieval + analysis
-        response = await self.orchestrator.process(user_message, session_context)
-
-        # Format evidence for streaming endpoint
-        evidence = [
-            {
-                "content": e.memory.content[:300],
-                "score": round(e.score, 3),
-                "channel": e.channel,
-                "timestamp": e.memory.timestamp.isoformat(),
-                "memory_type": e.memory.memory_type.value,
-                "emotion": e.memory.emotion.value,
-                "entities": e.memory.entities[:5],
-            }
-            for e in response.evidence[:5]
-        ]
-
-        result = {
-            "evidence": evidence,
-            "thinking": response.thinking or "",
-            "agents_used": response.agents_used,
-            "confidence": round(response.confidence, 3),
-            "query_analysis": {
-                "intent": response.query_analysis.intent.value if response.query_analysis else "unknown",
-                "complexity": round(response.query_analysis.complexity, 2) if response.query_analysis else 0,
-                "routing": response.query_analysis.routing.value if response.query_analysis else "unknown",
-            },
+    @staticmethod
+    def _is_meaningful_content(text: str) -> bool:
+        """Check if content is substantial enough to store as a memory.
+        Greetings, single words, and very short messages are NOT memories."""
+        stripped = text.strip().lower().rstrip("!?.,")
+        # Too short
+        if len(stripped) < 8 or len(stripped.split()) < 3:
+            return False
+        # Pure greetings / filler
+        trivial = {
+            "hi", "hey", "hello", "hii", "hiii", "yo", "sup", "howdy",
+            "good morning", "good evening", "good night", "good afternoon",
+            "thanks", "thank you", "ok", "okay", "bye", "goodbye",
+            "yes", "no", "yeah", "nah", "sure", "hmm", "hm", "hmmmm",
+            "what", "who", "why", "how", "when", "where",
         }
+        if stripped in trivial:
+            return False
+        return True
 
-        # Cache the retrieval result
-        self.cache.set(user_message, result)
-
-        return result
+    # ─── RAG-Enhanced Chat ───────────────────────────────────────────────
 
     async def rag_chat(self, user_message: str, session_id: str = "",
                         conversation_history: List[Dict] = None) -> Dict:
@@ -259,16 +221,17 @@ class CortexRAGEngine:
                 for m in recent
             )
 
-        # 1. Ingest user message as memory
-        memory = await self.ingestion.ingest(
-            content=user_message,
-            session_id=session_id,
-            source="chat",
-            session_context=session_context,
-        )
-
-        # Invalidate retriever caches after new ingestion
-        self.hybrid_retriever.invalidate_caches()
+        # 1. Ingest user message as memory (only if meaningful)
+        memory = None
+        if self._is_meaningful_content(user_message):
+            memory = await self.ingestion.ingest(
+                content=user_message,
+                session_id=session_id,
+                source="chat",
+                session_context=session_context,
+            )
+            # Invalidate retriever caches after new ingestion
+            self.hybrid_retriever.invalidate_caches()
 
         # 2. Check cache
         cached, cache_level = self.cache.get(user_message)
@@ -317,7 +280,7 @@ class CortexRAGEngine:
             session_id=session_id,
             role="user",
             content=user_message,
-            memory_id=memory.id,
+            memory_id=memory.id if memory else None,
         )
         self.metadata_store.store_conversation_turn(
             session_id=session_id,
@@ -335,6 +298,8 @@ class CortexRAGEngine:
         """
         RAG retrieval-only pipeline (no final generation).
         Used for streaming mode: retrieves evidence + thinking, then lets server stream.
+        Uses orchestrator.retrieve_only() to skip the expensive LLM generation step —
+        the server will stream the final answer token-by-token.
         """
         if not self.initialized:
             return {"answer": "", "evidence": [], "thinking": "RAG system initializing..."}
@@ -353,15 +318,16 @@ class CortexRAGEngine:
                 for m in recent
             )
 
-        # Ingest user message as memory
-        memory = await self.ingestion.ingest(
-            content=user_message,
-            session_id=session_id,
-            source="chat",
-            session_context=session_context,
-        )
-
-        self.hybrid_retriever.invalidate_caches()
+        # Ingest user message as memory (only if meaningful)
+        memory = None
+        if self._is_meaningful_content(user_message):
+            memory = await self.ingestion.ingest(
+                content=user_message,
+                session_id=session_id,
+                source="chat",
+                session_context=session_context,
+            )
+            self.hybrid_retriever.invalidate_caches()
 
         # Check cache
         cached, cache_level = self.cache.get(user_message)
@@ -370,12 +336,12 @@ class CortexRAGEngine:
             cached["cache_level"] = cache_level
             return cached
 
-        # Run the orchestrator pipeline
-        response = await self.orchestrator.process(user_message, session_context)
+        # Run the retrieve-only orchestrator (no LLM generation — much faster)
+        response = await self.orchestrator.retrieve_only(user_message, session_context)
 
-        # Format evidence (but don't generate final answer — caller will stream it)
+        # Format evidence (no final answer — caller will stream it)
         result = {
-            "answer": response.answer,
+            "answer": "",  # Empty — will be streamed by server
             "thinking": response.thinking,
             "evidence": [
                 {
@@ -401,15 +367,12 @@ class CortexRAGEngine:
             "cache_hit": False,
         }
 
-        # Cache result
-        self.cache.set(user_message, result)
-
-        # Store conversation turns
+        # Store conversation turns (user turn only — assistant turn stored after streaming)
         self.metadata_store.store_conversation_turn(
             session_id=session_id,
             role="user",
             content=user_message,
-            memory_id=memory.id,
+            memory_id=memory.id if memory else None,
         )
 
         return result
@@ -521,6 +484,18 @@ class CortexRAGEngine:
 
     def shutdown(self):
         """Graceful shutdown."""
+        # Stop ambient voice service
+        if self.ambient_service:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self.ambient_service.stop())
+                else:
+                    asyncio.run(self.ambient_service.stop())
+            except Exception:
+                pass
+
         self.save_all()
         if self.metadata_store:
             self.metadata_store.close()

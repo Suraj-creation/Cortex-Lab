@@ -108,6 +108,7 @@ class AgentOrchestrator:
     async def process(self, raw_query: str, session_context: str = "") -> OrchestratorResponse:
         """
         Full orchestration pipeline with fine-tuned model integration.
+        Optimized to minimize LLM calls for latency reduction.
         """
         t0 = time.time()
         print(f"\n{'='*60}")
@@ -115,11 +116,13 @@ class AgentOrchestrator:
         print(f"  📝 Query: {raw_query[:80]}...")
         print(f"{'='*60}")
 
-        # 1. Analyze query (keyword heuristics + LLM-based routing)
+        # 1. Analyze query (keyword heuristics — fast, no LLM call)
         query = self.analyzer.analyze(raw_query)
 
-        # 1b. LLM-based routing enhancement (Stage 2 fine-tuning)
-        query = await self._llm_route_query(query, session_context)
+        # 1b. Only use LLM routing when keyword analysis is truly ambiguous
+        # Skip LLM routing for clear-cut queries to save 2-4s
+        if 0.35 < query.complexity < 0.65 and self.llm.model is not None:
+            query = await self._llm_route_query(query, session_context)
 
         # 2. Transform query (add multi-query, HyDE, etc.)
         query = self.transformer.transform(query)
@@ -132,15 +135,19 @@ class AgentOrchestrator:
         else:
             response = await self._handle_multi_step(query)
 
-        # 4. CRAG quality evaluation
+        # 4. CRAG quality evaluation (fast — no LLM call, just scoring)
         response = await self._crag_evaluate(query, response)
 
-        # 5. Self-RAG ISREL/ISSUP/ISUSE reflection (Stage 4)
-        if response.evidence and response.confidence < 0.75:
+        # 5. Self-RAG reflection — ONLY if evidence quality is poor
+        # Skip entirely if confidence is already good (saves 3-6s)
+        if (response.evidence and response.confidence < 0.55
+                and len(response.answer.strip()) > 20):
             response = await self._self_rag_critique(query, response)
 
-        # 6. FLARE: Active retrieval on low-confidence segments
-        if response.confidence < 0.6 and response.evidence:
+        # 6. FLARE — ONLY for very low confidence answers
+        # This is the most expensive step; skip unless truly needed
+        if (response.confidence < 0.4 and response.evidence
+                and len(response.answer.strip()) > 20):
             response = await self._flare_active_retrieval(query, response)
 
         response.query_analysis = query
@@ -151,6 +158,72 @@ class AgentOrchestrator:
 
         print(f"\n  ✅ Response ready: confidence={response.confidence:.2f}, "
               f"agents={response.agents_used}, time={response.processing_time_ms:.0f}ms\n")
+
+        return response
+
+    async def retrieve_only(self, raw_query: str, session_context: str = "") -> OrchestratorResponse:
+        """
+        Retrieval-only pipeline: routes query, retrieves evidence, evaluates quality
+        but does NOT generate a final LLM answer. Used for streaming mode where the
+        server will stream the answer token-by-token after receiving evidence.
+        """
+        t0 = time.time()
+        print(f"\n{'='*60}")
+        print(f"  🔍 Orchestrator: Retrieve-only mode")
+        print(f"  📝 Query: {raw_query[:80]}...")
+        print(f"{'='*60}")
+
+        # 1. Analyze query
+        query = self.analyzer.analyze(raw_query)
+
+        # 1b. LLM routing only for ambiguous queries
+        if 0.35 < query.complexity < 0.65 and self.llm.model is not None:
+            query = await self._llm_route_query(query, session_context)
+
+        # 2. Transform query
+        query = self.transformer.transform(query)
+
+        # 3. Retrieve evidence (no LLM generation)
+        if query.routing == RoutingStrategy.NO_RETRIEVAL:
+            response = OrchestratorResponse(
+                answer="",
+                thinking="Simple query — no memory retrieval needed.",
+                agents_used=["direct"],
+                confidence=0.8,
+                reasoning_trace="Direct answer (retrieve-only, no evidence needed)",
+            )
+        else:
+            # Use the retriever directly to get evidence without agent LLM calls
+            results = await self.retriever.retrieve(query)
+            agent_name = self.intent_to_agent.get(query.intent, "planning")
+
+            thinking = (
+                f"Intent: {query.intent.value} (complexity: {query.complexity:.2f})\n"
+                f"Agent: {agent_name}\n"
+                f"Evidence: {len(results)} memories retrieved (retrieve-only)"
+            )
+
+            # Score-based confidence without LLM
+            avg_score = sum(r.score for r in results) / max(len(results), 1)
+            confidence = min(avg_score * 1.2, 1.0) if results else 0.3
+
+            response = OrchestratorResponse(
+                answer="",  # No answer — will be streamed by the server
+                thinking=thinking,
+                evidence=results,
+                agents_used=[agent_name],
+                confidence=confidence,
+                reasoning_trace=f"Retrieve-only: {len(results)} results via {agent_name}",
+            )
+
+        # 4. CRAG quality evaluation (fast — no LLM call)
+        response = await self._crag_evaluate(query, response)
+
+        response.query_analysis = query
+        response.processing_time_ms = (time.time() - t0) * 1000
+
+        print(f"\n  ✅ Retrieval ready: confidence={response.confidence:.2f}, "
+              f"evidence={len(response.evidence)}, time={response.processing_time_ms:.0f}ms\n")
 
         return response
 
