@@ -1,4 +1,4 @@
-import { ChatSettings, DEFAULT_SETTINGS, MemoryObject, GraphData, RAGStats, EvidenceCard, AmbientState, AmbientConfig, ConversationRecord, VoiceQueryResult, ConversationTurn } from "./types";
+import { ChatSettings, DEFAULT_SETTINGS, MemoryObject, GraphData, RAGStats, EvidenceCard, AmbientState, AmbientConfig, ConversationRecord, VoiceQueryResult, ConversationTurn, PipelineTrace, TracesResponse } from "./types";
 
 const API_BASE = "/api";
 
@@ -119,6 +119,7 @@ export async function ragChat(
   query_analysis?: { intent: string; complexity: number; routing: string };
   processing_time_ms?: number;
   cache_hit?: boolean;
+  pipeline_trace?: PipelineTrace;
 }> {
   const res = await fetch(`${API_BASE}/rag/chat`, {
     method: "POST",
@@ -150,6 +151,7 @@ export interface RAGStreamMeta {
   confidence?: number;
   query_analysis?: { intent: string; complexity: number; routing: string };
   thinking?: string;
+  pipeline_trace?: PipelineTrace;
 }
 
 export async function streamRAGMessage(
@@ -463,5 +465,19 @@ export async function voiceQuery(audioBase64: string): Promise<VoiceQueryResult>
     body: JSON.stringify({ audio_base64: audioBase64 }),
   });
   if (!res.ok) throw new Error(`Voice query failed: ${res.status}`);
+  return res.json();
+}
+
+// ── Pipeline Observability ──────────────────────────────────────
+
+export async function getPipelineTraces(limit = 20): Promise<TracesResponse> {
+  const res = await fetch(`${API_BASE}/rag/traces?limit=${limit}`);
+  if (!res.ok) throw new Error(`Failed to fetch traces: ${res.status}`);
+  return res.json();
+}
+
+export async function getPipelineTraceById(traceId: string): Promise<PipelineTrace> {
+  const res = await fetch(`${API_BASE}/rag/traces/${traceId}`);
+  if (!res.ok) throw new Error(`Failed to fetch trace: ${res.status}`);
   return res.json();
 }

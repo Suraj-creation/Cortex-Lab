@@ -7,10 +7,11 @@ import { Header } from "@/components/Header";
 import { MemoryBrowser } from "@/components/MemoryBrowser";
 import { KnowledgeGraph } from "@/components/KnowledgeGraph";
 import { RAGDashboard } from "@/components/RAGDashboard";
+import { ObservabilityDashboard } from "@/components/ObservabilityDashboard";
 import { AmbientPanel } from "@/components/AmbientPanel";
 import { ModelStatus } from "@/lib/types";
 
-type ActiveView = "chat" | "memories" | "graph" | "dashboard" | "ambient";
+type ActiveView = "chat" | "memories" | "graph" | "dashboard" | "observability" | "ambient";
 
 export default function Home() {
   const [modelStatus, setModelStatus] = useState<ModelStatus>({
@@ -157,6 +158,9 @@ export default function Home() {
         )}
         {activeView === "dashboard" && (
           <RAGDashboard onBack={() => setActiveView("chat")} />
+        )}
+        {activeView === "observability" && (
+          <ObservabilityDashboard onBack={() => setActiveView("chat")} />
         )}
         {activeView === "ambient" && (
           <AmbientPanel onBack={() => setActiveView("chat")} />

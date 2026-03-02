@@ -18,7 +18,9 @@ from typing import Dict, List, Optional
 
 from src.models import (
     AgentResponse, MemoryQuery, OrchestratorResponse, QueryIntent,
-    RetrievalQuality, RetrievalResult, RoutingStrategy
+    RetrievalQuality, RetrievalResult, RoutingStrategy,
+    PipelineTrace, PipelineStep, QueryTransformTrace,
+    CRAGEvaluation, SelfRAGCritique, FLARETrace
 )
 from src.llm import LocalLLM
 from src.retrieval.query_engine import QueryAnalyzer, QueryTransformer
@@ -109,52 +111,244 @@ class AgentOrchestrator:
         """
         Full orchestration pipeline with fine-tuned model integration.
         Optimized to minimize LLM calls for latency reduction.
+        Includes full pipeline observability trace.
         """
         t0 = time.time()
+        trace = PipelineTrace(query=raw_query)
+
         print(f"\n{'='*60}")
         print(f"  🧠 Orchestrator: Processing query")
         print(f"  📝 Query: {raw_query[:80]}...")
         print(f"{'='*60}")
 
         # 1. Analyze query (keyword heuristics — fast, no LLM call)
+        t_step = time.time()
         query = self.analyzer.analyze(raw_query)
+        analysis_ms = (time.time() - t_step) * 1000
+
+        trace.query_analysis = {
+            "intent": query.intent.value,
+            "complexity": round(query.complexity, 2),
+            "routing": query.routing.value,
+            "entities": query.entities,
+            "topics": query.topics,
+            "time_start": query.time_start.isoformat() if query.time_start else None,
+            "time_end": query.time_end.isoformat() if query.time_end else None,
+        }
+        trace.add_step(PipelineStep(
+            step_name="Query Analysis",
+            step_type="query_analysis",
+            status="completed",
+            duration_ms=analysis_ms,
+            details={
+                "intent": query.intent.value,
+                "complexity": round(query.complexity, 2),
+                "routing": query.routing.value,
+                "entities_found": len(query.entities),
+                "method": "keyword_heuristics",
+            }
+        ))
 
         # 1b. Only use LLM routing when keyword analysis is truly ambiguous
         # Skip LLM routing for clear-cut queries to save 2-4s
+        llm_routed = False
         if 0.35 < query.complexity < 0.65 and self.llm.model is not None:
+            t_step = time.time()
             query = await self._llm_route_query(query, session_context)
+            llm_route_ms = (time.time() - t_step) * 1000
+            llm_routed = True
+            trace.add_step(PipelineStep(
+                step_name="LLM Routing",
+                step_type="routing",
+                status="completed",
+                duration_ms=llm_route_ms,
+                details={
+                    "reason": "keyword_ambiguous",
+                    "refined_intent": query.intent.value,
+                    "refined_complexity": round(query.complexity, 2),
+                }
+            ))
+        else:
+            trace.add_step(PipelineStep(
+                step_name="LLM Routing",
+                step_type="routing",
+                status="skipped",
+                duration_ms=0,
+                details={"reason": "keyword_confident" if query.complexity <= 0.35 or query.complexity >= 0.65 else "no_llm"}
+            ))
 
         # 2. Transform query (add multi-query, HyDE, etc.)
+        t_step = time.time()
         query = self.transformer.transform(query)
+        transform_ms = (time.time() - t_step) * 1000
+
+        trace.query_transform = QueryTransformTrace(
+            original_query=raw_query,
+            multi_queries=query.multi_queries,
+            hyde_answer=query.hyde_answer,
+            step_back_query=query.step_back_query,
+            sub_queries=query.sub_queries,
+            total_variants=len(query.multi_queries) + (1 if query.hyde_answer else 0) + (1 if query.step_back_query else 0) + len(query.sub_queries),
+            duration_ms=transform_ms,
+        )
+        trace.add_step(PipelineStep(
+            step_name="Query Transformation",
+            step_type="query_transform",
+            status="completed",
+            duration_ms=transform_ms,
+            details={
+                "multi_queries": len(query.multi_queries),
+                "hyde_generated": bool(query.hyde_answer),
+                "step_back_generated": bool(query.step_back_query),
+                "sub_queries": len(query.sub_queries),
+                "total_variants": trace.query_transform.total_variants,
+            }
+        ))
+
+        trace.routing_decision = query.routing.value
 
         # 3. Route based on complexity
+        t_step = time.time()
         if query.routing == RoutingStrategy.NO_RETRIEVAL:
             response = await self._handle_no_retrieval(query)
+            route_label = "NO_RETRIEVAL"
         elif query.routing == RoutingStrategy.SINGLE_STEP:
             response = await self._handle_single_step(query)
+            route_label = "SINGLE_STEP"
         else:
             response = await self._handle_multi_step(query)
+            route_label = "MULTI_STEP"
+        route_ms = (time.time() - t_step) * 1000
+
+        # Collect retrieval channel traces
+        if hasattr(self.retriever, '_last_channel_traces'):
+            trace.retrieval_channels = getattr(self.retriever, '_last_channel_traces', [])
+            retrieval_trace = self.retriever.get_last_retrieval_trace()
+            trace.reranking = {
+                "method": retrieval_trace.get("rerank_method", "unknown"),
+                "duration_ms": retrieval_trace.get("rerank_ms", 0),
+                "input_count": retrieval_trace.get("fused_count", 0),
+            }
+
+        # Agent invocation trace
+        agent_name = self.intent_to_agent.get(query.intent, "planning")
+        trace.agents_invoked = [{
+            "agent": a,
+            "is_primary": a == agent_name,
+        } for a in response.agents_used]
+
+        trace.add_step(PipelineStep(
+            step_name=f"Agent Execution ({route_label})",
+            step_type="agent_execution",
+            status="completed",
+            duration_ms=route_ms,
+            details={
+                "routing": route_label,
+                "agents": response.agents_used,
+                "evidence_count": len(response.evidence),
+                "initial_confidence": round(response.confidence, 3),
+            }
+        ))
 
         # 4. CRAG quality evaluation (fast — no LLM call, just scoring)
+        t_step = time.time()
+        pre_crag_confidence = response.confidence
         response = await self._crag_evaluate(query, response)
+        crag_ms = (time.time() - t_step) * 1000
+
+        trace.add_step(PipelineStep(
+            step_name="CRAG Quality Evaluation",
+            step_type="crag",
+            status="completed",
+            duration_ms=crag_ms,
+            details={
+                "verdict": trace.crag_evaluation.verdict if trace.crag_evaluation else "no_evidence",
+                "quality_score": trace.crag_evaluation.quality_score if trace.crag_evaluation else 0,
+                "confidence_delta": round(response.confidence - pre_crag_confidence, 3),
+            }
+        ))
 
         # 5. Self-RAG reflection — ONLY if evidence quality is poor
         # Skip entirely if confidence is already good (saves 3-6s)
         if (response.evidence and response.confidence < 0.55
                 and len(response.answer.strip()) > 20):
+            t_step = time.time()
+            pre_selfrag_confidence = response.confidence
             response = await self._self_rag_critique(query, response)
+            selfrag_ms = (time.time() - t_step) * 1000
+
+            trace.add_step(PipelineStep(
+                step_name="Self-RAG Critique",
+                step_type="self_rag",
+                status="completed",
+                duration_ms=selfrag_ms,
+                details={
+                    "verdict": trace.self_rag_critique.verdict if trace.self_rag_critique else "unknown",
+                    "confidence_delta": round(response.confidence - pre_selfrag_confidence, 3),
+                    "revision_applied": trace.self_rag_critique.revision_applied if trace.self_rag_critique else False,
+                }
+            ))
+        else:
+            skip_reason = "no_evidence" if not response.evidence else (
+                "confidence_sufficient" if response.confidence >= 0.55 else "answer_too_short"
+            )
+            trace.add_step(PipelineStep(
+                step_name="Self-RAG Critique",
+                step_type="self_rag",
+                status="skipped",
+                duration_ms=0,
+                details={"reason": skip_reason, "confidence": round(response.confidence, 3)}
+            ))
 
         # 6. FLARE — ONLY for very low confidence answers
         # This is the most expensive step; skip unless truly needed
         if (response.confidence < 0.4 and response.evidence
                 and len(response.answer.strip()) > 20):
+            t_step = time.time()
+            pre_flare_confidence = response.confidence
             response = await self._flare_active_retrieval(query, response)
+            flare_ms = (time.time() - t_step) * 1000
+
+            trace.add_step(PipelineStep(
+                step_name="FLARE Active Retrieval",
+                step_type="flare",
+                status="completed",
+                duration_ms=flare_ms,
+                details={
+                    "new_evidence": trace.flare_trace.new_evidence_count if trace.flare_trace else 0,
+                    "answer_revised": trace.flare_trace.answer_revised if trace.flare_trace else False,
+                    "confidence_delta": round(response.confidence - pre_flare_confidence, 3),
+                }
+            ))
+        else:
+            skip_reason = "confidence_sufficient" if response.confidence >= 0.4 else (
+                "no_evidence" if not response.evidence else "answer_too_short"
+            )
+            trace.add_step(PipelineStep(
+                step_name="FLARE Active Retrieval",
+                step_type="flare",
+                status="skipped",
+                duration_ms=0,
+                details={"reason": skip_reason}
+            ))
 
         response.query_analysis = query
         response.processing_time_ms = (time.time() - t0) * 1000
 
         # Track token usage
         response.token_usage = self.llm.get_stats()
+
+        # Finalize trace
+        trace.total_duration_ms = response.processing_time_ms
+        trace.final_confidence = response.confidence
+        trace.evidence_count = len(response.evidence)
+        trace.token_usage = response.token_usage
+        trace.generation_details = {
+            "model": "DeepSeek-R1-7B (Fine-Tuned)",
+            "quantization": "4-bit",
+        }
+        trace.cache_status = {"hit": False, "level": None}
+        response.pipeline_trace = trace
 
         print(f"\n  ✅ Response ready: confidence={response.confidence:.2f}, "
               f"agents={response.agents_used}, time={response.processing_time_ms:.0f}ms\n")
@@ -166,24 +360,72 @@ class AgentOrchestrator:
         Retrieval-only pipeline: routes query, retrieves evidence, evaluates quality
         but does NOT generate a final LLM answer. Used for streaming mode where the
         server will stream the answer token-by-token after receiving evidence.
+        Includes pipeline trace for observability.
         """
         t0 = time.time()
+        trace = PipelineTrace(query=raw_query)
+
         print(f"\n{'='*60}")
         print(f"  🔍 Orchestrator: Retrieve-only mode")
         print(f"  📝 Query: {raw_query[:80]}...")
         print(f"{'='*60}")
 
         # 1. Analyze query
+        t_step = time.time()
         query = self.analyzer.analyze(raw_query)
+        analysis_ms = (time.time() - t_step) * 1000
+
+        trace.query_analysis = {
+            "intent": query.intent.value,
+            "complexity": round(query.complexity, 2),
+            "routing": query.routing.value,
+            "entities": query.entities,
+            "topics": query.topics,
+        }
+        trace.add_step(PipelineStep(
+            step_name="Query Analysis",
+            step_type="query_analysis",
+            status="completed",
+            duration_ms=analysis_ms,
+            details={"intent": query.intent.value, "complexity": round(query.complexity, 2), "routing": query.routing.value}
+        ))
 
         # 1b. LLM routing only for ambiguous queries
         if 0.35 < query.complexity < 0.65 and self.llm.model is not None:
+            t_step = time.time()
             query = await self._llm_route_query(query, session_context)
+            trace.add_step(PipelineStep(
+                step_name="LLM Routing", step_type="routing", status="completed",
+                duration_ms=(time.time() - t_step) * 1000,
+                details={"refined_intent": query.intent.value}
+            ))
+        else:
+            trace.add_step(PipelineStep(step_name="LLM Routing", step_type="routing", status="skipped"))
 
         # 2. Transform query
+        t_step = time.time()
         query = self.transformer.transform(query)
+        transform_ms = (time.time() - t_step) * 1000
+
+        trace.query_transform = QueryTransformTrace(
+            original_query=raw_query,
+            multi_queries=query.multi_queries,
+            hyde_answer=query.hyde_answer,
+            step_back_query=query.step_back_query,
+            sub_queries=query.sub_queries,
+            total_variants=len(query.multi_queries) + (1 if query.hyde_answer else 0) + (1 if query.step_back_query else 0) + len(query.sub_queries),
+            duration_ms=transform_ms,
+        )
+        trace.add_step(PipelineStep(
+            step_name="Query Transformation", step_type="query_transform", status="completed",
+            duration_ms=transform_ms,
+            details={"total_variants": trace.query_transform.total_variants}
+        ))
+
+        trace.routing_decision = query.routing.value
 
         # 3. Retrieve evidence (no LLM generation)
+        t_step = time.time()
         if query.routing == RoutingStrategy.NO_RETRIEVAL:
             response = OrchestratorResponse(
                 answer="",
@@ -216,11 +458,49 @@ class AgentOrchestrator:
                 reasoning_trace=f"Retrieve-only: {len(results)} results via {agent_name}",
             )
 
+        retrieve_ms = (time.time() - t_step) * 1000
+
+        # Collect retrieval channel traces
+        if hasattr(self.retriever, '_last_channel_traces'):
+            trace.retrieval_channels = getattr(self.retriever, '_last_channel_traces', [])
+            retrieval_trace = self.retriever.get_last_retrieval_trace()
+            trace.reranking = {
+                "method": retrieval_trace.get("rerank_method", "unknown"),
+                "duration_ms": retrieval_trace.get("rerank_ms", 0),
+            }
+
+        trace.add_step(PipelineStep(
+            step_name="Evidence Retrieval", step_type="agent_execution", status="completed",
+            duration_ms=retrieve_ms,
+            details={"evidence_count": len(response.evidence), "mode": "retrieve_only"}
+        ))
+
         # 4. CRAG quality evaluation (fast — no LLM call)
+        t_step = time.time()
         response = await self._crag_evaluate(query, response)
+        crag_ms = (time.time() - t_step) * 1000
+
+        trace.add_step(PipelineStep(
+            step_name="CRAG Quality Evaluation", step_type="crag", status="completed",
+            duration_ms=crag_ms,
+            details={"verdict": trace.crag_evaluation.verdict if trace.crag_evaluation else "no_evidence"}
+        ))
+
+        # Self-RAG and FLARE are skipped in retrieve-only mode
+        trace.add_step(PipelineStep(step_name="Self-RAG Critique", step_type="self_rag", status="skipped",
+                                     details={"reason": "retrieve_only_mode"}))
+        trace.add_step(PipelineStep(step_name="FLARE Active Retrieval", step_type="flare", status="skipped",
+                                     details={"reason": "retrieve_only_mode"}))
 
         response.query_analysis = query
         response.processing_time_ms = (time.time() - t0) * 1000
+
+        # Finalize trace
+        trace.total_duration_ms = response.processing_time_ms
+        trace.final_confidence = response.confidence
+        trace.evidence_count = len(response.evidence)
+        trace.cache_status = {"hit": False, "level": None}
+        response.pipeline_trace = trace
 
         print(f"\n  ✅ Retrieval ready: confidence={response.confidence:.2f}, "
               f"evidence={len(response.evidence)}, time={response.processing_time_ms:.0f}ms\n")
@@ -415,8 +695,14 @@ Agent Analyses:
         → CORRECT: Use as is
         → AMBIGUOUS: Supplement with more retrieval
         → INCORRECT: Refine and caveat
+        Populates pipeline trace with CRAG evaluation details.
         """
         if not response.evidence:
+            # No evidence — populate trace and return
+            if response.pipeline_trace:
+                response.pipeline_trace.crag_evaluation = CRAGEvaluation(
+                    quality_score=0.0, verdict="NO_EVIDENCE", evidence_count=0,
+                )
             return response
 
         # Multi-signal quality evaluation
@@ -443,10 +729,13 @@ Agent Analyses:
             0.20 * entity_coverage
         )
 
+        supplementary_count = 0
+
         if quality_score > 0.55:
+            verdict = "CORRECT"
             response.reasoning_trace += f" | CRAG: CORRECT (q={quality_score:.2f})"
-            return response
         elif quality_score > 0.30:
+            verdict = "AMBIGUOUS"
             response.reasoning_trace += f" | CRAG: AMBIGUOUS (q={quality_score:.2f})"
             response.confidence *= 0.85
 
@@ -467,15 +756,29 @@ Agent Analyses:
                             response.evidence.append(r)
                             existing_ids.add(r.memory.id)
                             added += 1
+                    supplementary_count = added
                     response.reasoning_trace += f" → +{added} from step-back"
                 except Exception:
                     pass
         else:
+            verdict = "INCORRECT"
             response.reasoning_trace += f" | CRAG: INCORRECT (q={quality_score:.2f})"
             response.confidence *= 0.55
             response.answer = (
                 "⚠️ *Limited relevant memories found. Based on partial information:*\n\n"
                 + response.answer
+            )
+
+        # Populate trace
+        if response.pipeline_trace:
+            response.pipeline_trace.crag_evaluation = CRAGEvaluation(
+                quality_score=quality_score,
+                verdict=verdict,
+                avg_evidence_score=avg_score,
+                max_evidence_score=max_score,
+                evidence_count=evidence_count,
+                entity_coverage=entity_coverage,
+                supplementary_retrieved=supplementary_count,
             )
 
         return response
@@ -485,6 +788,7 @@ Agent Analyses:
         """
         Self-RAG with ISREL/ISSUP/ISUSE critique tokens (Stage 4 fine-tuning).
         Generate → Critique → Revise loop (max 2 iterations).
+        Populates pipeline trace with critique details.
         """
         if self.llm.model is None:
             return response
@@ -492,6 +796,8 @@ Agent Analyses:
         evidence_texts = [r.memory.content[:200] for r in response.evidence[:5]]
         if not evidence_texts:
             return response
+
+        critique_trace = SelfRAGCritique()
 
         try:
             # Use fine-tuned ISREL/ISSUP/ISUSE critique
@@ -505,6 +811,12 @@ Agent Analyses:
             avg = critique.get("avg_score", 5.0)
             verdict = critique.get("verdict", "REVISE")
 
+            critique_trace.isrel = isrel
+            critique_trace.issup = issup
+            critique_trace.isuse = isuse
+            critique_trace.avg_score = avg
+            critique_trace.verdict = verdict
+
             response.reasoning_trace += f" | Self-RAG: R={isrel}/S={issup}/U={isuse} ({verdict})"
 
             if verdict == "ACCEPT" or avg >= 7.0:
@@ -514,6 +826,8 @@ Agent Analyses:
                 weak = "relevance" if isrel <= issup and isrel <= isuse else (
                     "faithfulness" if issup <= isuse else "completeness"
                 )
+                critique_trace.revision_focus = weak
+
                 revision_prompt = f"""<|im_start|>system
 Revise this answer to improve {weak}. Be grounded in the evidence.
 <|im_end|>
@@ -531,12 +845,18 @@ Improved answer (focus on {weak}):
                     response.answer = revised.strip()
                     response.reasoning_trace += f" → revised ({weak})"
                     response.confidence = min(response.confidence + 0.05, 0.85)
+                    critique_trace.revision_applied = True
             else:
                 response.confidence = max(response.confidence - 0.15, 0.25)
                 response.reasoning_trace += " (low quality)"
 
         except Exception as e:
             response.reasoning_trace += f" | Self-RAG error: {str(e)[:50]}"
+            critique_trace.verdict = f"ERROR: {str(e)[:50]}"
+
+        # Populate trace
+        if response.pipeline_trace:
+            response.pipeline_trace.self_rag_critique = critique_trace
 
         return response
 
@@ -546,18 +866,24 @@ Improved answer (focus on {weak}):
         FLARE: Forward-Looking Active Retrieval (EMNLP 2023).
         Identifies low-confidence segments in the answer and retrieves
         additional evidence to fill gaps.
+        Populates pipeline trace with FLARE details.
         """
         if self.llm.model is None or not response.answer:
             return response
+
+        flare = FLARETrace(triggered=True)
+        pre_confidence = response.confidence
 
         try:
             # Split answer into sentences
             sentences = re.split(r'(?<=[.!?])\s+', response.answer)
             if len(sentences) < 2:
+                flare.triggered = False
+                if response.pipeline_trace:
+                    response.pipeline_trace.flare_trace = flare
                 return response
 
             # Identify sentences that might need more evidence
-            # (hedging language, vague claims, question marks)
             uncertain_markers = [
                 "might", "possibly", "perhaps", "unclear", "not sure",
                 "limited", "insufficient", "partial", "?", "may have",
@@ -568,7 +894,12 @@ Improved answer (focus on {weak}):
                 if any(marker in sent.lower() for marker in uncertain_markers):
                     sentences_to_verify.append((i, sent))
 
+            flare.uncertain_sentences = len(sentences_to_verify)
+
             if not sentences_to_verify:
+                flare.triggered = False
+                if response.pipeline_trace:
+                    response.pipeline_trace.flare_trace = flare
                 return response
 
             # Retrieve additional evidence for uncertain segments
@@ -582,6 +913,7 @@ Improved answer (focus on {weak}):
                 )
                 results = await self.retriever.retrieve(flare_query, top_k=3)
                 additional_evidence.extend(results)
+                flare.retrieval_iterations += 1
 
             if additional_evidence:
                 # Deduplicate
@@ -590,7 +922,7 @@ Improved answer (focus on {weak}):
 
                 if new_evidence:
                     response.evidence.extend(new_evidence[:3])
-                    new_evidence_texts = [r.memory.content[:200] for r in new_evidence[:3]]
+                    flare.new_evidence_count = len(new_evidence[:3])
 
                     # Re-generate with augmented evidence
                     all_evidence_texts = (
@@ -603,9 +935,16 @@ Improved answer (focus on {weak}):
                         response.answer = revised.strip()
                         response.confidence = min(response.confidence + 0.1, 0.85)
                         response.reasoning_trace += f" | FLARE: +{len(new_evidence)} evidence"
+                        flare.answer_revised = True
 
         except Exception as e:
             response.reasoning_trace += f" | FLARE error: {str(e)[:50]}"
+
+        flare.confidence_delta = response.confidence - pre_confidence
+
+        # Populate trace
+        if response.pipeline_trace:
+            response.pipeline_trace.flare_trace = flare
 
         return response
 

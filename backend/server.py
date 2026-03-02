@@ -614,6 +614,9 @@ async def rag_chat(req: RAGChatRequest):
                 timeout=_REQUEST_TIMEOUT,
             )
 
+            # Store trace for observability history
+            _store_trace(result.get("pipeline_trace"))
+
             return {
                 "id": f"rag-{uuid.uuid4().hex[:12]}",
                 "model": model_info.get("name", MODEL_NAME),
@@ -626,6 +629,7 @@ async def rag_chat(req: RAGChatRequest):
                 "query_analysis": result.get("query_analysis", {}),
                 "processing_time_ms": result.get("processing_time_ms", 0),
                 "cache_hit": result.get("cache_hit", False),
+                "pipeline_trace": result.get("pipeline_trace", None),
             }
         except asyncio.TimeoutError:
             raise HTTPException(504, "Request timed out after 90 seconds")
@@ -667,9 +671,13 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
                 "confidence": confidence,
                 "query_analysis": query_analysis,
                 "thinking": thinking,
+                "pipeline_trace": rag_result.get("pipeline_trace", None),
             }
         }
         yield f"data: {json.dumps(meta_chunk)}\n\n"
+
+        # Store trace for observability history
+        _store_trace(rag_result.get("pipeline_trace"))
 
         # Step 2: Build prompt with evidence context for streaming generation
         # Filter out query-echo evidence (user questions stored as memories)
@@ -920,6 +928,97 @@ async def rag_health():
         "rag_initialized": rag_engine.initialized,
         "stats": rag_engine.get_rag_stats() if rag_engine.initialized else {},
     }
+
+
+# ── Pipeline Trace History (Observability) ──────────────────────────────────
+
+# In-memory ring buffer for recent pipeline traces (last 100)
+_trace_history: List[dict] = []
+_TRACE_MAX_HISTORY = 100
+
+def _store_trace(trace_dict: dict):
+    """Store a pipeline trace in the history ring buffer."""
+    if trace_dict:
+        _trace_history.append(trace_dict)
+        if len(_trace_history) > _TRACE_MAX_HISTORY:
+            _trace_history.pop(0)
+
+
+@app.get("/api/rag/traces")
+async def get_pipeline_traces(limit: int = Query(20, ge=1, le=100)):
+    """Get recent pipeline traces for observability dashboard."""
+    traces = _trace_history[-limit:]
+    traces.reverse()  # Most recent first
+
+    # Compute aggregate analytics
+    if traces:
+        total_durations = [t.get("total_duration_ms", 0) for t in traces]
+        avg_duration = sum(total_durations) / len(total_durations)
+        avg_confidence = sum(t.get("final_confidence", 0) for t in traces) / len(traces)
+        avg_evidence = sum(t.get("evidence_count", 0) for t in traces) / len(traces)
+
+        # Channel usage breakdown across all traces
+        channel_totals: dict = {}
+        for t in traces:
+            for ch in t.get("retrieval_channels", []):
+                name = ch.get("channel", "unknown")
+                if name not in channel_totals:
+                    channel_totals[name] = {"total_results": 0, "total_duration_ms": 0.0, "usage_count": 0}
+                channel_totals[name]["total_results"] += ch.get("result_count", 0)
+                channel_totals[name]["total_duration_ms"] += ch.get("duration_ms", 0)
+                channel_totals[name]["usage_count"] += 1 if ch.get("result_count", 0) > 0 else 0
+
+        # Step frequency analysis
+        step_stats: dict = {}
+        for t in traces:
+            for step in t.get("steps", []):
+                stype = step.get("step_type", "unknown")
+                if stype not in step_stats:
+                    step_stats[stype] = {"completed": 0, "skipped": 0, "total_duration_ms": 0.0}
+                if step.get("status") == "completed":
+                    step_stats[stype]["completed"] += 1
+                    step_stats[stype]["total_duration_ms"] += step.get("duration_ms", 0)
+                elif step.get("status") == "skipped":
+                    step_stats[stype]["skipped"] += 1
+
+        # CRAG/Self-RAG/FLARE activation rates
+        crag_activated = sum(1 for t in traces if t.get("crag_evaluation") is not None)
+        selfrag_activated = sum(1 for t in traces if t.get("self_rag_critique") is not None)
+        flare_activated = sum(1 for t in traces if t.get("flare_trace") is not None)
+        cache_hits = sum(1 for t in traces if t.get("cache_status", {}).get("hit", False))
+
+        analytics = {
+            "total_traces": len(_trace_history),
+            "showing": len(traces),
+            "avg_duration_ms": round(avg_duration, 1),
+            "avg_confidence": round(avg_confidence, 3),
+            "avg_evidence_count": round(avg_evidence, 1),
+            "channel_usage": channel_totals,
+            "step_stats": step_stats,
+            "crag_activation_rate": round(crag_activated / len(traces), 3) if traces else 0,
+            "selfrag_activation_rate": round(selfrag_activated / len(traces), 3) if traces else 0,
+            "flare_activation_rate": round(flare_activated / len(traces), 3) if traces else 0,
+            "cache_hit_rate": round(cache_hits / len(traces), 3) if traces else 0,
+        }
+    else:
+        analytics = {
+            "total_traces": 0, "showing": 0,
+            "avg_duration_ms": 0, "avg_confidence": 0, "avg_evidence_count": 0,
+            "channel_usage": {}, "step_stats": {},
+            "crag_activation_rate": 0, "selfrag_activation_rate": 0,
+            "flare_activation_rate": 0, "cache_hit_rate": 0,
+        }
+
+    return {"traces": traces, "analytics": analytics}
+
+
+@app.get("/api/rag/traces/{trace_id}")
+async def get_pipeline_trace(trace_id: str):
+    """Get a specific pipeline trace by ID."""
+    for t in _trace_history:
+        if t.get("trace_id") == trace_id:
+            return t
+    raise HTTPException(404, f"Trace {trace_id} not found")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

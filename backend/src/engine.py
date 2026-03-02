@@ -442,6 +442,7 @@ class CortexRAGEngine:
             },
             "processing_time_ms": round(response.processing_time_ms, 1),
             "cache_hit": False,
+            "pipeline_trace": response.pipeline_trace.to_dict() if response.pipeline_trace else None,
         }
 
         # 5. Cache result
@@ -527,6 +528,7 @@ class CortexRAGEngine:
             },
             "processing_time_ms": round(response.processing_time_ms, 1),
             "cache_hit": False,
+            "pipeline_trace": response.pipeline_trace.to_dict() if response.pipeline_trace else None,
         }
 
         # User turn is stored in background ingestion; assistant turn stored after streaming

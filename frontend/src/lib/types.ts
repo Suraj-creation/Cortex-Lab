@@ -19,6 +19,8 @@ export interface ChatMessage {
   queryAnalysis?: QueryAnalysis;
   processingTimeMs?: number;
   cacheHit?: boolean;
+  // Pipeline observability
+  pipelineTrace?: PipelineTrace;
 }
 
 export interface EvidenceCard {
@@ -35,6 +37,98 @@ export interface QueryAnalysis {
   intent: string;
   complexity: number;
   routing: string;
+}
+
+// ── Pipeline Observability Types ────────────────────────────────
+
+export interface PipelineStep {
+  step_name: string;
+  step_type: string;
+  status: "completed" | "skipped" | "error" | "pending" | "running";
+  duration_ms: number;
+  details: Record<string, unknown>;
+  sub_steps?: PipelineStep[];
+}
+
+export interface RetrievalChannelTrace {
+  channel: string;
+  result_count: number;
+  top_score: number;
+  avg_score: number;
+  duration_ms: number;
+}
+
+export interface CRAGEvaluation {
+  quality_score: number;
+  verdict: string;
+  avg_evidence_score: number;
+  max_evidence_score: number;
+  evidence_count: number;
+  entity_coverage: number;
+  supplementary_retrieved: number;
+}
+
+export interface SelfRAGCritique {
+  isrel: number;
+  issup: number;
+  isuse: number;
+  avg_score: number;
+  verdict: string;
+  revision_applied: boolean;
+  revision_focus: string;
+}
+
+export interface FLARETrace {
+  triggered: boolean;
+  uncertain_sentences: number;
+  retrieval_iterations: number;
+  new_evidence_count: number;
+  answer_revised: boolean;
+  confidence_delta: number;
+}
+
+export interface QueryTransformTrace {
+  original_query: string;
+  multi_queries: string[];
+  hyde_answer: string;
+  step_back_query: string;
+  sub_queries: string[];
+  total_variants: number;
+  duration_ms: number;
+}
+
+export interface PipelineTrace {
+  trace_id: string;
+  timestamp: string;
+  query: string;
+  total_duration_ms: number;
+  steps: PipelineStep[];
+  query_analysis: {
+    intent: string;
+    complexity: number;
+    routing: string;
+    entities?: string[];
+    topics?: string[];
+    time_start?: string | null;
+    time_end?: string | null;
+  };
+  query_transform?: QueryTransformTrace | null;
+  retrieval_channels: RetrievalChannelTrace[];
+  reranking: {
+    method: string;
+    duration_ms: number;
+    input_count?: number;
+  };
+  crag_evaluation?: CRAGEvaluation | null;
+  self_rag_critique?: SelfRAGCritique | null;
+  flare_trace?: FLARETrace | null;
+  routing_decision: string;
+  agents_invoked: { agent: string; is_primary: boolean }[];
+  generation_details: Record<string, unknown>;
+  cache_status: { hit: boolean; level: string | null };
+  final_confidence: number;
+  evidence_count: number;
+  token_usage: Record<string, number>;
 }
 
 export interface MemoryObject {
@@ -243,4 +337,37 @@ export interface VoiceQueryResult {
   audio_base64: string | null;
   language: string;
   stt_confidence: number;
+}
+
+// ── Observability Analytics Types ───────────────────────────────
+
+export interface ChannelUsageStat {
+  total_results: number;
+  total_duration_ms: number;
+  usage_count: number;
+}
+
+export interface StepStat {
+  completed: number;
+  skipped: number;
+  total_duration_ms: number;
+}
+
+export interface TraceAnalytics {
+  total_traces: number;
+  showing: number;
+  avg_duration_ms: number;
+  avg_confidence: number;
+  avg_evidence_count: number;
+  channel_usage: Record<string, ChannelUsageStat>;
+  step_stats: Record<string, StepStat>;
+  crag_activation_rate: number;
+  selfrag_activation_rate: number;
+  flare_activation_rate: number;
+  cache_hit_rate: number;
+}
+
+export interface TracesResponse {
+  traces: PipelineTrace[];
+  analytics: TraceAnalytics;
 }

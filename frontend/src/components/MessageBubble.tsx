@@ -21,6 +21,7 @@ import {
   Timer,
 } from "lucide-react";
 import { TTSPlayback } from "./TTSPlayback";
+import { PipelineTracePanel } from "./PipelineTracePanel";
 
 interface Props {
   message: ChatMessage;
@@ -329,6 +330,11 @@ export const MessageBubble = memo(function MessageBubble({ message }: Props) {
                 </span>
               )}
             </div>
+          )}
+
+          {/* Pipeline Trace Observability Panel */}
+          {!isUser && !message.isStreaming && message.pipelineTrace && (
+            <PipelineTracePanel trace={message.pipelineTrace} />
           )}
 
           {/* Footer: usage + actions */}

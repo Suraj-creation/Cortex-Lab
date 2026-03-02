@@ -152,6 +152,7 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
                       agentsUsed: meta.agents_used || m.agentsUsed,
                       confidence: meta.confidence ?? m.confidence,
                       queryAnalysis: meta.query_analysis || m.queryAnalysis,
+                      pipelineTrace: meta.pipeline_trace || m.pipelineTrace,
                     }
                   : m,
               ),
@@ -200,6 +201,7 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
             queryAnalysis: res.query_analysis,
             processingTimeMs: res.processing_time_ms,
             cacheHit: res.cache_hit,
+            pipelineTrace: res.pipeline_trace,
           };
           setMessages((prev) => [...prev, assistantMsg]);
         } catch (err: unknown) {

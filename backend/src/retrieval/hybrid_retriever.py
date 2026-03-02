@@ -23,7 +23,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from src.models import (
-    CausalMemoryObject, MemoryQuery, QueryIntent, RetrievalResult
+    CausalMemoryObject, MemoryQuery, QueryIntent, RetrievalResult,
+    RetrievalChannelTrace
 )
 from src.models.embeddings import EmbeddingModel, CrossEncoderReranker
 from src.storage.vector_store import VectorStore
@@ -82,19 +83,32 @@ class HybridRetriever:
         """
         t0 = time.time()
 
-        # Run all channels concurrently
-        dense_task = asyncio.create_task(self._dense_retrieve(query, top_k * 2))
-        sparse_task = asyncio.create_task(self._sparse_retrieve(query, top_k * 2))
-        graph_task = asyncio.create_task(self._graph_retrieve(query, top_k * 2))
-        temporal_task = asyncio.create_task(self._temporal_retrieve(query, top_k * 2))
-        proposition_task = asyncio.create_task(self._proposition_retrieve(query, top_k * 2))
+        # Timed wrapper for per-channel observability
+        async def _timed(name: str, coro):
+            t = time.time()
+            result = await coro
+            duration = (time.time() - t) * 1000
+            return name, result, duration
 
-        # Await all
-        dense_results = await dense_task
-        sparse_results = await sparse_task
-        graph_results = await graph_task
-        temporal_results = await temporal_task
-        proposition_results = await proposition_task
+        # Run all channels concurrently with per-channel timing
+        channel_tasks = await asyncio.gather(
+            _timed("dense", self._dense_retrieve(query, top_k * 2)),
+            _timed("sparse", self._sparse_retrieve(query, top_k * 2)),
+            _timed("graph", self._graph_retrieve(query, top_k * 2)),
+            _timed("temporal", self._temporal_retrieve(query, top_k * 2)),
+            _timed("proposition", self._proposition_retrieve(query, top_k * 2)),
+        )
+
+        # Unpack timed results
+        channel_timings = {}
+        dense_results = sparse_results = graph_results = temporal_results = proposition_results = []
+        for name, results, duration in channel_tasks:
+            channel_timings[name] = duration
+            if name == "dense": dense_results = results
+            elif name == "sparse": sparse_results = results
+            elif name == "graph": graph_results = results
+            elif name == "temporal": temporal_results = results
+            elif name == "proposition": proposition_results = results
 
         # Fuse with RRF
         all_channels = {
@@ -108,13 +122,41 @@ class HybridRetriever:
         fused = self._rrf_fusion(all_channels, top_k * 2)  # Over-retrieve for reranking
 
         # Cross-encoder reranking on the fused results
+        t_rerank = time.time()
         fused = self._cross_encoder_rerank(query, fused, top_k)
+        rerank_ms = (time.time() - t_rerank) * 1000
 
         elapsed = (time.time() - t0) * 1000
         channel_counts = {k: len(v) for k, v in all_channels.items()}
         print(f"  🔎 Retrieved: {channel_counts} → {len(fused)} fused+reranked ({elapsed:.0f}ms)")
 
+        # Build channel traces for observability (with real per-channel timing)
+        self._last_channel_traces = []
+        for ch_name, ch_results in all_channels.items():
+            scores = [s for _, s in ch_results] if ch_results else []
+            self._last_channel_traces.append(RetrievalChannelTrace(
+                channel=ch_name,
+                result_count=len(ch_results),
+                top_score=round(max(scores), 4) if scores else 0.0,
+                avg_score=round(sum(scores) / len(scores), 4) if scores else 0.0,
+                duration_ms=round(channel_timings.get(ch_name, 0.0), 1),
+            ))
+        self._last_retrieval_ms = elapsed
+        self._last_rerank_ms = rerank_ms
+        self._last_rerank_method = "cross_encoder" if (self.reranker and self.reranker.model is not None) else "embedding_fallback"
+        self._last_fused_count = len(fused)
+
         return fused
+
+    def get_last_retrieval_trace(self) -> dict:
+        """Return the last retrieval operation's trace data for observability."""
+        return {
+            "channels": [c.to_dict() for c in getattr(self, '_last_channel_traces', [])],
+            "total_ms": round(getattr(self, '_last_retrieval_ms', 0), 1),
+            "rerank_ms": round(getattr(self, '_last_rerank_ms', 0), 1),
+            "rerank_method": getattr(self, '_last_rerank_method', 'unknown'),
+            "fused_count": getattr(self, '_last_fused_count', 0),
+        }
 
     def retrieve_sync(self, query: MemoryQuery, top_k: int = 20) -> List[RetrievalResult]:
         """Synchronous wrapper for retrieve."""

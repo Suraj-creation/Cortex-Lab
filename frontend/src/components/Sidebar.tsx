@@ -8,6 +8,7 @@ import {
   Network,
   BarChart3,
   Mic,
+  Activity,
 } from "lucide-react";
 
 interface Conversation {
@@ -16,7 +17,7 @@ interface Conversation {
   date: string;
 }
 
-type ActiveView = "chat" | "memories" | "graph" | "dashboard" | "ambient";
+type ActiveView = "chat" | "memories" | "graph" | "dashboard" | "observability" | "ambient";
 
 interface Props {
   open: boolean;
@@ -45,6 +46,7 @@ export function Sidebar({
     { view: "memories", icon: Brain, label: "Memory Browser" },
     { view: "graph", icon: Network, label: "Knowledge Graph" },
     { view: "dashboard", icon: BarChart3, label: "RAG Dashboard" },
+    { view: "observability", icon: Activity, label: "Pipeline Observability" },
     { view: "ambient", icon: Mic, label: "Ambient Listening" },
   ];
 
