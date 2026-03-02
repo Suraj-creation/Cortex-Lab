@@ -10,6 +10,8 @@ import time
 from datetime import datetime
 from typing import Dict, List, Optional
 
+import torch
+
 from src.models import (
     CausalMemoryObject, MemoryQuery, OrchestratorResponse,
     RetrievalResult, BeliefDelta
@@ -82,13 +84,17 @@ class CortexRAGEngine:
         print("=" * 60)
 
         # 1. Embedding Model (BGE-large-en-v1.5, 1024d)
+        # Move to GPU if available — 1.3GB fits within 13GB headroom (§5.2, §6.3)
         print("\n[1/10] Embedding Model (BGE-large-en-v1.5)...")
-        self.embedding_model = EmbeddingModel(device="cpu")
-        print(f"  → {self.embedding_model.dimension}d embeddings")
+        _embed_device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.embedding_model = EmbeddingModel(device=_embed_device)
+        print(f"  → {self.embedding_model.dimension}d embeddings on {_embed_device}")
 
         # 2. Cross-Encoder Reranker (BGE-reranker-v2-m3)
+        # Move to GPU if available — 560MB fits within GPU headroom (§6.3)
         print("[2/10] Cross-Encoder Reranker...")
-        self.reranker = CrossEncoderReranker(device="cpu")
+        _rerank_device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.reranker = CrossEncoderReranker(device=_rerank_device)
 
         # 3. Vector Store
         print("[3/10] Vector Store...")
@@ -144,6 +150,12 @@ class CortexRAGEngine:
         except Exception as e:
             print(f"  ⚠ Tier migration skipped: {e}")
 
+        # Migrate junction tables for indexed topic/entity lookups (§4.1)
+        try:
+            self.metadata_store.migrate_junction_tables()
+        except Exception as e:
+            print(f"  ⚠ Junction table migration skipped: {e}")
+
         self.initialized = True
         elapsed = time.time() - t0
         print(f"\n  ✅ RAG Engine v2.0 ready in {elapsed:.1f}s")
@@ -191,6 +203,28 @@ class CortexRAGEngine:
             return False
         return True
 
+    async def _background_ingest(self, content: str, session_id: str,
+                                  session_context: str = ""):
+        """Background ingestion task (§5.1) — enriches memory without blocking chat."""
+        try:
+            memory = await self.ingestion.ingest(
+                content=content,
+                session_id=session_id,
+                source="chat",
+                session_context=session_context,
+            )
+            # Invalidate retriever caches after new ingestion
+            self.hybrid_retriever.invalidate_caches()
+            # Store user conversation turn
+            self.metadata_store.store_conversation_turn(
+                session_id=session_id,
+                role="user",
+                content=content,
+                memory_id=memory.id if memory else None,
+            )
+        except Exception as e:
+            print(f"  ⚠ Background ingestion error: {e}")
+
     # ─── RAG-Enhanced Chat ───────────────────────────────────────────────
 
     async def rag_chat(self, user_message: str, session_id: str = "",
@@ -221,17 +255,12 @@ class CortexRAGEngine:
                 for m in recent
             )
 
-        # 1. Ingest user message as memory (only if meaningful)
+        # 1. Ingest user message as memory in background (§5.1) — don't block chat
         memory = None
         if self._is_meaningful_content(user_message):
-            memory = await self.ingestion.ingest(
-                content=user_message,
-                session_id=session_id,
-                source="chat",
-                session_context=session_context,
-            )
-            # Invalidate retriever caches after new ingestion
-            self.hybrid_retriever.invalidate_caches()
+            asyncio.create_task(self._background_ingest(
+                user_message, session_id, session_context
+            ))
 
         # 2. Check cache
         cached, cache_level = self.cache.get(user_message)
@@ -275,13 +304,7 @@ class CortexRAGEngine:
         # 5. Cache result
         self.cache.set(user_message, result)
 
-        # 6. Store conversation turn
-        self.metadata_store.store_conversation_turn(
-            session_id=session_id,
-            role="user",
-            content=user_message,
-            memory_id=memory.id if memory else None,
-        )
+        # 6. Store assistant conversation turn (user turn stored in background ingestion)
         self.metadata_store.store_conversation_turn(
             session_id=session_id,
             role="assistant",
@@ -318,16 +341,12 @@ class CortexRAGEngine:
                 for m in recent
             )
 
-        # Ingest user message as memory (only if meaningful)
+        # Ingest user message as memory in background (§5.1) — don't block retrieval
         memory = None
         if self._is_meaningful_content(user_message):
-            memory = await self.ingestion.ingest(
-                content=user_message,
-                session_id=session_id,
-                source="chat",
-                session_context=session_context,
-            )
-            self.hybrid_retriever.invalidate_caches()
+            asyncio.create_task(self._background_ingest(
+                user_message, session_id, session_context
+            ))
 
         # Check cache
         cached, cache_level = self.cache.get(user_message)
@@ -367,13 +386,7 @@ class CortexRAGEngine:
             "cache_hit": False,
         }
 
-        # Store conversation turns (user turn only — assistant turn stored after streaming)
-        self.metadata_store.store_conversation_turn(
-            session_id=session_id,
-            role="user",
-            content=user_message,
-            memory_id=memory.id if memory else None,
-        )
+        # User turn is stored in background ingestion; assistant turn stored after streaming
 
         return result
 

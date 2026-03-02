@@ -33,6 +33,10 @@ class KnowledgeGraph:
         self.data_dir = data_dir
         os.makedirs(data_dir, exist_ok=True)
 
+        # Inverted name/alias index for O(1) entity lookups (§3.5)
+        self._name_index: Dict[str, str] = {}   # lowercase_name -> entity_id
+        self._alias_index: Dict[str, str] = {}  # lowercase_alias -> entity_id
+
         if HAS_NX:
             self.graph = nx.DiGraph()
             print("  ✓ Knowledge graph initialized (NetworkX)")
@@ -43,6 +47,7 @@ class KnowledgeGraph:
             print("  ⚠ NetworkX not available, using basic graph fallback")
 
         self._load()
+        self._rebuild_name_index()
 
     def add_entity(self, entity: EntityNode):
         """Add or update an entity node."""
@@ -64,6 +69,10 @@ class KnowledgeGraph:
                 "entity_type": entity.entity_type,
                 "memory_ids": entity.memory_ids,
             }
+        # Update name/alias index (§3.5)
+        self._name_index[entity.canonical_name.lower()] = entity.id
+        for alias in entity.aliases:
+            self._alias_index[alias.lower()] = entity.id
 
     def add_edge(self, edge: GraphEdge):
         """Add or update a relationship edge."""
@@ -167,22 +176,20 @@ class KnowledgeGraph:
         return []
 
     def find_entity_by_name(self, name: str) -> Optional[str]:
-        """Find entity ID by canonical name, alias, or fuzzy match."""
+        """Find entity ID by canonical name, alias, or fuzzy match.
+        Uses O(1) inverted index for exact/alias matches (§3.5)."""
+        name_lower = name.lower()
+
+        # Stage 1: O(1) exact match on canonical name via index
+        if name_lower in self._name_index:
+            return self._name_index[name_lower]
+
+        # Stage 2: O(1) exact match on aliases via index
+        if name_lower in self._alias_index:
+            return self._alias_index[name_lower]
+
+        # Stage 3: Fuzzy matching (only when index misses — rare)
         if self.graph is not None:
-            name_lower = name.lower()
-
-            # Stage 1: Exact match on canonical name
-            for node_id, data in self.graph.nodes(data=True):
-                if data.get("canonical_name", "").lower() == name_lower:
-                    return node_id
-
-            # Stage 2: Exact match on aliases
-            for node_id, data in self.graph.nodes(data=True):
-                for alias in data.get("aliases", []):
-                    if alias.lower() == name_lower:
-                        return node_id
-
-            # Stage 3: Fuzzy matching (prefix/substring for short queries)
             best_match = None
             best_score = 0.0
             for node_id, data in self.graph.nodes(data=True):
@@ -208,9 +215,24 @@ class KnowledgeGraph:
                 if name not in aliases:
                     aliases.append(name)
                     node["aliases"] = aliases
+                # Update alias index
+                self._alias_index[name_lower] = best_match
                 return best_match
 
         return None
+
+    def _rebuild_name_index(self):
+        """Rebuild the inverted name/alias index from graph nodes (§3.5)."""
+        self._name_index.clear()
+        self._alias_index.clear()
+        if self.graph is not None:
+            for nid, data in self.graph.nodes(data=True):
+                name = data.get("canonical_name", "").lower()
+                if name:
+                    self._name_index[name] = nid
+                for alias in data.get("aliases", []):
+                    if alias:
+                        self._alias_index[alias.lower()] = nid
 
     def merge_entities(self, keep_id: str, merge_id: str):
         """Merge two entity nodes (merge_id → keep_id)."""

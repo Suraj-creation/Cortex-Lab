@@ -74,9 +74,16 @@ class Transcriber:
         return device
 
     async def transcribe(self, audio: np.ndarray,
-                         language: Optional[str] = None) -> Dict:
+                         language: Optional[str] = None,
+                         quality_mode: bool = False) -> Dict:
         """
         Transcribe an audio segment (int16, 16 kHz mono).
+
+        Args:
+            audio: Audio samples (int16, 16kHz mono)
+            language: Language code (e.g. "en") or None for auto-detect
+            quality_mode: If True, use beam search + word timestamps (§8.4).
+                         Default False (greedy) for ambient real-time mode.
 
         Returns:
             {
@@ -97,9 +104,9 @@ class Transcriber:
         # Transcribe with VRAM guard (if using GPU)
         if self.vram_guard and self.device == "cuda":
             async with self.vram_guard.acquire("whisper"):
-                result = await self._transcribe_threaded(audio_f32, language)
+                result = await self._transcribe_threaded(audio_f32, language, quality_mode)
         else:
-            result = await self._transcribe_threaded(audio_f32, language)
+            result = await self._transcribe_threaded(audio_f32, language, quality_mode)
 
         result["duration"] = round(duration, 2)
 
@@ -110,7 +117,8 @@ class Transcriber:
         return result
 
     async def _transcribe_threaded(self, audio_f32: np.ndarray,
-                                    language: Optional[str]) -> Dict:
+                                    language: Optional[str],
+                                    quality_mode: bool = False) -> Dict:
         """Run transcription in a thread to avoid blocking the event loop."""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
@@ -118,18 +126,32 @@ class Transcriber:
             self._transcribe_sync,
             audio_f32,
             language,
+            quality_mode,
         )
 
     def _transcribe_sync(self, audio_f32: np.ndarray,
-                          language: Optional[str]) -> Dict:
+                          language: Optional[str],
+                          quality_mode: bool = False) -> Dict:
         """Synchronous transcription (runs in thread pool)."""
         t0 = time.time()
 
-        kwargs = {
-            "beam_size": 5,
-            "word_timestamps": True,
-            "vad_filter": False,  # We already ran Silero VAD
-        }
+        # §8.4: Use greedy decoding for ambient (real-time, speed-critical)
+        # beam_size=1 gives 2-3x speedup with minimal quality loss
+        # word_timestamps=False saves another ~30% compute
+        if quality_mode:
+            # Voice query mode: prioritize accuracy
+            kwargs = {
+                "beam_size": 5,
+                "word_timestamps": True,
+                "vad_filter": False,
+            }
+        else:
+            # Ambient mode: prioritize speed
+            kwargs = {
+                "beam_size": 1,              # Greedy — 2-3x faster than beam=5
+                "word_timestamps": False,    # Skip word alignment for ambient
+                "vad_filter": False,         # We already ran Silero VAD
+            }
         if language:
             kwargs["language"] = language
 

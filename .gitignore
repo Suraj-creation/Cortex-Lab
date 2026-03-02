@@ -48,3 +48,12 @@ backend/data/
 # Build artifacts
 tsconfig.tsbuildinfo
 .eslintrc.json
+
+# Agent Skills (installed per-user via npx skills add)
+.agents/
+.claude/skills/
+.cursor/skills/
+.github/skills/
+.copilot/
+.windsurf/skills/
+.gemini/skills/

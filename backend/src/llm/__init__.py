@@ -19,6 +19,7 @@ Leverages all 15 training stages:
   Stage 15: SPIN self-play improvement
 """
 
+import asyncio
 import time
 import re
 import json
@@ -69,6 +70,7 @@ class LocalLLM:
         self._call_count = 0
         self._total_tokens = 0
         self._total_time_ms = 0
+        self._cache_clear_interval = 100  # Clear VRAM fragmentation every N calls (§6.4)
 
     def set_model(self, model, tokenizer):
         """Set model reference (called after model loads in server.py)."""
@@ -77,13 +79,19 @@ class LocalLLM:
 
     def generate(self, prompt: str, max_tokens: int = 512,
                  temperature: float = 0.3, top_p: float = 0.9,
-                 stop_sequences: Optional[list] = None) -> str:
-        """Generate text from the model with stop-pattern safety."""
+                 stop_sequences: Optional[list] = None,
+                 structured: bool = False) -> str:
+        """Generate text from the model with stop-pattern safety.
+        Args:
+            structured: If True, disables repetition_penalty for JSON/classification outputs (§1.8)
+        """
         if self.model is None or self.tokenizer is None:
             return self._fallback_generate(prompt)
 
         t0 = time.time()
-        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=3072)
+        # Dynamic max_length based on max_tokens (§1.3)
+        context_budget = min(3072 + max_tokens, 4096)
+        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=context_budget)
         if torch.cuda.is_available():
             inputs = {k: v.cuda() for k, v in inputs.items()}
 
@@ -99,6 +107,9 @@ class LocalLLM:
             except Exception:
                 pass
 
+        # Disable repetition penalty for structured outputs (§1.8)
+        rep_penalty = 1.0 if structured else 1.15
+
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
@@ -108,7 +119,7 @@ class LocalLLM:
                 do_sample=temperature > 0,
                 pad_token_id=self.tokenizer.eos_token_id,
                 eos_token_id=eos_ids,
-                repetition_penalty=1.15,
+                repetition_penalty=rep_penalty,
             )
 
         generated = self.tokenizer.decode(
@@ -135,7 +146,29 @@ class LocalLLM:
         self._total_tokens += input_len + len(self.tokenizer.encode(generated))
         self._total_time_ms += elapsed_ms
 
+        # Periodic VRAM defragmentation (§6.4)
+        if self._call_count % self._cache_clear_interval == 0 and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         return generated
+
+    async def generate_async(self, prompt: str, **kwargs) -> str:
+        """Async wrapper for generate() — unblocks the event loop (§11.4).
+        Use this from all async handlers (FastAPI routes, agents, orchestrator)."""
+        return await asyncio.to_thread(self.generate, prompt, **kwargs)
+
+    def generate_with_retry(self, prompt: str, max_retries: int = 2, min_length: int = 5, **kwargs) -> str:
+        """Generate with retry on empty/garbage output (§13.2).
+        Retries up to max_retries times if output is too short or empty."""
+        for attempt in range(max_retries + 1):
+            result = self.generate(prompt, **kwargs)
+            if result.strip() and len(result.strip()) >= min_length:
+                return result
+            if attempt < max_retries:
+                # Increase temperature slightly on retry to escape local minimum
+                kwargs["temperature"] = min((kwargs.get("temperature", 0.3)) + 0.1, 0.8)
+        # All retries failed — return last result or fallback
+        return result if result.strip() else self._fallback_generate(prompt)
 
     def classify(self, prompt: str, options: list, default: str = "") -> str:
         """Quick classification with constrained output."""
@@ -150,7 +183,8 @@ class LocalLLM:
 
     def extract_json(self, prompt: str, max_tokens: int = 256) -> dict:
         """Generate and parse JSON output."""
-        result = self.generate(prompt + "\n\nOutput valid JSON only:", max_tokens=max_tokens, temperature=0.1)
+        result = self.generate(prompt + "\n\nOutput valid JSON only:",
+                               max_tokens=max_tokens, temperature=0.1, structured=True)
         try:
             start = result.find("{")
             end = result.rfind("}") + 1

@@ -27,6 +27,7 @@ from threading import Thread
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 
 # Add backend dir to path for src imports
@@ -83,6 +84,10 @@ tokenizer = None
 model_loaded = False
 model_info = {}
 
+# ── Concurrency & Timeout Guards (§9.1, §9.2) ───────────────────────────────
+_inference_semaphore = asyncio.Semaphore(2)  # Max 2 concurrent RAG/chat requests
+_REQUEST_TIMEOUT = 90.0  # Hard timeout in seconds for any LLM request
+
 # ── Lifespan – loads model once on startup ───────────────────────────────────
 
 @asynccontextmanager
@@ -117,6 +122,18 @@ async def lifespan(app: FastAPI):
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4",
         )
+        # Enable Flash Attention 2 for 30-50% faster inference (§1.1)
+        try:
+            import importlib
+            if importlib.util.find_spec("flash_attn") is not None:
+                load_kwargs["attn_implementation"] = "flash_attention_2"
+                print("  ✓ Flash Attention 2 enabled")
+            else:
+                print("  ⚠ flash-attn not installed, using sdpa attention")
+                load_kwargs["attn_implementation"] = "sdpa"
+        except Exception:
+            load_kwargs["attn_implementation"] = "sdpa"
+            print("  ⚠ Using SDPA attention (Flash Attention 2 unavailable)")
         # Set max memory to leave some GPU memory free
         max_memory = {0: "17GB", "cpu": "30GB"}
         load_kwargs["device_map"] = "auto"
@@ -195,11 +212,18 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# GZip compression for large responses (§9.6)
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
 
@@ -365,6 +389,31 @@ async def health():
         model_loaded=model_loaded,
         model_info=model_info,
     )
+
+
+@app.get("/api/system/gpu")
+async def gpu_status():
+    """GPU memory monitoring endpoint (§6.2)."""
+    if not torch.cuda.is_available():
+        return {"gpu_available": False}
+    try:
+        allocated = torch.cuda.memory_allocated(0)
+        reserved = torch.cuda.memory_reserved(0)
+        max_allocated = torch.cuda.max_memory_allocated(0)
+        total = torch.cuda.get_device_properties(0).total_mem
+        utilization = allocated / total if total > 0 else 0
+        return {
+            "gpu_available": True,
+            "device_name": torch.cuda.get_device_properties(0).name,
+            "total_mb": round(total / 1e6, 1),
+            "allocated_mb": round(allocated / 1e6, 1),
+            "reserved_mb": round(reserved / 1e6, 1),
+            "max_allocated_mb": round(max_allocated / 1e6, 1),
+            "free_mb": round((total - allocated) / 1e6, 1),
+            "utilization_pct": round(utilization * 100, 1),
+        }
+    except Exception as e:
+        return {"gpu_available": True, "error": str(e)}
 
 
 @app.post("/api/chat")
@@ -553,31 +602,37 @@ async def rag_chat(req: RAGChatRequest):
             media_type="text/event-stream",
         )
 
-    # ── Non-streaming RAG ────────────────────────────────────────────────
-    try:
-        result = await rag_engine.rag_chat(
-            user_message=user_message,
-            session_id=req.session_id,
-            conversation_history=history,
-        )
+    # ── Non-streaming RAG (with concurrency limit + timeout) ─────────────
+    async with _inference_semaphore:
+        try:
+            result = await asyncio.wait_for(
+                rag_engine.rag_chat(
+                    user_message=user_message,
+                    session_id=req.session_id,
+                    conversation_history=history,
+                ),
+                timeout=_REQUEST_TIMEOUT,
+            )
 
-        return {
-            "id": f"rag-{uuid.uuid4().hex[:12]}",
-            "model": model_info.get("name", MODEL_NAME),
-            "created": int(time.time()),
-            "content": result.get("answer", ""),
-            "thinking": result.get("thinking", ""),
-            "evidence": result.get("evidence", []),
-            "agents_used": result.get("agents_used", []),
-            "confidence": result.get("confidence", 0),
-            "query_analysis": result.get("query_analysis", {}),
-            "processing_time_ms": result.get("processing_time_ms", 0),
-            "cache_hit": result.get("cache_hit", False),
-        }
-    except Exception as e:
-        print(f"  ❌ RAG error: {e}")
-        traceback.print_exc()
-        raise HTTPException(500, f"RAG processing error: {str(e)}")
+            return {
+                "id": f"rag-{uuid.uuid4().hex[:12]}",
+                "model": model_info.get("name", MODEL_NAME),
+                "created": int(time.time()),
+                "content": result.get("answer", ""),
+                "thinking": result.get("thinking", ""),
+                "evidence": result.get("evidence", []),
+                "agents_used": result.get("agents_used", []),
+                "confidence": result.get("confidence", 0),
+                "query_analysis": result.get("query_analysis", {}),
+                "processing_time_ms": result.get("processing_time_ms", 0),
+                "cache_hit": result.get("cache_hit", False),
+            }
+        except asyncio.TimeoutError:
+            raise HTTPException(504, "Request timed out after 90 seconds")
+        except Exception as e:
+            print(f"  ❌ RAG error: {e}")
+            traceback.print_exc()
+            raise HTTPException(500, f"RAG processing error: {str(e)}")
 
 
 async def _stream_rag_generate(user_message: str, history: list, req: RAGChatRequest):

@@ -290,8 +290,20 @@ class VectorStore:
             for i, mid in enumerate(ids):
                 self.vectors[mid] = vecs[i]
 
-            # Rebuild FAISS index
-            if self._use_faiss and self.hot_index is not None and len(vecs) > 0:
+            # Try loading saved FAISS index from disk first (§4.3)
+            hot_path = os.path.join(self.data_dir, "hot.index")
+            if self._use_faiss and os.path.exists(hot_path):
+                try:
+                    self.hot_index = self.faiss.read_index(hot_path)
+                    self.hot_ids = ids[:]
+                    print(f"  ✓ FAISS hot index loaded from disk ({self.hot_index.ntotal} vectors)")
+                except Exception as e:
+                    print(f"  ⚠ Failed to load FAISS index, rebuilding: {e}")
+                    if self.hot_index is not None and len(vecs) > 0:
+                        self.hot_index.add(vecs)
+                        self.hot_ids = ids[:]
+            elif self._use_faiss and self.hot_index is not None and len(vecs) > 0:
+                # Fallback: rebuild FAISS from vectors
                 self.hot_index.add(vecs)
                 self.hot_ids = ids[:]
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -26,7 +26,8 @@ interface Props {
   message: ChatMessage;
 }
 
-export function MessageBubble({ message }: Props) {
+// React.memo — only re-render when message content/streaming state actually changes (§10.1)
+export const MessageBubble = memo(function MessageBubble({ message }: Props) {
   const [showThinking, setShowThinking] = useState(false);
   const [copied, setCopied] = useState(false);
   const thinkingEndRef = useRef<HTMLDivElement>(null);
@@ -353,4 +354,10 @@ export function MessageBubble({ message }: Props) {
       </div>
     </div>
   );
-}
+}, (prev, next) => {
+  // Custom comparator: only re-render if the message actually changed
+  return prev.message.id === next.message.id
+    && prev.message.content === next.message.content
+    && prev.message.isStreaming === next.message.isStreaming
+    && prev.message.thinking === next.message.thinking;
+});

@@ -119,6 +119,28 @@ class MetadataStore:
             )
         """)
 
+        # ── Junction tables for O(1) topic/entity lookup (§4.1) ──────────
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS memory_topics (
+                memory_id VARCHAR NOT NULL,
+                topic VARCHAR NOT NULL,
+                PRIMARY KEY (memory_id, topic)
+            )
+        """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS memory_entities (
+                memory_id VARCHAR NOT NULL,
+                entity VARCHAR NOT NULL,
+                PRIMARY KEY (memory_id, entity)
+            )
+        """)
+        # Create indexes for fast lookup by topic/entity
+        try:
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_mt_topic ON memory_topics(topic)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_me_entity ON memory_entities(entity)")
+        except Exception:
+            pass  # Index already exists
+
     # ─── Memory CRUD ─────────────────────────────────────────────────────
 
     def store_memory(self, memory: CausalMemoryObject):
@@ -150,6 +172,8 @@ class MetadataStore:
                 memory.source,
                 json.dumps(memory.metadata),
             ])
+            # Populate junction tables for indexed lookups (§4.1)
+            self._sync_junction_tables(memory.id, memory.topics, memory.entities)
         else:
             self._fallback[memory.id] = memory.to_dict()
 
@@ -206,8 +230,22 @@ class MetadataStore:
             return memories[:limit]
 
     def search_by_topic(self, topic: str, limit: int = 20) -> List[CausalMemoryObject]:
-        """Search memories by topic."""
+        """Search memories by topic using indexed junction table (§4.1)."""
         if self._use_duckdb:
+            # Try fast junction table lookup first
+            try:
+                rows = self.conn.execute(
+                    """SELECT m.* FROM memories m
+                       INNER JOIN memory_topics mt ON m.id = mt.memory_id
+                       WHERE mt.topic = ?
+                       ORDER BY m.timestamp DESC LIMIT ?""",
+                    [topic, limit]
+                ).fetchall()
+                if rows:
+                    return [self._row_to_memory(r) for r in rows]
+            except Exception:
+                pass
+            # Fallback to LIKE scan for legacy data
             rows = self.conn.execute(
                 "SELECT * FROM memories WHERE topics LIKE ? ORDER BY timestamp DESC LIMIT ?",
                 [f'%"{topic}"%', limit]
@@ -222,8 +260,22 @@ class MetadataStore:
             return results[:limit]
 
     def search_by_entity(self, entity: str, limit: int = 20) -> List[CausalMemoryObject]:
-        """Search memories mentioning an entity."""
+        """Search memories mentioning an entity using indexed junction table (§4.1)."""
         if self._use_duckdb:
+            # Try fast junction table lookup first
+            try:
+                rows = self.conn.execute(
+                    """SELECT m.* FROM memories m
+                       INNER JOIN memory_entities me ON m.id = me.memory_id
+                       WHERE me.entity = ?
+                       ORDER BY m.timestamp DESC LIMIT ?""",
+                    [entity, limit]
+                ).fetchall()
+                if rows:
+                    return [self._row_to_memory(r) for r in rows]
+            except Exception:
+                pass
+            # Fallback to LIKE scan for legacy data
             rows = self.conn.execute(
                 "SELECT * FROM memories WHERE entities LIKE ? ORDER BY timestamp DESC LIMIT ?",
                 [f'%"{entity}"%', limit]
@@ -254,6 +306,36 @@ class MetadataStore:
         if self._use_duckdb:
             return self.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
         return len(self._fallback)
+
+    def get_memory_texts(self, limit: int = 5000) -> List[Tuple[str, str]]:
+        """Return (id, content) pairs for BM25 indexing (§4.6).
+        Much lighter than get_all_memories() — avoids loading full objects."""
+        if self._use_duckdb:
+            rows = self.conn.execute(
+                "SELECT id, content FROM memories LIMIT ?", [limit]
+            ).fetchall()
+            return [(r[0], r[1]) for r in rows]
+        return [(mid, d.get("content", "")) for mid, d in list(self._fallback.items())[:limit]]
+
+    def get_memory_propositions(self, limit: int = 2000) -> List[Tuple[str, List[str]]]:
+        """Return (id, propositions) pairs for proposition indexing (§4.6).
+        Avoids loading full memory objects for proposition index rebuild."""
+        if self._use_duckdb:
+            rows = self.conn.execute(
+                "SELECT id, propositions FROM memories WHERE propositions != '[]' LIMIT ?", [limit]
+            ).fetchall()
+            result = []
+            for r in rows:
+                props = json.loads(r[1]) if isinstance(r[1], str) else (r[1] or [])
+                if props:
+                    result.append((r[0], props))
+            return result
+        result = []
+        for mid, d in list(self._fallback.items())[:limit]:
+            props = d.get("propositions", [])
+            if props:
+                result.append((mid, props))
+        return result
 
     def delete_memory(self, memory_id: str):
         if self._use_duckdb:
@@ -415,6 +497,45 @@ class MetadataStore:
             source=row[18] or "chat",
             metadata=json.loads(row[19]) if isinstance(row[19], str) else (row[19] or {}),
         )
+
+    def _sync_junction_tables(self, memory_id: str, topics: List[str], entities: List[str]):
+        """Sync junction tables for a memory (§4.1).
+        Removes old entries and inserts current ones for the given memory."""
+        try:
+            self.conn.execute("DELETE FROM memory_topics WHERE memory_id = ?", [memory_id])
+            self.conn.execute("DELETE FROM memory_entities WHERE memory_id = ?", [memory_id])
+            for topic in (topics or []):
+                if topic:
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO memory_topics VALUES (?, ?)",
+                        [memory_id, topic]
+                    )
+            for entity in (entities or []):
+                if entity:
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO memory_entities VALUES (?, ?)",
+                        [memory_id, entity]
+                    )
+        except Exception:
+            pass  # Non-critical — LIKE fallback still works
+
+    def migrate_junction_tables(self):
+        """One-time migration: populate junction tables from existing JSON columns."""
+        if not self._use_duckdb:
+            return
+        try:
+            existing = self.conn.execute("SELECT COUNT(*) FROM memory_topics").fetchone()[0]
+            if existing > 0:
+                return  # Already migrated
+            rows = self.conn.execute("SELECT id, topics, entities FROM memories").fetchall()
+            for row in rows:
+                mid = row[0]
+                topics = json.loads(row[1]) if isinstance(row[1], str) else (row[1] or [])
+                entities = json.loads(row[2]) if isinstance(row[2], str) else (row[2] or [])
+                self._sync_junction_tables(mid, topics, entities)
+            print(f"  ✓ Migrated {len(rows)} memories to junction tables")
+        except Exception as e:
+            print(f"  ⚠ Junction table migration skipped: {e}")
 
     def close(self):
         if self.conn:

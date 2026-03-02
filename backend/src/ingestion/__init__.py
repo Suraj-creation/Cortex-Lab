@@ -80,6 +80,11 @@ class MemoryIngestionPipeline:
         """
         t0 = time.time()
 
+        # ── Content validation (§13.4) ───────────────────────────────────
+        content = self._validate_content(content)
+        if not content:
+            return None
+
         # 1. Create base memory
         memory = CausalMemoryObject(
             content=content.strip(),
@@ -550,3 +555,33 @@ Memory:
             return "expand"
 
         return "neutral"
+
+    # ── Content Validation (§13.4) ───────────────────────────────────────
+
+    _MAX_MEMORY_LENGTH = 10000  # 10K chars
+
+    def _validate_content(self, content: str) -> Optional[str]:
+        """Validate and sanitize memory content before ingestion.
+        Returns cleaned content or None if invalid."""
+        if not content or not isinstance(content, str):
+            return None
+
+        content = content.strip()
+
+        # Reject empty or trivially short content
+        if len(content) < 2:
+            return None
+
+        # Truncate excessively long content
+        if len(content) > self._MAX_MEMORY_LENGTH:
+            content = content[:self._MAX_MEMORY_LENGTH] + "... [truncated]"
+            print(f"  ⚠ Memory content truncated to {self._MAX_MEMORY_LENGTH} chars")
+
+        # Remove null bytes and non-printable characters (except newlines/tabs)
+        content = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', content)
+
+        # Strip prompt template markers to prevent injection (§14.1)
+        for marker in ["<|im_start|>", "<|im_end|>", "<|endoftext|>", "<|system|>", "<|user|>", "<|assistant|>"]:
+            content = content.replace(marker, "")
+
+        return content.strip() if content.strip() else None

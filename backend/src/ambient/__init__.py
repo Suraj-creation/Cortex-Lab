@@ -16,6 +16,7 @@ All models run locally. Zero cloud. Zero API keys.
 
 import asyncio
 import time
+import threading
 from enum import Enum
 from typing import Optional, Dict, Callable, Any
 
@@ -65,6 +66,15 @@ class AmbientService:
 
         # WebSocket broadcast callback (set by server.py)
         self._ws_broadcast: Optional[Callable] = None
+
+        # Persistent worker event loop (§8.1) — eliminates per-segment thread/loop creation
+        self._worker_loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
+        self._worker_thread = threading.Thread(
+            target=self._worker_loop.run_forever,
+            daemon=True,
+            name="ambient-worker",
+        )
+        self._worker_thread.start()
 
         # Stats
         self._speech_segments_processed = 0
@@ -215,28 +225,17 @@ class AmbientService:
                            end_time: float):
         """
         Called by VAD when a complete speech segment is detected.
-        Runs speaker ID + transcription asynchronously.
+        Runs speaker ID + transcription on the persistent worker event loop (§8.1).
         Note: This is called from the audio callback thread, NOT the event loop.
         """
         self._speech_segments_processed += 1
         self._status = AmbientStatus.SPEECH_DETECTED
 
-        # Schedule the async processing on the main event loop
-        import threading
-
-        def _run_in_thread():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(
-                    self._process_speech(audio, start_time, end_time)
-                )
-            except Exception as e:
-                print(f"  ⚠ Speech processing thread error: {e}")
-            finally:
-                loop.close()
-
-        threading.Thread(target=_run_in_thread, daemon=True).start()
+        # Schedule on the persistent worker loop — no new threads/loops created
+        asyncio.run_coroutine_threadsafe(
+            self._process_speech(audio, start_time, end_time),
+            self._worker_loop,
+        )
 
     async def _process_speech(self, audio: 'np.ndarray', start_time: float,
                                end_time: float):
@@ -301,29 +300,29 @@ class AmbientService:
 
     def _on_vad_activity(self, speech_prob: float, timestamp: float):
         """Called by VAD for each frame — used for UI live indicator.
-        Note: Called from audio thread. We only broadcast occasionally."""
+        Note: Called from audio thread. We only broadcast occasionally.
+        Uses persistent worker loop instead of spawning threads (§8.1, §8.2)."""
         # Only broadcast every 5th frame to reduce traffic (~6 updates/sec)
         frame_idx = int(timestamp * 1000 / 30)
         if frame_idx % 5 != 0 or not self._ws_broadcast:
             return
 
-        # Fire-and-forget broadcast (don't block audio thread)
-        import threading
+        # Fire-and-forget on the persistent worker loop — no new threads
+        asyncio.run_coroutine_threadsafe(
+            self._broadcast_vad(speech_prob, timestamp),
+            self._worker_loop,
+        )
 
-        def _send():
-            loop = asyncio.new_event_loop()
-            try:
-                loop.run_until_complete(self._ws_broadcast({
-                    "type": "vad_activity",
-                    "speech_prob": round(speech_prob, 2),
-                    "timestamp": round(timestamp, 2),
-                }))
-            except Exception:
-                pass
-            finally:
-                loop.close()
-
-        threading.Thread(target=_send, daemon=True).start()
+    async def _broadcast_vad(self, speech_prob: float, timestamp: float):
+        """Send VAD activity to WebSocket clients (runs on worker loop)."""
+        try:
+            await self._ws_broadcast({
+                "type": "vad_activity",
+                "speech_prob": round(speech_prob, 2),
+                "timestamp": round(timestamp, 2),
+            })
+        except Exception:
+            pass
 
     # ── Configuration ────────────────────────────────────────────────────
 

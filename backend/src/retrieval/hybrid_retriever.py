@@ -127,7 +127,7 @@ class HybridRetriever:
     # ─── Channel 1: Dense Retrieval (FAISS) ─────────────────────────────
 
     async def _dense_retrieve(self, query: MemoryQuery, top_k: int) -> List[Tuple[str, float]]:
-        """Dense vector similarity search."""
+        """Dense vector similarity search with batched embeddings (§3.3)."""
         if query.embedding is None:
             return []
 
@@ -138,32 +138,31 @@ class HybridRetriever:
             time_end=query.time_end,
         )
 
-        # Also search with HyDE embedding if available
+        # Batch all variant texts for embedding in one call (§3.3)
+        variant_texts = []
+        variant_discounts = []
         if query.hyde_answer:
-            hyde_emb = self.embeddings.embed(query.hyde_answer)
-            hyde_results = self.vectors.search(hyde_emb, top_k=top_k // 2)
-            seen = {mid for mid, _ in results}
-            for mid, score in hyde_results:
-                if mid not in seen:
-                    results.append((mid, score * 0.8))  # Slight discount for HyDE
-
-        # Also search with step-back query if available
+            variant_texts.append(query.hyde_answer)
+            variant_discounts.append(0.8)
         if query.step_back_query:
-            sb_emb = self.embeddings.embed(query.step_back_query)
-            sb_results = self.vectors.search(sb_emb, top_k=top_k // 3)
-            seen = {mid for mid, _ in results}
-            for mid, score in sb_results:
-                if mid not in seen:
-                    results.append((mid, score * 0.75))  # Discount for abstract query
-
-        # Also search with multi-query variants
+            variant_texts.append(query.step_back_query)
+            variant_discounts.append(0.75)
         for variant in query.multi_queries[:2]:
-            var_emb = self.embeddings.embed(variant)
-            var_results = self.vectors.search(var_emb, top_k=top_k // 3)
-            seen = {mid for mid, _ in results}
-            for mid, score in var_results:
-                if mid not in seen:
-                    results.append((mid, score * 0.85))
+            variant_texts.append(variant)
+            variant_discounts.append(0.85)
+
+        if variant_texts:
+            # Single batch embed call instead of N separate calls
+            variant_embeddings = self.embeddings.embed_batch(variant_texts)
+            variant_top_ks = [top_k // 2 if i == 0 else top_k // 3
+                              for i in range(len(variant_texts))]
+
+            for i, (var_emb, discount) in enumerate(zip(variant_embeddings, variant_discounts)):
+                var_results = self.vectors.search(var_emb, top_k=variant_top_ks[i])
+                seen = {mid for mid, _ in results}
+                for mid, score in var_results:
+                    if mid not in seen:
+                        results.append((mid, score * discount))
 
         return results
 
@@ -213,11 +212,12 @@ class HybridRetriever:
         return sorted_scores[:top_k]
 
     def _rebuild_bm25_index(self):
-        """Rebuild the BM25 corpus index from all memories."""
-        all_memories = self.metadata.get_all_memories(limit=5000)
+        """Rebuild the BM25 corpus index from all memories.
+        Uses lightweight query for just (id, content) pairs (§4.6)."""
+        memory_texts = self.metadata.get_memory_texts(limit=5000)
         self._bm25_corpus = {}
-        for mem in all_memories:
-            self._bm25_corpus[mem.id] = self._tokenize(mem.content)
+        for mid, content in memory_texts:
+            self._bm25_corpus[mid] = self._tokenize(content)
 
         self._bm25_doc_count = len(self._bm25_corpus)
         self._bm25_avg_dl = sum(len(t) for t in self._bm25_corpus.values()) / max(self._bm25_doc_count, 1)
@@ -335,20 +335,19 @@ class HybridRetriever:
         return sorted_results[:top_k]
 
     def _rebuild_proposition_index(self):
-        """Pre-compute proposition embeddings for all memories."""
-        all_memories = self.metadata.get_all_memories(limit=2000)
+        """Pre-compute proposition embeddings for all memories.
+        Uses lightweight query for just (id, propositions) pairs (§4.6)."""
+        memory_props = self.metadata.get_memory_propositions(limit=2000)
         self._prop_index = {}
         total_props = 0
 
-        for mem in all_memories:
-            if not mem.propositions:
-                continue
+        for mem_id, propositions in memory_props:
             entries = []
-            for prop in mem.propositions:
+            for prop in propositions:
                 prop_emb = self.embeddings.embed(prop)
                 entries.append((prop, prop_emb))
                 total_props += 1
-            self._prop_index[mem.id] = entries
+            self._prop_index[mem_id] = entries
 
         self._prop_last_count = self.metadata.count_memories()
         if total_props > 0:
@@ -465,9 +464,38 @@ class HybridRetriever:
         return reranked
 
     def invalidate_caches(self):
-        """Invalidate BM25 and proposition caches (call after ingestion)."""
+        """Mark BM25 and proposition caches as stale (lazy rebuild on next query)."""
         self._bm25_last_count = 0
         self._prop_last_count = 0
+
+    def incremental_bm25_add(self, memory_id: str, content: str):
+        """Add a single document to BM25 index without full rebuild (§3.1).
+        Called after ingestion to avoid O(n) rebuild on every message."""
+        if not self._bm25_corpus:
+            # Index hasn't been built yet; let it build on first query
+            return
+        tokens = self._tokenize(content)
+        self._bm25_corpus[memory_id] = tokens
+        self._bm25_doc_count = len(self._bm25_corpus)
+        self._bm25_avg_dl = sum(len(t) for t in self._bm25_corpus.values()) / max(self._bm25_doc_count, 1)
+        # Update IDF incrementally for new tokens only
+        for token in set(tokens):
+            df = sum(1 for t in self._bm25_corpus.values() if token in set(t))
+            self._bm25_idf[token] = math.log(
+                (self._bm25_doc_count - df + 0.5) / (df + 0.5) + 1
+            )
+        self._bm25_last_count = self.metadata.count_memories()
+
+    def incremental_proposition_add(self, memory_id: str, propositions: List[str]):
+        """Add propositions for a single memory without full rebuild (§3.2)."""
+        if not propositions or not self._prop_index and self._prop_last_count == 0:
+            return  # Index not built yet
+        entries = []
+        for prop in propositions:
+            prop_emb = self.embeddings.embed(prop)
+            entries.append((prop, prop_emb))
+        self._prop_index[memory_id] = entries
+        self._prop_last_count = self.metadata.count_memories()
 
     # ─── Helpers ─────────────────────────────────────────────────────────
 

@@ -34,6 +34,33 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef(false);
 
+  // ── Batched streaming buffer (§10.1) ──
+  // Accumulate tokens in a ref and flush to state every 50ms to reduce re-renders
+  const streamBufferRef = useRef<Record<string, string>>({});
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flushStreamBuffer = useCallback(() => {
+    const buffered = { ...streamBufferRef.current };
+    streamBufferRef.current = {};
+    flushTimerRef.current = null;
+    if (Object.keys(buffered).length === 0) return;
+    setMessages((prev) =>
+      prev.map((m) =>
+        buffered[m.id] !== undefined
+          ? { ...m, content: m.content + buffered[m.id] }
+          : m,
+      ),
+    );
+  }, []);
+
+  const appendToken = useCallback((assistantId: string, token: string) => {
+    streamBufferRef.current[assistantId] =
+      (streamBufferRef.current[assistantId] || "") + token;
+    if (!flushTimerRef.current) {
+      flushTimerRef.current = setTimeout(flushStreamBuffer, 50);
+    }
+  }, [flushStreamBuffer]);
+
   // Auto-scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -132,18 +159,19 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
           },
           (token) => {
             if (abortRef.current) return;
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === assistantId
-                  ? { ...m, content: m.content + token }
-                  : m,
-              ),
-            );
+            appendToken(assistantId, token);
           },
           () => {
+            // Flush remaining tokens before marking stream complete
+            if (flushTimerRef.current) {
+              clearTimeout(flushTimerRef.current);
+              flushTimerRef.current = null;
+            }
+            const remaining = streamBufferRef.current[assistantId] || "";
+            streamBufferRef.current = {};
             setMessages((prev) =>
               prev.map((m) =>
-                m.id === assistantId ? { ...m, isStreaming: false } : m,
+                m.id === assistantId ? { ...m, content: m.content + remaining, isStreaming: false } : m,
               ),
             );
             setIsGenerating(false);
@@ -200,18 +228,19 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
         settings,
         (token) => {
           if (abortRef.current) return;
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantId
-                ? { ...m, content: m.content + token }
-                : m,
-            ),
-          );
+          appendToken(assistantId, token);
         },
         () => {
+          // Flush remaining tokens before marking stream complete
+          if (flushTimerRef.current) {
+            clearTimeout(flushTimerRef.current);
+            flushTimerRef.current = null;
+          }
+          const remaining = streamBufferRef.current[assistantId] || "";
+          streamBufferRef.current = {};
           setMessages((prev) =>
             prev.map((m) =>
-              m.id === assistantId ? { ...m, isStreaming: false } : m,
+              m.id === assistantId ? { ...m, content: m.content + remaining, isStreaming: false } : m,
             ),
           );
           setIsGenerating(false);

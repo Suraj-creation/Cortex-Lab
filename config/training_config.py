@@ -229,8 +229,8 @@ LORA_CONFIGS = {
 
 # =============================================================================
 # TRAINING CONFIGURATIONS (per stage)
-# RTX 4000 Ada Generation — No gradient checkpointing (have VRAM headroom)
-# bf16 native, full-precision AdamW, torch.compile, batch=4, seq=2048
+# RTX 4000 Ada Generation — Gradient checkpointing enabled
+# bf16 native, paged AdamW 8-bit (§7.3), batch=2, seq up to 2048
 # =============================================================================
 
 TRAINING_CONFIGS = {
@@ -243,7 +243,7 @@ TRAINING_CONFIGS = {
         "learning_rate": 2e-4,
         "warmup_ratio": 0.03,
         "lr_scheduler_type": "cosine",
-        "optim": "adamw_torch",                    # Full-precision, better convergence
+        "optim": "paged_adamw_8bit",       # §7.3 — saves ~1.3GB VRAM vs adamw_torch
         "weight_decay": 0.01,
         "max_grad_norm": 1.0,
         "logging_steps": 10,
@@ -264,7 +264,7 @@ TRAINING_CONFIGS = {
         "learning_rate": 2e-4,
         "warmup_ratio": 0.03,
         "lr_scheduler_type": "cosine",
-        "optim": "adamw_torch",
+        "optim": "paged_adamw_8bit",       # §7.3 — saves ~1.3GB VRAM vs adamw_torch
         "weight_decay": 0.01,
         "max_grad_norm": 1.0,
         "logging_steps": 10,
@@ -285,7 +285,7 @@ TRAINING_CONFIGS = {
         "learning_rate": 1.5e-4,                   # Slightly lower — building on stage 1
         "warmup_ratio": 0.03,
         "lr_scheduler_type": "cosine",
-        "optim": "adamw_torch",
+        "optim": "paged_adamw_8bit",       # §7.3 — saves ~1.3GB VRAM vs adamw_torch
         "weight_decay": 0.01,
         "max_grad_norm": 1.0,
         "logging_steps": 10,
@@ -306,7 +306,7 @@ TRAINING_CONFIGS = {
         "learning_rate": 2e-4,
         "warmup_ratio": 0.05,                      # Longer warmup for new token patterns
         "lr_scheduler_type": "cosine",
-        "optim": "adamw_torch",
+        "optim": "paged_adamw_8bit",       # §7.3 — saves ~1.3GB VRAM vs adamw_torch
         "weight_decay": 0.01,
         "max_grad_norm": 1.0,
         "logging_steps": 10,
@@ -327,7 +327,7 @@ TRAINING_CONFIGS = {
         "learning_rate": 1.5e-4,
         "warmup_ratio": 0.03,
         "lr_scheduler_type": "cosine",
-        "optim": "adamw_torch",
+        "optim": "paged_adamw_8bit",       # §7.3 — saves ~1.3GB VRAM vs adamw_torch
         "weight_decay": 0.01,
         "max_grad_norm": 1.0,
         "logging_steps": 10,
@@ -348,7 +348,7 @@ TRAINING_CONFIGS = {
         "learning_rate": 1.5e-4,
         "warmup_ratio": 0.03,
         "lr_scheduler_type": "cosine",
-        "optim": "adamw_torch",
+        "optim": "paged_adamw_8bit",       # §7.3 — saves ~1.3GB VRAM vs adamw_torch
         "weight_decay": 0.01,
         "max_grad_norm": 1.0,
         "logging_steps": 10,
@@ -369,7 +369,7 @@ TRAINING_CONFIGS = {
         "learning_rate": 1.5e-4,
         "warmup_ratio": 0.05,
         "lr_scheduler_type": "cosine",
-        "optim": "adamw_torch",
+        "optim": "paged_adamw_8bit",       # §7.3 — saves ~1.3GB VRAM vs adamw_torch
         "weight_decay": 0.01,
         "max_grad_norm": 1.0,
         "logging_steps": 10,
@@ -390,7 +390,7 @@ TRAINING_CONFIGS = {
         "learning_rate": 1e-4,                     # Conservative — most complex reasoning
         "warmup_ratio": 0.05,
         "lr_scheduler_type": "cosine",
-        "optim": "adamw_torch",
+        "optim": "paged_adamw_8bit",       # §7.3 — saves ~1.3GB VRAM vs adamw_torch
         "weight_decay": 0.01,
         "max_grad_norm": 0.5,                      # Tighter clipping for stability
         "logging_steps": 10,
@@ -429,7 +429,7 @@ TRAINING_CONFIGS = {
         "learning_rate": 5e-5,                     # Lower LR — don't overwrite previous stages
         "warmup_ratio": 0.1,
         "lr_scheduler_type": "cosine",
-        "optim": "adamw_torch",
+        "optim": "paged_adamw_8bit",       # §7.3 — saves ~1.3GB VRAM vs adamw_torch
         "weight_decay": 0.01,
         "max_grad_norm": 1.0,
         "logging_steps": 5,
@@ -460,7 +460,7 @@ TRAINING_CONFIGS = {
         "save_strategy": "epoch",
         "save_total_limit": 2,
         "max_seq_length": 1024,
-        "optim": "adamw_torch",
+        "optim": "paged_adamw_8bit",       # §7.3 — saves ~1.3GB VRAM vs adamw_torch
         "weight_decay": 0.01,
         "max_grad_norm": 1.0,
     },
@@ -475,7 +475,7 @@ TRAINING_CONFIGS = {
         "learning_rate": 1e-4,                     # Moderate — new skill
         "warmup_ratio": 0.05,
         "lr_scheduler_type": "cosine",
-        "optim": "adamw_torch",
+        "optim": "paged_adamw_8bit",       # §7.3 — saves ~1.3GB VRAM vs adamw_torch
         "weight_decay": 0.01,
         "max_grad_norm": 1.0,
         "logging_steps": 10,
@@ -497,7 +497,7 @@ TRAINING_CONFIGS = {
         "learning_rate": 1.5e-4,
         "warmup_ratio": 0.05,
         "lr_scheduler_type": "cosine",
-        "optim": "adamw_torch",
+        "optim": "paged_adamw_8bit",       # §7.3 — saves ~1.3GB VRAM vs adamw_torch
         "weight_decay": 0.01,
         "max_grad_norm": 1.0,
         "logging_steps": 10,
@@ -520,7 +520,7 @@ TRAINING_CONFIGS = {
         "learning_rate": 5e-5,                     # Very conservative — polishing
         "warmup_ratio": 0.05,
         "lr_scheduler_type": "cosine",
-        "optim": "adamw_torch",
+        "optim": "paged_adamw_8bit",       # §7.3 — saves ~1.3GB VRAM vs adamw_torch
         "weight_decay": 0.01,
         "max_grad_norm": 0.5,                      # Tight clipping for stability
         "logging_steps": 10,
@@ -550,7 +550,7 @@ TRAINING_CONFIGS = {
         "save_strategy": "epoch",
         "save_total_limit": 2,
         "max_seq_length": 1024,
-        "optim": "adamw_torch",
+        "optim": "paged_adamw_8bit",       # §7.3 — saves ~1.3GB VRAM vs adamw_torch
         "weight_decay": 0.01,
         "max_grad_norm": 1.0,
     },
@@ -563,8 +563,7 @@ TRAINING_CONFIGS = {
 # TRAINING (7B QLoRA r=64, batch=4, seq=2048):
 #   Base model (4-bit NF4 + double quant): ~4,200 MB
 #   LoRA weights (r=64, ALL_MODULES):        ~460 MB
-#   Full-precision AdamW optimizer:        ~1,800 MB
-#   Activations (no grad checkpoint):      ~3,200 MB
+#   Paged AdamW 8-bit optimizer (§7.3):    ~500 MB#   Activations (no grad checkpoint):      ~3,200 MB
 #   Forward pass working memory:             ~800 MB
 #   KV cache (batch=4, seq=2048):          ~1,200 MB
 #   CUDA + torch.compile overhead:           ~600 MB
