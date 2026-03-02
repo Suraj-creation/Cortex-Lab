@@ -156,6 +156,18 @@ class CortexRAGEngine:
         except Exception as e:
             print(f"  ⚠ Junction table migration skipped: {e}")
 
+        # ── AUTO-REINDEX: ensure all memories have vectors ──────────────
+        # If vector store coverage is below 80%, bulk-embed missing memories
+        mem_count = self.metadata_store.count_memories()
+        vec_count = self.vector_store.count()
+        if mem_count > 0 and vec_count / mem_count < 0.8:
+            print(f"\n  ⚠ Vector coverage low: {vec_count}/{mem_count} ({vec_count/mem_count:.0%})")
+            print(f"  🔄 Auto-reindexing missing memories...")
+            try:
+                self._reindex_missing_vectors()
+            except Exception as e:
+                print(f"  ⚠ Auto-reindex failed: {e}")
+
         self.initialized = True
         elapsed = time.time() - t0
         print(f"\n  ✅ RAG Engine v2.0 ready in {elapsed:.1f}s")
@@ -183,14 +195,67 @@ class CortexRAGEngine:
 
     # ─── Helpers ───────────────────────────────────────────────────────
 
+    def _reindex_missing_vectors(self):
+        """Bulk-embed memories that are in DuckDB but not in the vector store."""
+        import numpy as np
+        all_memory_texts = self.metadata_store.get_memory_texts(limit=5000)
+        existing_ids = set(self.vector_store.vectors.keys())
+
+        missing = [(mid, content) for mid, content in all_memory_texts
+                    if mid not in existing_ids and len(content.strip()) > 10]
+
+        if not missing:
+            print(f"  ✓ All memories already vectorized")
+            return
+
+        print(f"  📊 Vectorizing {len(missing)} missing memories...")
+
+        batch_size = 32
+        added = 0
+        for i in range(0, len(missing), batch_size):
+            batch = missing[i:i + batch_size]
+            contents = [content for _, content in batch]
+
+            embeddings = self.embedding_model.embed_batch(contents)
+
+            for j, (mid, content) in enumerate(batch):
+                from datetime import datetime
+                self.vector_store.add(mid, embeddings[j], datetime.now())
+                added += 1
+
+            pct = min((i + len(batch)) / len(missing) * 100, 100)
+            print(f"    Indexed {i + len(batch)}/{len(missing)} ({pct:.0f}%)", end="\r")
+
+        print(f"\n  ✓ Indexed {added} new vectors (total: {self.vector_store.count()})")
+        self.vector_store.save()
+
     @staticmethod
     def _is_meaningful_content(text: str) -> bool:
         """Check if content is substantial enough to store as a memory.
-        Greetings, single words, and very short messages are NOT memories."""
+        Greetings, single words, very short messages, and USER QUERIES
+        (questions asking for information) are NOT memories — only statements
+        that contain information worth remembering should be ingested.
+
+        Examples that should be REJECTED:
+          - "What is my name?"
+          - "hey what is my name"
+          - "List my projects"
+          - "Tell me about Jarurat Care"
+          - "hi how are you"
+          - "hello"
+
+        Examples that should be ACCEPTED:
+          - "I just finished building the Jarurat Care chatbot using Google Gemini"
+          - "Today I learned that reinforcement learning can be applied to..."
+          - "My project uses FastAPI for the backend and React for the frontend"
+        """
+        import re
+
         stripped = text.strip().lower().rstrip("!?.,")
         # Too short
         if len(stripped) < 8 or len(stripped.split()) < 3:
             return False
+
         # Pure greetings / filler
         trivial = {
             "hi", "hey", "hello", "hii", "hiii", "yo", "sup", "howdy",
@@ -201,6 +266,84 @@ class CortexRAGEngine:
         }
         if stripped in trivial:
             return False
+
+        # ── CRITICAL FIX: Don't ingest user queries/questions as memories ──
+        # Questions asking for information (retrieval queries) should NOT be
+        # stored as memories — they pollute the vector store and get retrieved
+        # as top evidence instead of actual data.
+
+        lower_clean = text.strip().lower()
+
+        # Strip leading greeting prefixes so "hey what is my name" → "what is my name"
+        greeting_prefixes = (
+            "hey ", "hi ", "hello ", "hii ", "yo ", "sup ",
+            "hey, ", "hi, ", "hello, ", "okay ", "ok ",
+            "hey there ", "hi there ", "hello there ",
+            "good morning ", "good evening ", "good afternoon ",
+        )
+        core_text = lower_clean
+        for gp in greeting_prefixes:
+            if core_text.startswith(gp):
+                core_text = core_text[len(gp):].strip()
+                break  # Only strip one prefix
+
+        # Question word patterns — check BOTH original and greeting-stripped text
+        question_words = (
+            "what ", "what's ", "who ", "who's ", "where ", "where's ",
+            "when ", "when's ", "how ", "how's ", "why ", "why's ",
+            "which ", "whose ", "whom ",
+            "is ", "are ", "was ", "were ", "do ", "does ", "did ",
+            "can ", "could ", "will ", "would ", "should ", "shall ",
+            "have ", "has ", "had ",
+            "tell me", "list ", "describe ", "summarize ", "explain ",
+            "show me", "give me", "find ", "search ",
+        )
+
+        starts_with_question = (
+            any(core_text.startswith(q) for q in question_words)
+            or any(lower_clean.startswith(q) for q in question_words)
+        )
+        ends_with_question = lower_clean.rstrip().endswith("?")
+
+        # Also check: does the text CONTAIN a question word pattern anywhere?
+        # This catches "hey so what is my name" or "please tell me my email"
+        contains_question_word = bool(re.search(
+            r'\b(what|who|where|when|how|why|which|whose|whom)\b.{0,50}\b(is|are|was|were|do|does|did|my|the|about)\b',
+            core_text
+        ))
+
+        is_question = starts_with_question or ends_with_question or contains_question_word
+
+        # Short questions (< 150 chars) are almost always retrieval queries
+        if is_question and len(text.strip()) < 150:
+            return False
+
+        # Even longer questions need factual content markers to be stored
+        if is_question and len(text.strip()) < 300:
+            factual_markers = [
+                "i learned", "i built", "i created", "i worked on",
+                "i made", "i developed", "i designed", "i implemented",
+                "i think", "i believe", "i decided", "i realized",
+                "i discovered", "i found out", "i noticed",
+                "my project", "my experience", "my work",
+                "we built", "we created", "we developed",
+                "today i", "yesterday i", "last week",
+            ]
+            has_facts = any(m in lower_clean for m in factual_markers)
+            if not has_facts:
+                return False
+
+        # Final check: very short content (< 60 chars) without strong
+        # informational signals should not be ingested
+        if len(text.strip()) < 60:
+            info_signals = [
+                "i ", "my ", "we ", "our ", "built", "created",
+                "learned", "project", "work", "experience",
+                "today", "yesterday", "decided", "realized",
+            ]
+            if not any(sig in lower_clean for sig in info_signals):
+                return False
+
         return True
 
     async def _background_ingest(self, content: str, session_id: str,

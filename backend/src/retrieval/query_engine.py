@@ -27,7 +27,7 @@ class QueryAnalyzer:
     deferred to the orchestrator for async execution.
     """
 
-    # Intent keyword mappings
+    # Intent keyword mappings (ordered by specificity — more specific intents first)
     INTENT_KEYWORDS = {
         QueryIntent.TEMPORAL: [
             "when", "what time", "how long ago", "last week", "yesterday",
@@ -46,13 +46,14 @@ class QueryAnalyzer:
             "over time", "growth", "progress", "trend", "shift in",
             "belief", "opinion changed",
         ],
-        QueryIntent.FACTUAL: [
-            "what is", "what are", "who is", "define", "explain",
-            "tell me about", "describe", "what did I learn",
-        ],
         QueryIntent.PROCEDURAL: [
             "how do", "how to", "steps", "process", "method",
-            "procedure", "workflow", "guide",
+            "procedure", "workflow", "guide", "my process",
+            "review process", "my method", "my workflow",
+        ],
+        QueryIntent.FACTUAL: [
+            "what is", "what are", "who is", "define", "explain",
+            "describe", "what did i learn",
         ],
         QueryIntent.COMPARATIVE: [
             "compare", "difference", "similar", "versus", "vs",
@@ -76,11 +77,24 @@ class QueryAnalyzer:
         t0 = time.time()
         query_lower = query.lower().strip()
 
+        # 0. Fast path: detect trivial/greeting queries → skip retrieval entirely
+        if self._is_greeting_or_trivial(query_lower):
+            result = MemoryQuery(
+                raw_query=query,
+                intent=QueryIntent.EXPLORATORY,
+                complexity=0.0,
+                routing=RoutingStrategy.NO_RETRIEVAL,
+                confidence=0.95,
+            )
+            elapsed = (time.time() - t0) * 1000
+            print(f"  🔍 Query analyzed: GREETING/TRIVIAL → NO_RETRIEVAL ({elapsed:.0f}ms)")
+            return result
+
         # 1. Detect intent
         intent = self._detect_intent(query_lower)
 
-        # 2. Score complexity
-        complexity = self._score_complexity(query_lower)
+        # 2. Score complexity (intent-aware)
+        complexity = self._score_complexity(query_lower, intent)
 
         # 3. Determine routing
         routing = self._determine_routing(complexity)
@@ -111,19 +125,69 @@ class QueryAnalyzer:
 
         return result
 
+    @staticmethod
+    def _is_greeting_or_trivial(query: str) -> bool:
+        """Detect greetings, filler, and trivial messages that don't need retrieval."""
+        q = query.strip().lower().rstrip("!?.,;:")
+        words = q.split()
+
+        # Very short messages (1-3 words)
+        if len(words) <= 3:
+            greeting_words = {
+                "hi", "hey", "hello", "hii", "hiii", "yo", "sup", "howdy",
+                "hola", "namaste", "bonjour", "helo", "heyyy",
+                "good", "morning", "evening", "afternoon", "night",
+                "thanks", "thank", "you", "ok", "okay", "bye", "goodbye",
+                "yes", "no", "yeah", "nah", "sure", "hmm", "hm",
+                "how", "are", "doing", "there", "whats", "up",
+                "welcome", "great", "nice", "cool", "awesome",
+            }
+            if all(w in greeting_words for w in words):
+                return True
+
+        # Common greeting patterns
+        greeting_patterns = [
+            "hi", "hey", "hello", "hii", "hiii", "yo", "sup", "howdy",
+            "good morning", "good evening", "good night", "good afternoon",
+            "how are you", "how's it going", "what's up", "whats up",
+            "nice to meet", "how do you do", "hey there", "hello there",
+            "hi there", "thanks", "thank you", "bye", "goodbye", "see you",
+            "ok", "okay", "sure", "great", "nice", "cool", "awesome",
+        ]
+        if q in greeting_patterns:
+            return True
+        # Also match with trailing punctuation stripped
+        for pat in greeting_patterns:
+            if q == pat or q.startswith(pat + " ") and len(q) < len(pat) + 10:
+                return True
+
+        return False
+
     def _detect_intent(self, query: str) -> QueryIntent:
-        """Keyword-based intent detection."""
+        """Keyword-based intent detection with weighted scoring.
+        More specific intents (PROCEDURAL, CAUSAL) get a small priority boost
+        to break ties with broader intents (FACTUAL, EXPLORATORY)."""
         scores = {}
+        # Priority weights: specific intents get a slight tiebreaker boost
+        priority = {
+            QueryIntent.TEMPORAL: 0.01,
+            QueryIntent.CAUSAL: 0.02,
+            QueryIntent.REFLECTIVE: 0.02,
+            QueryIntent.PROCEDURAL: 0.03,  # Higher priority over FACTUAL
+            QueryIntent.FACTUAL: 0.0,
+            QueryIntent.COMPARATIVE: 0.02,
+            QueryIntent.EXPLORATORY: -0.01,  # Lowest priority (catch-all)
+        }
         for intent, keywords in self.INTENT_KEYWORDS.items():
             score = sum(1 for kw in keywords if kw in query)
             if score > 0:
-                scores[intent] = score
+                scores[intent] = score + priority.get(intent, 0)
 
         if scores:
             return max(scores, key=scores.get)
         return QueryIntent.EXPLORATORY
 
-    def _score_complexity(self, query: str) -> float:
+    def _score_complexity(self, query: str, intent: QueryIntent = None) -> float:
         """Score query complexity 0.0-1.0."""
         score = 0.3  # baseline
 
@@ -146,6 +210,10 @@ class QueryAnalyzer:
         # Conjunctions suggesting multi-part
         if any(w in query for w in ["and", "also", "additionally", "then"]):
             score += 0.05
+
+        # Intent-based complexity boost (reflective/comparative inherently complex)
+        if intent in (QueryIntent.REFLECTIVE, QueryIntent.COMPARATIVE):
+            score += 0.10
 
         return min(score, 1.0)
 

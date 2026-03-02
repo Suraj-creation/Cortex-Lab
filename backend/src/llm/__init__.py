@@ -141,6 +141,13 @@ class LocalLLM:
         # Always truncate at hallucinated conversation continuations
         generated = _truncate_at_stop(generated)
 
+        # Strip any raw model tokens that leaked through
+        for token in ["<|im_end|>", "<|im_start|>", "<|endoftext|>",
+                       "<|im_sep|>", "<｜end▁of▁sentence｜>",
+                       "<｜User｜>", "<｜Assistant｜>"]:
+            generated = generated.replace(token, "")
+        generated = generated.strip()
+
         elapsed_ms = (time.time() - t0) * 1000
         self._call_count += 1
         self._total_tokens += input_len + len(self.tokenizer.encode(generated))
@@ -344,25 +351,43 @@ Later memory: {new_text[:300]}
         """
         Stage 1 (Faithfulness): Generate a grounded answer with inline citations.
         References evidence as [1], [2], etc.
+        If the model hallucinates, falls back to evidence-based extraction.
         """
         evidence_text = "\n".join(f"[{i+1}] {e[:250]}" for i, e in enumerate(evidence[:5]))
 
         prompt = f"""<|im_start|>system
-You are Cortex Lab, a personal AI memory assistant. Answer the user's question
-based ONLY on the provided evidence from their memories. Use inline citations
-like [1], [2] to reference specific memories. If the evidence is insufficient,
-honestly say so — never fabricate information.
+You are Cortex Lab, a personal AI memory assistant. Your task is to answer the
+user's question based STRICTLY on the evidence provided below.
+
+RULES:
+1. ONLY use information explicitly stated in the evidence. NEVER fabricate.
+2. Use inline citations [1], [2], etc. to reference specific evidence.
+3. If the evidence contains the direct answer (name, email, list, etc.), state it clearly.
+4. If the evidence is insufficient, say "I don't have this information in your memories."
+5. DO NOT generate generic patterns like "belief evolution", "emotion timeline", 
+   "key insight", or "clarity of scope" unless the evidence explicitly discusses these.
+6. For factual questions (name, email, skills, projects), give a direct factual answer.
+7. Keep your answer concise and directly relevant to the question.
 {f"Session context: {session_context[:200]}" if session_context else ""}
 <|im_end|>
 <|im_start|>user
-{query}
+Question: {query}
 
-Evidence:
+Evidence from your memories:
 {evidence_text}
+
+Based ONLY on this evidence, answer the question directly:
 <|im_end|>
 <|im_start|>assistant
 """
-        return self.generate(prompt, max_tokens=500, temperature=0.3)
+        result = self.generate(prompt, max_tokens=500, temperature=0.1)
+        result = self._strip_hallucination_patterns(result)
+
+        # Check if the result is actually relevant to the query
+        # The model has a tendency to generate completely off-topic content
+        result = self._validate_or_extract(query, result, evidence)
+
+        return result
 
     def raft_generate(self, query: str, oracle_docs: List[str],
                       distractor_docs: List[str]) -> str:
@@ -383,18 +408,35 @@ Evidence:
         docs_text = "\n".join(all_docs)
 
         prompt = f"""<|im_start|>system
-You are Cortex Lab. Answer the question using ONLY the relevant documents.
-Some documents may be distractors — ignore them. Cite relevant documents with [Doc N].
+You are Cortex Lab, a personal AI memory assistant.
+Answer the question using ONLY the relevant documents below.
+Some documents may be distractors (irrelevant) — ignore them completely.
+Cite relevant documents with [Doc N].
+
+RULES:
+1. Extract and state factual information directly from the documents.
+2. DO NOT generate generic patterns, emotion timelines, or belief evolutions
+   unless the documents explicitly discuss them.
+3. For factual questions, give a direct, concise answer.
+4. If no document answers the question, say "I don't have this information."
 <|im_end|>
 <|im_start|>user
-{query}
+Question: {query}
 
 Documents:
 {docs_text}
+
+Answer based ONLY on relevant documents:
 <|im_end|>
 <|im_start|>assistant
 """
-        return self.generate(prompt, max_tokens=400, temperature=0.3)
+        result = self.generate(prompt, max_tokens=400, temperature=0.1)
+        result = self._strip_hallucination_patterns(result)
+
+        # Validate relevance or fall back to evidence extraction
+        result = self._validate_or_extract(query, result, oracle_docs)
+
+        return result
 
     def call_function(self, query: str, available_tools: List[Dict]) -> Dict[str, Any]:
         """
@@ -426,6 +468,232 @@ Available tools:
         return result
 
     # ─── Fallback & Stats ─────────────────────────────────────────────────
+
+    def _validate_or_extract(self, query: str, result: str, evidence: List[str]) -> str:
+        """
+        Check if the LLM result is actually relevant to the query.
+        If it's hallucinated/off-topic, extract answer from evidence instead.
+        """
+        import re
+
+        # Short/empty results → extract
+        if len(result.strip()) < 30 or "couldn't find" in result.lower():
+            extracted = self._extract_answer_from_evidence(query, evidence)
+            return extracted if extracted else result
+
+        query_lower = query.lower().strip()
+        result_lower = result.lower()
+
+        # Strip greeting prefix from query for analysis
+        for prefix in ["hey ", "hi ", "hello ", "hey, ", "hi, "]:
+            if query_lower.startswith(prefix):
+                query_lower = query_lower[len(prefix):].strip()
+                break
+
+        # Extract key terms from query (nouns/content words)
+        query_words = set(re.findall(r'\b[a-z]{3,}\b', query_lower))
+        stopwords = {"what", "who", "where", "when", "how", "why", "which",
+                      "the", "and", "for", "are", "was", "were", "been",
+                      "have", "has", "had", "does", "did", "will", "would",
+                      "can", "could", "should", "shall", "may", "might",
+                      "that", "this", "with", "from", "about", "your",
+                      "you", "tell", "list", "describe", "give", "show",
+                      "all", "know", "just", "them", "please", "also",
+                      "there", "their", "they", "some", "any", "more"}
+        query_content_words = query_words - stopwords
+
+        # Check: does the response mention ANY of the query's content words?
+        if query_content_words:
+            result_words = set(re.findall(r'\b[a-z]{3,}\b', result_lower))
+            overlap = query_content_words & result_words
+            relevance = len(overlap) / max(len(query_content_words), 1)
+
+            # If less than 30% query words appear in response → likely off-topic
+            if relevance < 0.3:
+                # Check if evidence has better content
+                extracted = self._extract_answer_from_evidence(query, evidence)
+                if extracted:
+                    return extracted
+
+        # Detect generic hallucination indicators
+        halluc_indicators = [
+            "life purpose", "deep work", "stay focused in meetings",
+            "rest is an input", "difficult lesson", "performance, not a reward",
+            "avoid deep work", "consistent over years",
+            "communication skills", "deliberate practice",
+            "My View on", "Improved Answer", "What led me to",
+            "## Summary of", "### Key Findings",
+            "Limited relevant memories", "partial information",
+            "Emotional trajectory", "belief evolution",
+            "Had a difficult moment", "Key lesson from",
+            "moving cities", "city-building",
+        ]
+        for indicator in halluc_indicators:
+            if indicator.lower() in result_lower:
+                extracted = self._extract_answer_from_evidence(query, evidence)
+                if extracted:
+                    return extracted
+                break
+
+        # Detect raw evidence dump format (model just copies evidence verbatim)
+        evidence_dump_markers = [
+            "[Document ", "[Memory 20", "• [Memory", "• [Document",
+            "[Source:", "[Memory 1]", "[Memory 2]",
+        ]
+        dump_count = sum(1 for m in evidence_dump_markers if m in result)
+        if dump_count >= 2:
+            extracted = self._extract_answer_from_evidence(query, evidence)
+            if extracted:
+                return extracted
+
+        # For simple factual queries, always try extraction first
+        simple_factual_patterns = [
+            "my name", "who am i", "my email", "e-mail",
+            "my phone", "my number", "my contact",
+        ]
+        for pat in simple_factual_patterns:
+            if pat in query_lower:
+                extracted = self._extract_answer_from_evidence(query, evidence)
+                if extracted:
+                    return extracted
+                break
+
+        return result
+
+    @staticmethod
+    def _strip_hallucination_patterns(text: str) -> str:
+        """Post-process model output to remove known hallucination patterns
+        and raw model tokens that shouldn't appear in user-facing output."""
+        # Strip raw model tokens
+        for token in ["<|im_end|>", "<|im_start|>", "<|endoftext|>",
+                       "<think>", "</think>", "<|im_sep|>"]:
+            text = text.replace(token, "")
+
+        # Strip the model's tendency to generate generic reflective patterns
+        # when it doesn't have a real answer. These are artifacts of the
+        # fine-tuning stages being over-represented.
+        halluc_phrases = [
+            "Your belief evolution can be traced across",
+            "The key insight is that clarity of scope prevents scope creep",
+            "This comes from watching someone you respect make it happen",
+            "The key driver behind my most impactful work has been clarity of scope",
+            "I do my best learning during transitions",
+            "I'm more motivated when I'm tired than when I'm excited",
+            "small consistent actions beat sporadic bursts",
+            "The bottleneck has shifted from resources to knowledge integration",
+            "The timeline for meaningful impact has accelerated",
+            "Tracing causal chains across your thinking journey",
+            "Tracing causal chains across",
+            "chain of cumulative insight",
+            "Each step built on the previous",
+            "Your thinking journey reveals",
+            "Excited — Anxious — Drained",
+            "Emotion Timeline:",
+            "Emotion Timeline",
+            "Emotion evolution",
+            "Emotional resilience",
+            "had an unexpected complication",
+            "strongly motivated thr",
+            "sporadic bursts",
+            "personal growth and modern technology",
+            "key moments",
+            "cumulative insight",
+            "deliberate practice",
+            "The core challenge has always been",
+            "This evolved naturally from years",
+            "The timeline for meaningful change",
+            "Causal link:",
+            "Step 1 [Memory",
+            "→ Step 2",
+            "→ Step 3",
+            "Drained by the lack of follow-through",
+            "Still processing this",
+            "Key Findings:",  # Only hallucinated when appearing at start with no context
+        ]
+        for phrase in halluc_phrases:
+            if phrase in text:
+                # If the text is mostly hallucination, indicate insufficient data
+                phrase_pos = text.find(phrase)
+                if phrase_pos < 150:  # Hallucination starts early → mostly garbage
+                    text = text[:phrase_pos].strip()
+                    if len(text) < 20:
+                        text = "Based on your stored memories, I couldn't find a specific answer to this question. The relevant evidence may be limited."
+
+        return text.strip()
+
+    @staticmethod
+    def _extract_answer_from_evidence(query: str, evidence: List[str]) -> str:
+        """
+        When the LLM hallucinates, extract a factual answer directly from evidence.
+        This is a rule-based fallback that looks for common patterns in the stored data.
+        """
+        import re
+        query_lower = query.lower().strip()
+
+        # Remove greeting prefixes
+        for prefix in ["hey ", "hi ", "hello ", "hey, ", "hi, "]:
+            if query_lower.startswith(prefix):
+                query_lower = query_lower[len(prefix):].strip()
+                break
+
+        # Join all evidence for searching
+        all_evidence = "\n".join(evidence)
+
+        # Pattern matching for common factual queries
+        # ─── Name ───
+        if any(w in query_lower for w in ["my name", "who am i"]):
+            # Look for name patterns in evidence
+            name_match = re.search(r'\*\*([A-Z][a-z]+ [A-Z][a-z]+)\*\*', all_evidence)
+            if name_match:
+                return f"Based on your stored memories, your name is **{name_match.group(1)}**."
+            name_match = re.search(r'([A-Z][a-z]+ [A-Z][a-z]+)\s*\n', all_evidence)
+            if name_match:
+                return f"Based on your stored memories, your name is **{name_match.group(1)}**."
+
+        # ─── Email ───
+        if any(w in query_lower for w in ["email", "e-mail", "mail"]):
+            email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', all_evidence)
+            if email_match:
+                return f"Your email address is **{email_match.group(0)}**."
+
+        # ─── Phone ───
+        if any(w in query_lower for w in ["phone", "number", "contact"]):
+            phone_match = re.search(r'\+?\d[\d\s-]{8,}', all_evidence)
+            if phone_match:
+                return f"Your phone number is **{phone_match.group(0).strip()}**."
+
+        # ─── Skills/Languages ───
+        if any(w in query_lower for w in ["skill", "language", "programming", "tech"]):
+            # Look for skills section
+            skills_match = re.search(
+                r'(?:Skills|Programming|Technical)[:\s*]*(.{20,300})',
+                all_evidence, re.IGNORECASE
+            )
+            if skills_match:
+                return f"Based on your resume and memories:\n\n{skills_match.group(0)[:300]}"
+
+        # ─── Projects ───
+        if any(w in query_lower for w in ["project", "built", "worked on", "portfolio"]):
+            # Look for project headers
+            projects = re.findall(
+                r'(?:📌|Project|###)\s*(?:Project\s*\d*[:\s]*)?(.{10,100})',
+                all_evidence, re.IGNORECASE
+            )
+            if projects:
+                project_list = "\n".join(f"• {p.strip()}" for p in projects[:8])
+                return f"Based on your stored memories, here are your projects:\n\n{project_list}"
+
+        # ─── Generic: Return the most relevant evidence snippet ───
+        # Find the longest, most informative evidence piece
+        best_evidence = ""
+        for e in evidence:
+            if len(e) > len(best_evidence) and "[Source:" in e:
+                best_evidence = e
+
+        if best_evidence and len(best_evidence) > 50:
+            return f"Based on your stored memories:\n\n{best_evidence[:400]}"
+
+        return ""  # No extraction possible
 
     def _fallback_generate(self, prompt: str) -> str:
         """Fallback when model is not loaded."""

@@ -55,22 +55,43 @@ class MemoryIngestionPipeline:
         self.graph = knowledge_graph
 
         # Keyword-based classifiers (fast, no LLM needed for ~85% of cases)
+        # NOTE: Avoid duplicate keywords across emotion categories to prevent conflicts
         self._emotion_keywords = {
-            EmotionLabel.HAPPY: ["happy", "joy", "excited", "great", "wonderful", "love", "amazing", "glad", "pleased", "delighted"],
-            EmotionLabel.SAD: ["sad", "depressed", "down", "unhappy", "miserable", "grief", "loss", "miss"],
-            EmotionLabel.ANGRY: ["angry", "furious", "mad", "irritated", "annoyed", "frustrated", "rage"],
-            EmotionLabel.ANXIOUS: ["anxious", "worried", "nervous", "stress", "panic", "fear", "uncertain"],
-            EmotionLabel.EXCITED: ["excited", "thrilled", "eager", "pumped", "can't wait", "stoked"],
-            EmotionLabel.CONFUSED: ["confused", "puzzled", "unsure", "don't understand", "lost", "bewildered"],
-            EmotionLabel.HOPEFUL: ["hopeful", "optimistic", "promising", "looking forward", "positive"],
-            EmotionLabel.FRUSTRATED: ["frustrated", "stuck", "annoyed", "struggling", "difficult"],
+            EmotionLabel.HAPPY: ["happy", "joy", "great", "wonderful", "love", "amazing",
+                                 "glad", "pleased", "delighted", "enjoyed", "fun", "nice",
+                                 "pleasant", "awesome", "fantastic", "blessed"],
+            EmotionLabel.SAD: ["sad", "depressed", "down", "unhappy", "miserable", "grief",
+                               "loss", "miss", "heartbroken", "sorrow", "devastated"],
+            EmotionLabel.ANGRY: ["angry", "furious", "mad", "rage", "outraged", "infuriated",
+                                 "livid", "hostile"],
+            EmotionLabel.ANXIOUS: ["anxious", "worried", "nervous", "stress", "panic", "fear",
+                                   "uncertain", "avoiding", "afraid", "dreading", "uneasy",
+                                   "apprehensive"],
+            EmotionLabel.EXCITED: ["excited", "thrilled", "eager", "pumped", "can't wait",
+                                   "stoked", "new paper", "breakthrough", "discovered",
+                                   "launched", "published", "announced"],
+            EmotionLabel.CONFUSED: ["confused", "puzzled", "unsure", "don't understand",
+                                    "lost", "bewildered", "perplexed", "baffled"],
+            EmotionLabel.HOPEFUL: ["hopeful", "optimistic", "promising", "looking forward",
+                                   "positive", "encouraged", "inspired"],
+            EmotionLabel.FRUSTRATED: ["frustrated", "stuck", "annoyed", "struggling",
+                                      "difficult", "irritated", "toxic", "unreasonable",
+                                      "doesn't listen", "seriously considering leaving",
+                                      "fed up"],
         }
 
         self._memory_type_keywords = {
-            MemoryType.EPISODIC: ["went to", "met with", "had", "visited", "talked to", "saw", "did"],
-            MemoryType.SEMANTIC: ["learned", "understood", "concept", "means", "defined as", "is a", "theory"],
-            MemoryType.PROCEDURAL: ["how to", "process", "steps", "method", "procedure", "workflow"],
-            MemoryType.REFLECTIVE: ["realized", "think", "feel", "believe", "changed my mind", "pattern", "noticed"],
+            MemoryType.EPISODIC: ["went to", "met with", "visited", "talked to", "saw"],
+            MemoryType.SEMANTIC: ["learned", "understood", "concept", "means", "defined as",
+                                  "theory", "is that", "works by"],
+            MemoryType.PROCEDURAL: ["how to", "process:", "steps", "method", "procedure",
+                                    "workflow", "1)", "step 1"],
+            MemoryType.REFLECTIVE: ["realized", "i think", "i feel", "i believe",
+                                    "changed my mind", "pattern", "noticed",
+                                    "i love", "i hate", "opinion", "perspective",
+                                    "considering", "culture", "valued", "frustrated",
+                                    "i'm frustrated", "doesn't matter",
+                                    "seriously considering"],
         }
 
     async def ingest(self, content: str, session_id: str = "",
@@ -190,6 +211,8 @@ Types: episodic (events/activities), semantic (facts/knowledge), procedural (pro
         # Find capitalized words (likely proper nouns)
         words = text.split()
         for i, word in enumerate(words):
+            # Strip possessive forms before cleaning
+            word = re.sub(r"[''']s$", "", word)
             clean = re.sub(r'[^\w]', '', word)
             if clean and clean[0].isupper() and i > 0 and len(clean) > 1:
                 # Not at start of sentence (likely proper noun)

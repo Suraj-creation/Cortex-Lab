@@ -672,7 +672,20 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
         yield f"data: {json.dumps(meta_chunk)}\n\n"
 
         # Step 2: Build prompt with evidence context for streaming generation
-        evidence_texts = [e.get("content", "")[:250] for e in evidence[:5]]
+        # Filter out query-echo evidence (user questions stored as memories)
+        evidence_texts = []
+        for e in evidence[:8]:  # Check more to fill after filtering
+            content = e.get("content", "").strip()
+            lower = content.lower()
+            # Skip short question-like evidence
+            if len(content) < 50:
+                continue
+            if (lower.endswith("?") and len(content) < 120
+                    and not any(k in lower for k in ["[source:", "**", "project", "built"])):
+                continue
+            evidence_texts.append(content[:250])
+            if len(evidence_texts) >= 5:
+                break
         evidence_block = "\n".join(f"[{i+1}] {e}" for i, e in enumerate(evidence_texts))
 
         # Check if evidence is actually meaningful (not just greetings)
@@ -686,15 +699,23 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
 You are Cortex Lab, a personal AI memory and reasoning assistant.
 Answer the user's question using ONLY the provided evidence from their memories.
 Use inline citations [1], [2] etc. to reference specific memories.
-If the evidence does not contain relevant information, say "I don't have memories about that yet."
-NEVER invent, fabricate, or assume information not present in the evidence.
-Keep responses focused and concise.
+
+RULES:
+1. Extract and state factual information directly from the evidence.
+2. If the evidence contains a direct answer (name, email, project name, skill list), state it clearly.
+3. DO NOT generate generic patterns like "belief evolution", "emotion timeline", 
+   "key insight", or "clarity of scope" unless the evidence explicitly discusses these.
+4. If the evidence does not contain relevant information, say "I don't have memories about that yet."
+5. NEVER invent, fabricate, or assume information not present in the evidence.
+6. Keep responses focused, concise, and directly relevant to the question.
 <|im_end|>
 <|im_start|>user
-{user_message}
+Question: {user_message}
 
 Evidence from memories:
 {evidence_block}
+
+Answer based ONLY on the evidence above:
 <|im_end|>
 <|im_start|>assistant
 """

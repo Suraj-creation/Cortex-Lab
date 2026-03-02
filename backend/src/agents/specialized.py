@@ -39,8 +39,23 @@ class BaseAgent:
         return "\n\n".join(parts) if parts else "No relevant memories found."
 
     def _evidence_texts(self, results: List[RetrievalResult], max_items: int = 5) -> List[str]:
-        """Extract plain text snippets for LLM methods."""
-        return [r.memory.content[:300] for r in results[:max_items]]
+        """Extract plain text snippets for LLM methods.
+        Filters out low-quality evidence like stored user queries."""
+        texts = []
+        for r in results[:max_items + 5]:  # Check extra to fill after filtering
+            content = r.memory.content.strip()
+            # Skip very short evidence (likely a stored user query)
+            if len(content) < 50:
+                continue
+            # Skip evidence that looks like a user question, not stored data
+            lower = content.lower()
+            if (lower.endswith("?") and len(content) < 120
+                    and not any(k in lower for k in ["[source:", "**", "project", "built", "created"])):
+                continue
+            texts.append(content[:300])
+            if len(texts) >= max_items:
+                break
+        return texts
 
 
 class TimelineAgent(BaseAgent):
