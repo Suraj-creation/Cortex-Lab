@@ -360,12 +360,13 @@ Memory:
             if existing_id:
                 # Update existing entity's last_seen and memory_ids
                 if self.graph.graph is not None and existing_id in self.graph.graph:
-                    node = self.graph.graph.nodes[existing_id]
-                    node["last_seen"] = memory.timestamp.isoformat()
-                    existing_mids = node.get("memory_ids", [])
+                    # Use nx.set_node_attributes for safe mutation (AtlasView compat)
+                    import networkx as nx
+                    nx.set_node_attributes(self.graph.graph, {existing_id: {"last_seen": memory.timestamp.isoformat()}})
+                    existing_mids = list(self.graph.graph.nodes[existing_id].get("memory_ids", []))
                     if memory.id not in existing_mids:
                         existing_mids.append(memory.id)
-                        node["memory_ids"] = existing_mids
+                        nx.set_node_attributes(self.graph.graph, {existing_id: {"memory_ids": existing_mids}})
             else:
                 # Create new entity
                 entity = EntityNode(

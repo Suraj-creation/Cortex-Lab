@@ -79,11 +79,11 @@ class KnowledgeGraph:
         if self.graph is not None:
             # Merge with existing edge if present
             if self.graph.has_edge(edge.source_id, edge.target_id):
-                existing = self.graph[edge.source_id][edge.target_id]
-                existing_mids = existing.get("memory_ids", [])
+                edge_data = self.graph.edges[edge.source_id, edge.target_id]
+                existing_mids = edge_data.get("memory_ids", [])
                 merged_mids = list(set(existing_mids + edge.memory_ids))
-                self.graph[edge.source_id][edge.target_id]["memory_ids"] = merged_mids
-                self.graph[edge.source_id][edge.target_id]["weight"] = existing.get("weight", 1.0) + edge.weight
+                edge_data["memory_ids"] = merged_mids
+                edge_data["weight"] = edge_data.get("weight", 1.0) + edge.weight
             else:
                 self.graph.add_edge(
                     edge.source_id, edge.target_id,
@@ -210,11 +210,10 @@ class KnowledgeGraph:
 
             if best_match:
                 # Auto-add as alias for faster future lookups
-                node = self.graph.nodes[best_match]
-                aliases = node.get("aliases", [])
+                aliases = list(self.graph.nodes[best_match].get("aliases", []))
                 if name not in aliases:
                     aliases.append(name)
-                    node["aliases"] = aliases
+                    nx.set_node_attributes(self.graph, {best_match: {"aliases": aliases}})
                 # Update alias index
                 self._alias_index[name_lower] = best_match
                 return best_match
@@ -239,20 +238,20 @@ class KnowledgeGraph:
         if self.graph is None or keep_id not in self.graph or merge_id not in self.graph:
             return
 
-        keep_node = self.graph.nodes[keep_id]
-        merge_node = self.graph.nodes[merge_id]
+        keep_data = dict(self.graph.nodes[keep_id])
+        merge_data = dict(self.graph.nodes[merge_id])
 
         # Merge aliases
-        existing_aliases = keep_node.get("aliases", [])
-        merge_aliases = merge_node.get("aliases", [])
-        merge_name = merge_node.get("canonical_name", "")
+        existing_aliases = keep_data.get("aliases", [])
+        merge_aliases = merge_data.get("aliases", [])
+        merge_name = merge_data.get("canonical_name", "")
         all_aliases = list(set(existing_aliases + merge_aliases + ([merge_name] if merge_name else [])))
-        keep_node["aliases"] = all_aliases
+        nx.set_node_attributes(self.graph, {keep_id: {"aliases": all_aliases}})
 
         # Merge memory_ids
-        keep_mids = set(keep_node.get("memory_ids", []))
-        merge_mids = merge_node.get("memory_ids", [])
-        keep_node["memory_ids"] = list(keep_mids | set(merge_mids))
+        keep_mids = set(keep_data.get("memory_ids", []))
+        merge_mids = merge_data.get("memory_ids", [])
+        nx.set_node_attributes(self.graph, {keep_id: {"memory_ids": list(keep_mids | set(merge_mids))}})
 
         # Redirect edges
         for pred in list(self.graph.predecessors(merge_id)):
@@ -334,6 +333,7 @@ class KnowledgeGraph:
     def save(self):
         if self.graph is not None:
             data = nx.node_link_data(self.graph)
+            data["multigraph"] = False  # Always save as simple DiGraph
             with open(os.path.join(self.data_dir, "knowledge_graph.json"), "w") as f:
                 json.dump(data, f, default=str)
             print(f"  ✓ Knowledge graph saved ({self.graph.number_of_nodes()} nodes, {self.graph.number_of_edges()} edges)")
@@ -344,7 +344,14 @@ class KnowledgeGraph:
             try:
                 with open(path) as f:
                     data = json.load(f)
-                self.graph = nx.node_link_graph(data, directed=True)
+                # Force multigraph=False so we always get a plain DiGraph
+                data["multigraph"] = False
+                loaded = nx.node_link_graph(data, directed=True)
+                # Ensure we always have a DiGraph, not a MultiDiGraph
+                if isinstance(loaded, nx.MultiDiGraph):
+                    self.graph = nx.DiGraph(loaded)
+                else:
+                    self.graph = loaded
                 print(f"  ✓ Knowledge graph loaded ({self.graph.number_of_nodes()} nodes)")
             except Exception as e:
                 print(f"  ⚠ Failed to load graph: {e}")

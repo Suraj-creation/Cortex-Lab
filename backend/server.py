@@ -300,6 +300,154 @@ SYSTEM_PROMPT = (
 # Stop patterns: if the model starts generating these, it's hallucinating a new turn
 _STOP_PATTERNS = ["\nUser:", "\nuser:", "\nHuman:", "\nhuman:", "\nQ:", "\nA:", "\n\nUser "]
 
+# ── Streaming hallucination filters ─────────────────────────────────────────
+# These are known patterns the fine-tuned model generates instead of real answers.
+# Used to detect and suppress hallucination in the streaming path.
+_STREAMING_HALLUC_PHRASES = [
+    "belief evolution", "the key insight is", "clarity of scope",
+    "clarity requires constraints", "systems matter more than goals",
+    "the intersection of deep work", "personal growth and modern technology",
+    "deep work patterns", "sporadic bursts", "cumulative insight",
+    "emotional trajectory", "emotion timeline", "deliberate practice",
+    "the bottleneck has shifted", "the timeline for meaningful",
+    "tracing causal chains", "your thinking journey",
+    "comprehensive answer to your question",
+    "here's a comprehensive answer", "here's the revised answer",
+    "here's what your beliefs", "revised answer focused on",
+    "according to research on personal growth",
+    "reflecting on my relationship with my mentor",
+    "here's a decomposed analysis",
+    "you strongly believe that",
+    "the relationship is more complex than people say",
+    "lived experiences",
+    "synthesizing", "based on strong empirical evidence",
+]
+
+
+def _check_no_info_streaming(query: str, evidence_texts: list) -> str:
+    """
+    Pre-generation check: if the query asks about data that doesn't exist
+    in evidence, return a polite 'no info' message instead of generating.
+    This prevents the model from hallucinating answers about nonexistent data.
+    Uses word-boundary regex to avoid false positives (e.g., "earn" in "learning").
+    """
+    import re as _re
+    q = query.lower().strip()
+    all_ev = "\n".join(e.lower() for e in evidence_texts) if evidence_texts else ""
+
+    def _ev_has_word(keywords):
+        for k in keywords:
+            if _re.search(r'\b' + _re.escape(k) + r'\b', all_ev):
+                return True
+        return False
+
+    checks = [
+        # Salary / compensation — strict whole-word evidence matching
+        (["salary", "compensation", "how much do i earn", "how much do i make",
+          "my income", "my pay", "how much does", "earning"],
+         ["salary", "compensation", "annual income", "monthly pay",
+          "ctc", "lpa", "stipend", "remuneration"],
+         "I don't have any salary or compensation information stored in your memories."),
+
+        # PhD / Doctoral
+        (["phd", "doctoral", "dissertation", "phd thesis"],
+         ["phd", "doctoral", "dissertation"],
+         "I don't have any information about a PhD or doctoral degree in your memories."),
+
+        # Marriage / family — broader triggers
+        (["wife", "husband", "spouse", "children", "kids",
+          "son", "daughter", "married", "wedding",
+          "have a wife", "have a husband", "have children",
+          "is he married", "is she married", "marital status",
+          "family members"],
+         ["wife", "husband", "spouse", "married", "wedding",
+          "children names", "son named", "daughter named"],
+         "I don't have any information about marriage or family in your memories."),
+
+        # Published papers
+        (["published research", "research paper", "published paper",
+          "my publications", "published papers", "research papers"],
+         ["published paper", "publication in", "journal paper",
+          "ieee", "arxiv", "conference paper"],
+         "I don't have any published research papers stored in your memories."),
+    ]
+
+    for query_triggers, evidence_keywords, msg in checks:
+        if any(t in q for t in query_triggers):
+            if not _ev_has_word(evidence_keywords):
+                return msg
+
+    # Employment at specific companies (false premise)
+    companies = ["google", "microsoft", "amazon", "meta", "apple", "tesla",
+                 "netflix", "uber", "airbnb", "spotify"]
+    for company in companies:
+        if f"work at {company}" in q or f"{company} job" in q or f"employed at {company}" in q:
+            if not _re.search(r'\b' + _re.escape(company) + r'\b', all_ev):
+                return f"I don't have any information about employment at {company.title()} in your memories."
+
+    # Stanford / MIT / Harvard etc. (false premise universities)
+    false_unis = ["stanford", "mit ", "harvard", "oxford", "cambridge", "princeton", "yale"]
+    for uni in false_unis:
+        if uni in q and uni.strip() not in all_ev:
+            return f"I don't have any information about {uni.strip().title()} in your memories."
+
+    return ""
+
+
+def _try_extract_factual(query: str, evidence_texts: list) -> str:
+    """
+    Pre-generation extraction: for simple factual queries, try to extract
+    the answer directly from evidence using regex patterns.
+    This bypasses the LLM entirely for queries it consistently hallucinates on.
+    """
+    import re
+    q = query.lower().strip()
+
+    # Remove greetings
+    for prefix in ["hey ", "hi ", "hello ", "hey, ", "hi, "]:
+        if q.startswith(prefix):
+            q = q[len(prefix):].strip()
+            break
+
+    all_ev = "\n".join(evidence_texts) if evidence_texts else ""
+    if not all_ev:
+        return ""
+
+    # ── Name ──
+    if any(w in q for w in ["my name", "who am i", "full name", "what's my name"]):
+        m = re.search(r'\*\*([A-Z][a-z]+ [A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\*\*', all_ev)
+        if m:
+            return f"Your name is **{m.group(1)}** [1]."
+        m = re.search(r'^([A-Z][a-z]+ [A-Z][a-z]+)', all_ev)
+        if m:
+            return f"Your name is **{m.group(1)}** [1]."
+
+    # ── Email ──
+    if any(w in q for w in ["email", "e-mail", "mail address", "gmail"]):
+        m = re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', all_ev)
+        if m:
+            return f"Your email address is **{m.group(0)}** [1]."
+
+    # ── Phone ──
+    if any(w in q for w in ["phone", "number", "contact number", "mobile"]):
+        m = re.search(r'\+?\d[\d\s-]{8,15}', all_ev)
+        if m:
+            return f"Your phone number is **{m.group(0).strip()}** [1]."
+
+    # ── University ──
+    if any(w in q for w in ["university", "college", "where do i study", "my institution"]):
+        m = re.search(r'(?:University|College|Institute)[:\s]*([^\n,|]{5,60})', all_ev, re.IGNORECASE)
+        if m:
+            return f"You study at **{m.group(0).strip()}** [1]."
+
+    # ── Degree ──
+    if any(w in q for w in ["my degree", "what am i studying", "course", "major"]):
+        m = re.search(r'(B\.?Tech|M\.?Tech|B\.?Sc|M\.?Sc|MBA|Bachelor|Master)[^\n]{0,100}', all_ev, re.IGNORECASE)
+        if m:
+            return f"You are pursuing **{m.group(0).strip()}** [1]."
+
+    return ""  # Don't extract — let the model generate
+
 
 def _build_prompt(messages: list[ChatMessage]) -> str:
     """
@@ -682,7 +830,7 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
         # Step 2: Build prompt with evidence context for streaming generation
         # Filter out query-echo evidence (user questions stored as memories)
         evidence_texts = []
-        for e in evidence[:8]:  # Check more to fill after filtering
+        for e in evidence[:12]:  # Check more to fill after filtering
             content = e.get("content", "").strip()
             lower = content.lower()
             # Skip short question-like evidence
@@ -691,6 +839,18 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
             if (lower.endswith("?") and len(content) < 120
                     and not any(k in lower for k in ["[source:", "**", "project", "built"])):
                 continue
+            # Skip repetitive/spam content
+            words = lower.split()
+            if len(words) > 10:
+                trigrams = [' '.join(words[i:i+3]) for i in range(len(words)-2)]
+                from collections import Counter
+                trigram_counts = Counter(trigrams)
+                if trigram_counts and max(trigram_counts.values()) > 3:
+                    continue
+            # Skip stored user queries (but allow long source docs)
+            if re.match(r'^(tell me|what is|what are|who is|where is|how is|list|describe|explain)\b', lower):
+                if len(content) < 200 and "[source:" not in lower:
+                    continue
             evidence_texts.append(content[:250])
             if len(evidence_texts) >= 5:
                 break
@@ -701,6 +861,23 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
             len(e.strip()) > 10 and e.strip().lower() not in {"hi", "hello", "hey", "hii", "hiii"}
             for e in evidence_texts
         )
+
+        # ── Pre-generation: Check for false premises / no-data queries ──
+        # If the query asks about data that doesn't exist, don't even generate
+        no_info_response = _check_no_info_streaming(user_message, evidence_texts)
+        if no_info_response:
+            chunk = {"id": msg_id, "delta": no_info_response}
+            yield f"data: {json.dumps(chunk)}\n\n"
+            yield f"data: {json.dumps({'id': msg_id, 'delta': '', 'done': True})}\n\n"
+            return
+
+        # ── Pre-generation: For simple factual queries, try direct extraction ──
+        extracted_answer = _try_extract_factual(user_message, evidence_texts)
+        if extracted_answer:
+            chunk = {"id": msg_id, "delta": extracted_answer}
+            yield f"data: {json.dumps(chunk)}\n\n"
+            yield f"data: {json.dumps({'id': msg_id, 'delta': '', 'done': True})}\n\n"
+            return
 
         if has_meaningful_evidence:
             rag_prompt = f"""<|im_start|>system
@@ -770,7 +947,9 @@ Keep your response brief and friendly.
         thread.start()
 
         accumulated = ""
+        streamed_text = ""  # Track what we've actually sent to client
         in_think = False  # Track <think> block to suppress from stream
+        halluc_detected = False  # Track if hallucination was detected mid-stream
         for token_text in streamer:
             accumulated += token_text
 
@@ -793,6 +972,16 @@ Keep your response brief and friendly.
             if not clean_token:
                 continue
 
+            # ── Hallucination detection in streaming ──
+            # Check accumulated text for known hallucination patterns
+            acc_lower = accumulated.lower()
+            for halluc_phrase in _STREAMING_HALLUC_PHRASES:
+                if halluc_phrase in acc_lower:
+                    halluc_detected = True
+                    break
+            if halluc_detected:
+                break  # Stop streaming — will try extraction fallback below
+
             should_stop = False
             for pattern in _STOP_PATTERNS:
                 if pattern in accumulated:
@@ -801,13 +990,46 @@ Keep your response brief and friendly.
                     if leftover:
                         chunk = {"id": msg_id, "delta": leftover}
                         yield f"data: {json.dumps(chunk)}\n\n"
+                        streamed_text += leftover
                     should_stop = True
                     break
             if should_stop:
                 break
             chunk = {"id": msg_id, "delta": clean_token}
             yield f"data: {json.dumps(chunk)}\n\n"
+            streamed_text += clean_token
             await asyncio.sleep(0)
+
+        # ── Post-stream: If hallucination was detected, replace with extraction ──
+        if halluc_detected and evidence_texts:
+            # Try to extract a factual answer from evidence
+            extracted = _try_extract_factual(user_message, evidence_texts)
+            if not extracted:
+                # Generic extraction: find best matching evidence
+                import re as _re
+                q_words = set(_re.findall(r'\b[a-z]{3,}\b', user_message.lower()))
+                filler = {"what", "who", "where", "when", "how", "why", "the",
+                          "and", "for", "are", "tell", "about", "your", "you",
+                          "please", "give", "show", "list", "does", "did"}
+                content_words = q_words - filler
+                best_ev, best_score = "", 0
+                for ev in evidence_texts:
+                    score = sum(1 for w in content_words if w in ev.lower())
+                    if score > best_score and len(ev) > 50:
+                        best_score = score
+                        best_ev = ev
+                if best_ev:
+                    extracted = f"Based on your stored memories:\n\n{best_ev[:400]} [1]."
+                else:
+                    extracted = "I don't have specific information about that in your memories. Could you try rephrasing your question?"
+
+            # Send the extracted answer (replace any partial hallucinated stream)
+            # Send a newline to visually separate if we already streamed some text
+            if streamed_text.strip():
+                replace_chunk = {"id": msg_id, "delta": f"\n\n{extracted}"}
+            else:
+                replace_chunk = {"id": msg_id, "delta": extracted}
+            yield f"data: {json.dumps(replace_chunk)}\n\n"
 
         yield f"data: {json.dumps({'id': msg_id, 'delta': '', 'done': True})}\n\n"
         thread.join()

@@ -314,7 +314,14 @@ Memories:
 <|im_end|>
 <|im_start|>assistant
 """
-        return self.generate(prompt, max_tokens=500, temperature=0.3)
+        result = self.generate(prompt, max_tokens=500, temperature=0.3)
+        result = self._strip_hallucination_patterns(result)
+        result = self._validate_or_extract(query, result, memories)
+
+        if not result or len(result.strip()) < 15:
+            result = "I don't have enough stored memories to trace a causal chain for this question."
+
+        return result
 
     def detect_belief_change(self, old_text: str, new_text: str, topic: str = "") -> Dict[str, Any]:
         """
@@ -387,6 +394,10 @@ Based ONLY on this evidence, answer the question directly:
         # The model has a tendency to generate completely off-topic content
         result = self._validate_or_extract(query, result, evidence)
 
+        # Final safety: never return empty or near-empty
+        if not result or len(result.strip()) < 15:
+            result = "I don't have specific information about that in your stored memories."
+
         return result
 
     def raft_generate(self, query: str, oracle_docs: List[str],
@@ -436,6 +447,10 @@ Answer based ONLY on relevant documents:
         # Validate relevance or fall back to evidence extraction
         result = self._validate_or_extract(query, result, oracle_docs)
 
+        # Final safety: never return empty or near-empty
+        if not result or len(result.strip()) < 15:
+            result = "I don't have specific information about that in your stored memories."
+
         return result
 
     def call_function(self, query: str, available_tools: List[Dict]) -> Dict[str, Any]:
@@ -471,15 +486,10 @@ Available tools:
 
     def _validate_or_extract(self, query: str, result: str, evidence: List[str]) -> str:
         """
-        Check if the LLM result is actually relevant to the query.
-        If it's hallucinated/off-topic, extract answer from evidence instead.
+        Aggressively check if the LLM result is actually relevant and faithful.
+        If it's hallucinated/off-topic/generic, extract answer from evidence instead.
         """
         import re
-
-        # Short/empty results → extract
-        if len(result.strip()) < 30 or "couldn't find" in result.lower():
-            extracted = self._extract_answer_from_evidence(query, evidence)
-            return extracted if extracted else result
 
         query_lower = query.lower().strip()
         result_lower = result.lower()
@@ -490,7 +500,77 @@ Available tools:
                 query_lower = query_lower[len(prefix):].strip()
                 break
 
-        # Extract key terms from query (nouns/content words)
+        # ── 0. Check if query asks about data NOT in evidence ──
+        no_info = self._detect_no_info(query_lower, evidence)
+        if no_info:
+            return no_info
+
+        # ── 1. Short/empty results → try extraction ──
+        if len(result.strip()) < 30 or "couldn't find" in result_lower:
+            extracted = self._extract_answer_from_evidence(query, evidence)
+            return extracted if extracted else result
+
+        # ── 2. Detect hallucination patterns (aggressive) ──
+        # These are patterns the fine-tuned model generates instead of real answers
+        halluc_indicators = [
+            # Generic philosophical/reflective garbage
+            "life purpose", "deep work", "stay focused in meetings",
+            "rest is an input", "difficult lesson", "performance, not a reward",
+            "avoid deep work", "consistent over years",
+            "communication skills", "deliberate practice",
+            "my view on", "improved answer", "what led me to",
+            "## summary of", "### key findings", "### key insight",
+            "limited relevant memories", "partial information",
+            "emotional trajectory", "belief evolution",
+            "had a difficult moment", "key lesson from",
+            "moving cities", "city-building",
+            "personal growth", "modern technology",
+            "the key insight is", "clarity of scope",
+            "clarity requires constraints", "scope creep",
+            "systems matter more than goals",
+            "the relationship is more complex than",
+            "the intersection of", "deep work patterns",
+            "the bottleneck has shifted",
+            "the timeline for meaningful",
+            "sporadic bursts", "cumulative insight",
+            "your thinking journey", "lived experiences",
+            "key moments", "strong empirical evidence",
+            "belief about relationships evolution",
+            "reflecting on my relationship with my mentor",
+            "emotional resilience", "emotion evolution",
+            "according to research on personal growth",
+            "stay focused in meetings", "rest is an input",
+            # Fake confidence/synthesis claims
+            "synthesizing .{0,5} memories about",
+            "confidence: high", "confidence: medium",
+            "based on strong empirical", "based on .{0,5} memories",
+            "comprehensive answer to your question",
+            "here's a comprehensive answer",
+            "here is a comprehensive answer",
+            "here's the revised answer",
+            "here's what your beliefs",
+            "revised answer focused on",
+            # Format artifacts
+            "[name]",
+            "s-repository]",
+            "• s-repository",
+            "technical documentation of all projects",
+        ]
+        halluc_count = 0
+        for indicator in halluc_indicators:
+            if indicator in result_lower:
+                halluc_count += 1
+
+        if halluc_count >= 1:
+            # Even ONE hallucination indicator = try extraction
+            extracted = self._extract_answer_from_evidence(query, evidence)
+            if extracted:
+                return extracted
+            # If extraction fails AND multiple indicators, return "no info"
+            if halluc_count >= 2:
+                return "I don't have specific information about that in your memories. Could you try rephrasing your question?"
+
+        # ── 3. Check relevance: query content words vs result ──
         query_words = set(re.findall(r'\b[a-z]{3,}\b', query_lower))
         stopwords = {"what", "who", "where", "when", "how", "why", "which",
                       "the", "and", "for", "are", "was", "were", "been",
@@ -499,10 +579,10 @@ Available tools:
                       "that", "this", "with", "from", "about", "your",
                       "you", "tell", "list", "describe", "give", "show",
                       "all", "know", "just", "them", "please", "also",
-                      "there", "their", "they", "some", "any", "more"}
+                      "there", "their", "they", "some", "any", "more",
+                      "much", "many", "very", "really", "quite"}
         query_content_words = query_words - stopwords
 
-        # Check: does the response mention ANY of the query's content words?
         if query_content_words:
             result_words = set(re.findall(r'\b[a-z]{3,}\b', result_lower))
             overlap = query_content_words & result_words
@@ -510,35 +590,16 @@ Available tools:
 
             # If less than 30% query words appear in response → likely off-topic
             if relevance < 0.3:
-                # Check if evidence has better content
                 extracted = self._extract_answer_from_evidence(query, evidence)
                 if extracted:
                     return extracted
 
-        # Detect generic hallucination indicators
-        halluc_indicators = [
-            "life purpose", "deep work", "stay focused in meetings",
-            "rest is an input", "difficult lesson", "performance, not a reward",
-            "avoid deep work", "consistent over years",
-            "communication skills", "deliberate practice",
-            "My View on", "Improved Answer", "What led me to",
-            "## Summary of", "### Key Findings",
-            "Limited relevant memories", "partial information",
-            "Emotional trajectory", "belief evolution",
-            "Had a difficult moment", "Key lesson from",
-            "moving cities", "city-building",
-        ]
-        for indicator in halluc_indicators:
-            if indicator.lower() in result_lower:
-                extracted = self._extract_answer_from_evidence(query, evidence)
-                if extracted:
-                    return extracted
-                break
-
-        # Detect raw evidence dump format (model just copies evidence verbatim)
+        # ── 4. Detect raw evidence dump ──
         evidence_dump_markers = [
             "[Document ", "[Memory 20", "• [Memory", "• [Document",
             "[Source:", "[Memory 1]", "[Memory 2]",
+            "Document 1:", "Document 2:", "Document 3:",
+            "Key Point:", "key points:",
         ]
         dump_count = sum(1 for m in evidence_dump_markers if m in result)
         if dump_count >= 2:
@@ -546,10 +607,22 @@ Available tools:
             if extracted:
                 return extracted
 
-        # For simple factual queries, always try extraction first
+        # ── 5. For factual queries, always try extraction FIRST ──
         simple_factual_patterns = [
-            "my name", "who am i", "my email", "e-mail",
+            "my name", "who am i", "full name", "my email", "e-mail",
             "my phone", "my number", "my contact",
+            "my university", "my college", "where do i study",
+            "my degree", "what am i studying",
+            "my gpa", "my grade", "my marks", "my percentage",
+            "my address", "where do i live", "where am i from",
+            "my age", "how old",
+            "project", "built", "worked on", "portfolio", "developed",
+            "skill", "language", "programming", "tech stack",
+            "achievement", "award", "hackathon",
+            "linkedin", "github",
+            "about me", "summary", "overview",
+            "class 10", "class 12", "10th", "12th",
+            "chatbot", "hope", "cortex",
         ]
         for pat in simple_factual_patterns:
             if pat in query_lower:
@@ -560,19 +633,107 @@ Available tools:
 
         return result
 
+    def _detect_no_info(self, query_lower: str, evidence: List[str]) -> str:
+        """
+        Detect queries about information that does NOT exist in evidence.
+        Returns a polite 'no info' message, or empty string if info might exist.
+        Uses word-boundary regex matching to avoid substring false positives
+        (e.g., "earn" matching "learning", "pay" matching "display").
+        """
+        import re
+        all_evidence_lower = "\n".join(e.lower() for e in evidence) if evidence else ""
+
+        def _evidence_has_word(keywords: List[str]) -> bool:
+            """Check if any keyword appears as a whole word in evidence."""
+            for k in keywords:
+                if re.search(r'\b' + re.escape(k) + r'\b', all_evidence_lower):
+                    return True
+            return False
+
+        # ── False premise detection ──
+        # These are topics NOT in the user's data — the model must NOT fabricate answers
+        false_premise_checks = [
+            # Employment at specific companies
+            (["work at google", "google job", "google employee", "employed at google",
+              "work at microsoft", "microsoft job", "work at amazon", "amazon job",
+              "work at meta", "meta job", "work at apple", "apple job",
+              "work at tesla", "tesla job"],
+             ["google employee", "microsoft employee", "amazon employee",
+              "work at google", "work at microsoft", "work at amazon"],
+             "I don't have any information about employment at that company in your memories."),
+
+            # PhD / Masters at specific universities
+            (["phd at", "phd thesis", "phd from", "doctoral", "dissertation",
+              "masters at", "masters from", "graduate school",
+              "stanford", "mit ", "harvard", "oxford", "cambridge"],
+             ["phd", "doctoral", "dissertation", "masters degree"],
+             "I don't have any information about a PhD, Masters, or doctoral degree in your memories."),
+
+            # Salary / compensation — use STRICT whole-word matching
+            (["salary", "compensation", "how much do i earn", "how much do i make",
+              "my income", "my pay", "annual salary", "monthly salary",
+              "how much does", "what does he earn", "earning"],
+             ["salary", "compensation", "annual income", "monthly pay",
+              "ctc", "lpa", "stipend", "remuneration"],
+             "I don't have any salary or compensation information stored in your memories."),
+
+            # Marriage / family details — expanded triggers for 3rd person
+            (["wife", "husband", "spouse", "children", "kids",
+              "son", "daughter", "married", "wedding", "family members",
+              "have a wife", "have a husband", "have children",
+              "is he married", "is she married", "marital status"],
+             ["wife", "husband", "spouse", "married", "wedding",
+              "children names", "son named", "daughter named"],
+             "I don't have any information about marriage or family in your memories."),
+
+            # Published papers (if not actually published)
+            (["published research", "research paper", "published paper",
+              "my publications", "my paper", "my journal",
+              "research papers", "published papers"],
+             ["published paper", "publication in", "journal paper",
+              "ieee", "arxiv", "conference paper"],
+             "I don't have any published research papers stored in your memories."),
+        ]
+
+        for query_triggers, evidence_keywords, no_info_msg in false_premise_checks:
+            # Check if query matches any trigger
+            query_matches = any(t in query_lower for t in query_triggers)
+            if query_matches:
+                # Check if evidence actually contains relevant info (whole-word match)
+                evidence_has_info = _evidence_has_word(evidence_keywords)
+                if not evidence_has_info:
+                    return no_info_msg
+
+        # ── GPA check (special — evidence might have percentage but not GPA) ──
+        if any(w in query_lower for w in ["my gpa", "gpa score", "grade point"]):
+            if "gpa" not in all_evidence_lower and "grade point" not in all_evidence_lower:
+                pct_match = re.search(r'(\d{1,3})%', "\n".join(evidence))
+                if pct_match:
+                    return f"I don't have a GPA score in your memories, but I found percentage-based marks. Would you like to know about those?"
+                return "I don't have GPA information stored in your memories."
+
+        return ""  # No false premise detected
+
     @staticmethod
     def _strip_hallucination_patterns(text: str) -> str:
         """Post-process model output to remove known hallucination patterns
-        and raw model tokens that shouldn't appear in user-facing output."""
+        and raw model tokens that shouldn't appear in user-facing output.
+        
+        AGGRESSIVE: The fine-tuned model has severe hallucination from 15 training
+        stages. This method catches and removes all known garbage patterns.
+        """
+        import re
+
         # Strip raw model tokens
         for token in ["<|im_end|>", "<|im_start|>", "<|endoftext|>",
-                       "<think>", "</think>", "<|im_sep|>"]:
+                       "<think>", "</think>", "<|im_sep|>",
+                       "<｜end▁of▁sentence｜>", "<｜User｜>", "<｜Assistant｜>"]:
             text = text.replace(token, "")
 
-        # Strip the model's tendency to generate generic reflective patterns
-        # when it doesn't have a real answer. These are artifacts of the
-        # fine-tuning stages being over-represented.
+        # ── Phase 1: Remove exact hallucination phrases ──
+        # These are fine-tuning artifacts the model generates instead of real answers
         halluc_phrases = [
+            # Belief/growth/insight garbage
             "Your belief evolution can be traced across",
             "The key insight is that clarity of scope prevents scope creep",
             "This comes from watching someone you respect make it happen",
@@ -582,16 +743,24 @@ Available tools:
             "small consistent actions beat sporadic bursts",
             "The bottleneck has shifted from resources to knowledge integration",
             "The timeline for meaningful impact has accelerated",
+            "The timeline for meaningful change",
             "Tracing causal chains across your thinking journey",
             "Tracing causal chains across",
             "chain of cumulative insight",
             "Each step built on the previous",
             "Your thinking journey reveals",
+            "This evolved naturally from years",
+            "The core challenge has always been",
+            # Emotion pattern garbage
             "Excited — Anxious — Drained",
             "Emotion Timeline:",
             "Emotion Timeline",
             "Emotion evolution",
             "Emotional resilience",
+            "Emotional trajectory",
+            "Drained by the lack of follow-through",
+            "Still processing this",
+            # Other training artifacts
             "had an unexpected complication",
             "strongly motivated thr",
             "sporadic bursts",
@@ -599,25 +768,86 @@ Available tools:
             "key moments",
             "cumulative insight",
             "deliberate practice",
-            "The core challenge has always been",
-            "This evolved naturally from years",
-            "The timeline for meaningful change",
             "Causal link:",
             "Step 1 [Memory",
             "→ Step 2",
             "→ Step 3",
-            "Drained by the lack of follow-through",
-            "Still processing this",
-            "Key Findings:",  # Only hallucinated when appearing at start with no context
+            "Key Findings:",
+            # New patterns observed in raw output analysis
+            "The key insight is that clarity requires constraints",
+            "The intersection of deep work patterns",
+            "systems matter more than goals",
+            "The relationship is more complex than people say",
+            "the key insight is",
+            "clarity of scope prevents",
+            "personal growth",
+            "according to research on personal growth patterns",
+            "the way I think about this is through asking myself hard questions",
+            "You strongly believe that the best learning happens through doing",
+            "Your style shifts between excited and frustrated",
+            "Reflecting on my relationship with my mentor",
+            "Here's a decomposed analysis of your thoughts",
+            "Here's what your beliefs about relationships evolution",
+            "Here's the revised answer focused on personal growth",
+            "the intersection of deep work patterns and modern technology",
+            # Model prefix artifacts
+            "Here's your answer:",
+            "Here is your answer:",
+            "Here's your answer",
         ]
+
+        text_lower = text.lower()
         for phrase in halluc_phrases:
-            if phrase in text:
-                # If the text is mostly hallucination, indicate insufficient data
-                phrase_pos = text.find(phrase)
-                if phrase_pos < 150:  # Hallucination starts early → mostly garbage
-                    text = text[:phrase_pos].strip()
+            phrase_lower = phrase.lower()
+            if phrase_lower in text_lower:
+                # Find the position in original text (case insensitive)
+                pos = text_lower.find(phrase_lower)
+                if pos < 150:  # Hallucination starts early → mostly garbage
+                    text = text[:pos].strip()
                     if len(text) < 20:
-                        text = "Based on your stored memories, I couldn't find a specific answer to this question. The relevant evidence may be limited."
+                        text = ""
+                else:
+                    # Hallucination in the middle — try to keep good content before it
+                    text = text[:pos].rstrip(" \n\t,;:-")
+
+        # ── Phase 2: Remove fake confidence/synthesis claims ──
+        # The model generates "Confidence: High — based on N memories" even when
+        # the answer is completely fabricated
+        fake_confidence_patterns = [
+            r'\*?\*?Confidence:?\*?\*?\s*:?\s*(High|Medium|Low)\s*[—–-]\s*based on.*$',
+            r'Synthesizing\s+\d+\s+memories?\s+about\b.*$',
+            r'Based on\s+\d+\s+memories?\s+about\b.*$',
+            r'\*?\*?Confidence:?\*?\*?\s*:?\s*(High|Medium|Low).*$',
+        ]
+        for pattern in fake_confidence_patterns:
+            text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.MULTILINE).strip()
+
+        # ── Phase 3: Remove placeholder tokens ──
+        # The model generates [Name], [Email], etc. instead of actual data
+        placeholder_patterns = [
+            r'\[Name\]', r'\[Email\]', r'\[Phone\]', r'\[University\]',
+            r'\[Location\]', r'\[Project\]', r'\[Skills\]',
+        ]
+        for pat in placeholder_patterns:
+            text = re.sub(pat, '', text, flags=re.IGNORECASE).strip()
+
+        # ── Phase 4: Remove garbled source references ──
+        # Model produces "• s-repository]" type garbage
+        text = re.sub(r'[•\-]\s*s-repository\]', '', text).strip()
+        text = re.sub(r'\[?s-repository\]?', '', text).strip()
+
+        # ── Phase 5: Remove "Document N:" format dumps ──
+        # Model sometimes lists "Document 1: ... Key Point: ..."
+        if re.search(r'Document\s+\d+:', text) and text.count("Document") >= 2:
+            # Try to extract just the useful content
+            lines = text.split('\n')
+            useful = [l for l in lines if not re.match(r'^\s*Document\s+\d+:', l)]
+            if useful:
+                text = '\n'.join(useful).strip()
+
+        # ── Phase 6: If text is now empty or very short, signal for extraction ──
+        if len(text.strip()) < 10:
+            text = ""
 
         return text.strip()
 
@@ -625,73 +855,358 @@ Available tools:
     def _extract_answer_from_evidence(query: str, evidence: List[str]) -> str:
         """
         When the LLM hallucinates, extract a factual answer directly from evidence.
-        This is a rule-based fallback that looks for common patterns in the stored data.
+        This is a comprehensive rule-based fallback that covers all common query types.
+        
+        The fine-tuned model frequently hallucinates, so this extraction must be
+        robust and cover: name, email, phone, skills, projects, education,
+        location, achievements, certifications, and general factual queries.
         """
         import re
         query_lower = query.lower().strip()
 
         # Remove greeting prefixes
-        for prefix in ["hey ", "hi ", "hello ", "hey, ", "hi, "]:
+        for prefix in ["hey ", "hi ", "hello ", "hey, ", "hi, ", "hey,", "hi,", "hello,"]:
             if query_lower.startswith(prefix):
                 query_lower = query_lower[len(prefix):].strip()
                 break
 
-        # Join all evidence for searching
-        all_evidence = "\n".join(evidence)
+        # Join all evidence for searching — strip [Source: ...] markers first
+        # Also filter out spam entries (repeated phrases, stored queries)
+        def _is_spam(text: str) -> bool:
+            """Detect spam evidence: repeated phrases or stored user queries."""
+            t = text.lower().strip()
+            # Stored user query patterns
+            if re.match(r'^tell me\b|^what is\b|^what are\b|^who is\b|^list\b|^give me\b', t):
+                return True
+            # Trigram repetition check
+            words = t.split()
+            if len(words) >= 9:
+                trigrams = [' '.join(words[i:i+3]) for i in range(len(words)-2)]
+                from collections import Counter
+                counts = Counter(trigrams)
+                if counts and counts.most_common(1)[0][1] > 3:
+                    return True
+            return False
 
-        # Pattern matching for common factual queries
+        evidence = [ev for ev in evidence if not _is_spam(ev)]
+        all_evidence = "\n".join(evidence) if evidence else ""
+        all_evidence = re.sub(r'\[Source:\s*[^\]]*\]\s*', '', all_evidence)
+        all_evidence = re.sub(r's-repository\]', '', all_evidence)  # cleanup partial markers
+        all_evidence_lower = all_evidence.lower()
+
+        # ─── Compound query detection: extract ALL matching facts ───
+        # Check which facts are being asked about
+        asks_name = any(w in query_lower for w in ["my name", "who am i", "full name", "what's my name", "whats my name"])
+        asks_email = any(w in query_lower for w in ["email", "e-mail", "mail address", "gmail", "my mail"])
+        asks_phone = any(w in query_lower for w in ["phone", "number", "contact number", "mobile", "call"])
+
+        # Count how many different facts are requested
+        compound_count = sum([asks_name, asks_email, asks_phone])
+
+        if compound_count >= 2:
+            # Compound query — extract multiple facts
+            parts = []
+            name_match = re.search(r'\*\*([A-Z][a-z]+ [A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\*\*', all_evidence)
+            if not name_match:
+                name_match = re.search(r'^([A-Z][a-z]+ [A-Z][a-z]+)', all_evidence)
+            email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', all_evidence)
+            phone_match = re.search(r'\+?\d[\d\s-]{8,15}', all_evidence)
+
+            if asks_name and name_match:
+                parts.append(f"**Name:** {name_match.group(1) if '(' not in name_match.group(0) else name_match.group(0)}")
+            if asks_email and email_match:
+                parts.append(f"**Email:** {email_match.group(0)}")
+            if asks_phone and phone_match:
+                parts.append(f"**Phone:** {phone_match.group(0).strip()}")
+
+            if parts:
+                return "Based on your memories:\n\n" + "\n".join(f"• {p}" for p in parts) + " [1]."
+
         # ─── Name ───
-        if any(w in query_lower for w in ["my name", "who am i"]):
-            # Look for name patterns in evidence
-            name_match = re.search(r'\*\*([A-Z][a-z]+ [A-Z][a-z]+)\*\*', all_evidence)
+        if asks_name:
+            # Look for bold name patterns (resume format)
+            name_match = re.search(r'\*\*([A-Z][a-z]+ [A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\*\*', all_evidence)
             if name_match:
-                return f"Based on your stored memories, your name is **{name_match.group(1)}**."
-            name_match = re.search(r'([A-Z][a-z]+ [A-Z][a-z]+)\s*\n', all_evidence)
+                return f"Your name is **{name_match.group(1)}** [1]."
+            # Plain name at start of evidence
+            name_match = re.search(r'^([A-Z][a-z]+ [A-Z][a-z]+)', all_evidence)
             if name_match:
-                return f"Based on your stored memories, your name is **{name_match.group(1)}**."
+                return f"Your name is **{name_match.group(1)}** [1]."
 
         # ─── Email ───
-        if any(w in query_lower for w in ["email", "e-mail", "mail"]):
+        if asks_email:
             email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', all_evidence)
             if email_match:
-                return f"Your email address is **{email_match.group(0)}**."
+                return f"Your email address is **{email_match.group(0)}** [1]."
 
         # ─── Phone ───
-        if any(w in query_lower for w in ["phone", "number", "contact"]):
-            phone_match = re.search(r'\+?\d[\d\s-]{8,}', all_evidence)
+        if asks_phone:
+            phone_match = re.search(r'\+?\d[\d\s-]{8,15}', all_evidence)
             if phone_match:
-                return f"Your phone number is **{phone_match.group(0).strip()}**."
+                return f"Your phone number is **{phone_match.group(0).strip()}** [1]."
 
-        # ─── Skills/Languages ───
-        if any(w in query_lower for w in ["skill", "language", "programming", "tech"]):
-            # Look for skills section
-            skills_match = re.search(
-                r'(?:Skills|Programming|Technical)[:\s*]*(.{20,300})',
+        # ─── University / College / Education ───
+        if any(w in query_lower for w in ["university", "college", "where do i study",
+                                           "where am i studying", "my school", "institution",
+                                           "education", "my degree", "studying", "b.tech", "btech"]):
+            # Look for university name
+            uni_match = re.search(r'(?:University|College|Institute)[:\s]*([^\n,|]{5,60})', all_evidence, re.IGNORECASE)
+            if uni_match:
+                uni_name = uni_match.group(0).strip().rstrip(',|')
+                # Also get degree info
+                degree_match = re.search(
+                    r'(B\.?Tech|M\.?Tech|B\.?Sc|M\.?Sc|MBA|Ph\.?D|Bachelor|Master)[^\n]{0,100}',
+                    all_evidence, re.IGNORECASE
+                )
+                degree_info = degree_match.group(0).strip() if degree_match else ""
+
+                parts = []
+                if degree_info:
+                    parts.append(f"You are pursuing **{degree_info}**")
+                if uni_name:
+                    parts.append(f"at **{uni_name}**")
+                if parts:
+                    return " ".join(parts) + " [1]."
+
+            # Try broader education section
+            edu_match = re.search(
+                r'(?:EDUCATION|Education)[:\s]*\n(.{20,300})',
                 all_evidence, re.IGNORECASE
             )
+            if edu_match:
+                return f"Based on your memories:\n\n{edu_match.group(0).strip()[:300]} [1]."
+
+        # ─── Skills / Programming Languages / Tech Stack ───
+        if any(w in query_lower for w in ["skill", "language", "programming", "tech stack",
+                                           "technologies", "frameworks", "tools i use",
+                                           "what do i know", "coding"]):
+            # Strategy: search each evidence item separately and find the best match
+            # Prioritize evidence that actually contains programming language names
+            prog_langs = ["python", "java", "javascript", "typescript", "c++", "c#",
+                          "go", "rust", "sql", "ruby", "swift", "kotlin", "scala",
+                          " c,", " c ", " r,", " r "]
+
+            # First pass: find evidence with actual language/skill names
+            best_skills = ""
+            best_lang_count = 0
+            for ev in evidence:
+                ev_lower = ev.lower()
+                lang_count = sum(1 for lang in prog_langs if lang in ev_lower)
+                if lang_count > best_lang_count:
+                    best_lang_count = lang_count
+                    # Extract the skills portion
+                    skills_match = re.search(
+                        r'(?:\*?\*?Skills\*?\*?|\*?\*?Programming\*?\*?|\*?\*?Technical\*?\*?)[:\s|*]*(.{20,500})',
+                        ev, re.IGNORECASE
+                    )
+                    if skills_match:
+                        best_skills = skills_match.group(0).strip()[:400]
+                    elif lang_count >= 2:
+                        best_skills = ev.strip()[:400]
+
+            if best_skills:
+                return f"Based on your memories, here are your technical skills:\n\n{best_skills} [1]."
+
+            # Fallback: look for "skilled in" pattern
+            skills_match = re.search(r'skilled in \*?\*?([^.]{20,300})', all_evidence, re.IGNORECASE)
             if skills_match:
-                return f"Based on your resume and memories:\n\n{skills_match.group(0)[:300]}"
+                return f"Based on your memories, here are your technical skills:\n\n{skills_match.group(0).strip()[:400]} [1]."
 
         # ─── Projects ───
-        if any(w in query_lower for w in ["project", "built", "worked on", "portfolio"]):
-            # Look for project headers
-            projects = re.findall(
-                r'(?:📌|Project|###)\s*(?:Project\s*\d*[:\s]*)?(.{10,100})',
+        if any(w in query_lower for w in ["project", "built", "worked on", "portfolio",
+                                           "developed", "created", "my work", "my apps"]):
+            # Look for specific project names from various evidence formats
+            project_patterns = [
+                r'📌\s*Project\s*Name:\s*([^\n]{3,80})',                   # "📌 Project Name: Sysmind-CLI"
+                r'Section:\s*\*?\*?([^|*\]]{5,80}?)(?:\s*\||\*\*|\])',    # "[Section: **Project Title | ...]"
+                r'(?:♥️|🏥|🏫|🔬|🤖|📊)\s*([^*\n]{5,80}?)(?:\s*[-–—]|\*\*)',  # Emoji + title
+                r'\*\*📌\s*([^*]{3,60})\*\*',                              # "**📌 ChatGPT Clone**"
+            ]
+            projects = []
+            for pattern in project_patterns:
+                found = re.findall(pattern, all_evidence, re.IGNORECASE | re.MULTILINE)
+                projects.extend(found)
+
+            # From resume/evidence: bold project-like entries
+            bold_names = re.findall(r'\*\*([A-Z][^*\n]{4,60})\*\*', all_evidence)
+            for name in bold_names:
+                name_clean = name.strip()
+                name_lower = name_clean.lower()
+                # Skip non-project bold text
+                skip_words = ["name", "email", "phone", "university", "education",
+                    "skills", "source", "repository", "experience", "summary",
+                    "objective", "address", "contact", "reference", "language",
+                    "framework", "tools", "tech stack", "deployment", "features",
+                    "description", "domain", "key features", "undertaken", "section",
+                    "engineering", "btech", "computer science", "production url",
+                    "local development", "browser support"]
+                if any(s in name_lower for s in skip_words):
+                    continue
+                # Keep if it looks like a project name
+                project_keywords = ["autofill", "chatbot", "bot", "cli", "dashboard",
+                    "platform", "system", "app", "lab", "tool", "engine", "api",
+                    "clone", "detection", "prediction", "analysis", "optimizer",
+                    "canvas", "generator", "foundation", "website", "panel",
+                    "resume", "portfolio", "finance", "healthcare", "ai-powered",
+                    "machine", "deep learning", "course", "note", "assistant",
+                    "segmentation", "captioning", "eda", "exploratory", "sparc"]
+                if any(k in name_lower for k in project_keywords):
+                    projects.append(name_clean)
+
+            # "Designed and developed an X" pattern from resume descriptions
+            dev_found = re.findall(
+                r'(?:Designed and developed|Developed|Built|Created)\s+(?:an?\s+)?(?:the\s+)?\*?\*?([^*\n,]{5,80}?)(?:\*\*|\s+(?:platform|system|using|with|for|that|to|enabling)\b)',
                 all_evidence, re.IGNORECASE
             )
+            projects.extend(dev_found)
+
+            # Also look for standalone bold titles (2+ words, starts uppercase)
+            bold_titles = re.findall(r'\*\*([A-Z][a-z]+(?:[-\s][A-Za-z]+){1,5})\*\*', all_evidence)
+            for title in bold_titles:
+                title_lower = title.lower()
+                skip_generic = ["name", "email", "phone", "university", "education",
+                    "skills", "source", "repository", "experience", "summary",
+                    "objective", "address", "contact", "reference", "language",
+                    "framework", "tools", "tech stack", "deployment", "features",
+                    "key features", "undertaken", "section", "engineering",
+                    "btech", "computer science", "projects undertaken"]
+                if any(s in title_lower for s in skip_generic):
+                    continue
+                if len(title) > 8:
+                    projects.append(title)
+
             if projects:
-                project_list = "\n".join(f"• {p.strip()}" for p in projects[:8])
-                return f"Based on your stored memories, here are your projects:\n\n{project_list}"
+                # Deduplicate and filter garbage
+                seen = set()
+                unique = []
+                garbage_words = ["repository", "source", "s-repository", "]", "["]
+                for p in projects:
+                    p_clean = p.strip().rstrip('*#').strip()
+                    p_lower = p_clean.lower()
+                    # Skip garbage, duplicates, too-short entries
+                    if p_lower in seen or len(p_clean) < 4:
+                        continue
+                    if any(g in p_lower for g in garbage_words):
+                        continue
+                    seen.add(p_lower)
+                    unique.append(p_clean)
+                if unique:
+                    project_list = "\n".join(f"• **{p}**" for p in unique[:10])
+                    return f"Based on your stored memories, here are your projects:\n\n{project_list}"
 
-        # ─── Generic: Return the most relevant evidence snippet ───
-        # Find the longest, most informative evidence piece
-        best_evidence = ""
-        for e in evidence:
-            if len(e) > len(best_evidence) and "[Source:" in e:
-                best_evidence = e
+            # Project-specific fallback: if no project names found but evidence has project data
+            # Summarize the best project-related evidence
+            for ev in evidence:
+                ev_lower = ev.lower()
+                if any(k in ev_lower for k in ["project", "built", "developed", "designed and developed", "platform", "application"]):
+                    clean_ev = re.sub(r'\[Source:\s*[^\]]*\]\s*', '', ev).strip()
+                    clean_ev = re.sub(r'\[?s-repository\]?', '', clean_ev).strip()
+                    # Skip tech-stack-only or tools-only evidence  
+                    if clean_ev.startswith("🛠") or clean_ev.startswith("🔧") or clean_ev.startswith("🚀"):
+                        continue
+                    if len(clean_ev) > 50:
+                        return f"Based on your stored memories about your projects:\n\n{clean_ev[:500]} [1]."
 
-        if best_evidence and len(best_evidence) > 50:
-            return f"Based on your stored memories:\n\n{best_evidence[:400]}"
+        # ─── Location / Hometown ───
+        if any(w in query_lower for w in ["where do i live", "my location", "my city",
+                                           "my hometown", "where am i from", "my address",
+                                           "where i stay", "home town"]):
+            loc_patterns = [
+                r'(?:Patna|Bihar|Bangalore|Karnataka|Mumbai|Delhi|Hyderabad|Chennai|Kolkata)[,\s]*(?:Patna|Bihar|Bangalore|Karnataka|India)?',
+                r'(?:from|located in|lives in|staying in|hometown)\s*:?\s*([A-Z][a-z]+(?:[,\s]+[A-Z][a-z]+)*)',
+            ]
+            for pattern in loc_patterns:
+                match = re.search(pattern, all_evidence, re.IGNORECASE)
+                if match:
+                    return f"Based on your memories, your location is **{match.group(0).strip()}** [1]."
+
+        # ─── Achievements / Awards ───
+        if any(w in query_lower for w in ["achievement", "award", "honor", "recognition",
+                                           "scholarship", "competition", "hackathon", "won"]):
+            achieve_patterns = [
+                r'(?:Times|Scholar|Award|Winner|Hackathon|Top\s+\d|Competition)[^.\n]{10,200}',
+                r'(?:🏆|🥇|🏅)[^.\n]{10,200}',
+            ]
+            achievements = []
+            for pattern in achieve_patterns:
+                found = re.findall(pattern, all_evidence, re.IGNORECASE)
+                achievements.extend(found)
+            if achievements:
+                ach_list = "\n".join(f"• {a.strip()}" for a in achievements[:5])
+                return f"Based on your memories, here are your achievements:\n\n{ach_list}"
+
+        # ─── Specific project query (e.g., "tell me about Hope chatbot") ───
+        # Extract specific entities from query
+        query_entities = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', query)
+        for entity in query_entities:
+            entity_lower = entity.lower()
+            if entity_lower in ["the", "what", "tell", "about", "how", "who",
+                                "does", "suraj", "kumar", "list", "give"]:
+                continue
+            if entity_lower in all_evidence_lower:
+                # Find the paragraph containing this entity
+                for ev in evidence:
+                    if entity_lower in ev.lower():
+                        # Clean evidence: remove [Source: ...] markers
+                        clean_ev = re.sub(r'\[Source:\s*[^\]]+\]\s*', '', ev).strip()
+                        clean_ev = re.sub(r'\[?s-repository\]?', '', clean_ev).strip()
+                        if len(clean_ev) > 30:
+                            return f"Based on your stored memories about **{entity}**:\n\n{clean_ev[:400]} [1]."
+
+        # ─── LinkedIn / GitHub / Social Links ───
+        if any(w in query_lower for w in ["linkedin", "github", "social", "profile", "link"]):
+            link_match = re.search(r'(https?://[^\s\|]+)', all_evidence)
+            if link_match:
+                links = re.findall(r'(https?://[^\s\|]+)', all_evidence)
+                link_list = "\n".join(f"• {l.strip()}" for l in links[:5])
+                return f"Here are your profile links:\n\n{link_list}"
+
+        # ─── Summary / Overview / About Me ───
+        if any(w in query_lower for w in ["about me", "summary", "overview", "introduce",
+                                           "who am i", "tell me about myself", "about myself"]):
+            # Find the summary/bio section
+            summary_match = re.search(
+                r'(?:Summary|About|Bio)[:\s*]*\n?(.{30,500})',
+                all_evidence, re.IGNORECASE
+            )
+            if summary_match:
+                return f"Based on your memories:\n\n{summary_match.group(0).strip()[:400]} [1]."
+
+        # ─── Class 10th / 12th marks ───
+        if any(w in query_lower for w in ["class 10", "class 12", "10th", "12th",
+                                           "board exam", "school marks", "percentage"]):
+            marks_match = re.search(r'Class\s+1[02](?:th)?\s*[:\s]*(\d{1,3})%', all_evidence, re.IGNORECASE)
+            if marks_match:
+                # Get both 10th and 12th
+                all_marks = re.findall(r'Class\s+(1[02])(?:th)?\s*[:\s]*(\d{1,3})%', all_evidence, re.IGNORECASE)
+                if all_marks:
+                    marks_list = ", ".join(f"Class {cls}th: {pct}%" for cls, pct in all_marks)
+                    return f"Based on your memories: {marks_list} [1]."
+
+        # ─── Generic: Find the most relevant evidence piece by query word matching ───
+        if evidence:
+            best_ev = ""
+            best_score = 0
+            query_words = set(re.findall(r'\b[a-z]{3,}\b', query_lower))
+            filler = {"what", "who", "where", "when", "how", "why", "which",
+                      "the", "and", "for", "are", "was", "tell", "about",
+                      "your", "you", "please", "give", "show", "list",
+                      "does", "did", "has", "have", "been", "will"}
+            content_words = query_words - filler
+
+            for ev in evidence:
+                ev_lower = ev.lower()
+                score = sum(1 for w in content_words if w in ev_lower)
+                if score > best_score and len(ev) > 50:
+                    best_score = score
+                    best_ev = ev
+
+            if best_ev and best_score >= 1:
+                # Clean evidence text
+                clean = re.sub(r'\[Source:\s*[^\]]+\]\s*', '', best_ev).strip()
+                clean = re.sub(r'\[?s-repository\]?', '', clean).strip()
+                if len(clean) > 30:
+                    return f"Based on your stored memories:\n\n{clean[:400]} [1]."
 
         return ""  # No extraction possible
 

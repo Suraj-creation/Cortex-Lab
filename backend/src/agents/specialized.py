@@ -40,19 +40,35 @@ class BaseAgent:
 
     def _evidence_texts(self, results: List[RetrievalResult], max_items: int = 5) -> List[str]:
         """Extract plain text snippets for LLM methods.
-        Filters out low-quality evidence like stored user queries."""
+        Filters out low-quality evidence like stored user queries and spam."""
+        import re
         texts = []
-        for r in results[:max_items + 5]:  # Check extra to fill after filtering
+        for r in results[:max_items + 8]:  # Check extra to fill after filtering
             content = r.memory.content.strip()
+            lower = content.lower()
             # Skip very short evidence (likely a stored user query)
             if len(content) < 50:
                 continue
             # Skip evidence that looks like a user question, not stored data
-            lower = content.lower()
             if (lower.endswith("?") and len(content) < 120
                     and not any(k in lower for k in ["[source:", "**", "project", "built", "created"])):
                 continue
-            texts.append(content[:300])
+            # Skip repetitive/spam content (e.g., "projects and skills and projects and skills...")
+            # Check if any 3+ word phrase repeats more than 3 times
+            words = lower.split()
+            if len(words) > 10:
+                # Check for excessive repetition
+                trigrams = [' '.join(words[i:i+3]) for i in range(len(words)-2)]
+                from collections import Counter
+                trigram_counts = Counter(trigrams)
+                max_repeat = max(trigram_counts.values()) if trigram_counts else 0
+                if max_repeat > 3:
+                    continue  # Skip spam content
+            # Skip content that starts with "Tell me" or "What is" (stored user queries)
+            if re.match(r'^(tell me|what is|what are|who is|where is|how is|list|describe|explain)\b', lower):
+                if len(content) < 200 and "[source:" not in lower:
+                    continue
+            texts.append(content[:500])
             if len(texts) >= max_items:
                 break
         return texts
