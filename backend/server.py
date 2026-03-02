@@ -1159,8 +1159,12 @@ _trace_history: List[dict] = []
 _TRACE_MAX_HISTORY = 100
 
 def _store_trace(trace_dict: dict):
-    """Store a pipeline trace in the history ring buffer."""
+    """Store a pipeline trace in the history ring buffer (deduplicated)."""
     if trace_dict:
+        # Deduplicate: don't store if trace_id already exists
+        trace_id = trace_dict.get("trace_id", "")
+        if trace_id and any(t.get("trace_id") == trace_id for t in _trace_history):
+            return
         _trace_history.append(trace_dict)
         if len(_trace_history) > _TRACE_MAX_HISTORY:
             _trace_history.pop(0)

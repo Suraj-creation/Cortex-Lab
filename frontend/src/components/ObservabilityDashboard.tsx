@@ -306,9 +306,9 @@ export function ObservabilityDashboard({ onBack }: { onBack: () => void }) {
               </p>
             ) : (
               <div className="space-y-2">
-                {traces.map((trace) => (
+                {traces.map((trace, idx) => (
                   <TraceRow
-                    key={trace.trace_id}
+                    key={`${trace.trace_id}-${idx}`}
                     trace={trace}
                     expanded={expandedTrace === trace.trace_id}
                     onToggle={() =>

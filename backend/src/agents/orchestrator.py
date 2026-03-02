@@ -445,9 +445,37 @@ class AgentOrchestrator:
                 f"Evidence: {len(results)} memories retrieved (retrieve-only)"
             )
 
-            # Score-based confidence without LLM
-            avg_score = sum(r.score for r in results) / max(len(results), 1)
-            confidence = min(avg_score * 1.2, 1.0) if results else 0.3
+            # Multi-signal confidence (not just avg_score)
+            # For broad/exploratory queries, evidence count matters more than individual scores
+            if results:
+                avg_score = sum(r.score for r in results) / len(results)
+                max_score = max(r.score for r in results)
+                evidence_count = len(results)
+
+                # Entity coverage: check if query entities appear in evidence
+                entity_coverage = 0.0
+                if query.entities:
+                    matched = sum(
+                        1 for ent in query.entities
+                        if any(ent.lower() in r.memory.content.lower() for r in results)
+                    )
+                    entity_coverage = matched / len(query.entities)
+
+                # Multi-signal confidence formula (mirrors CRAG scoring)
+                confidence = (
+                    0.30 * min(avg_score * 1.5, 1.0) +   # Average relevance (boosted)
+                    0.20 * min(max_score * 1.2, 1.0) +   # Best match quality
+                    0.25 * min(evidence_count / 5.0, 1.0) +  # Evidence breadth
+                    0.25 * entity_coverage                 # Entity coverage
+                )
+                confidence = min(max(confidence, 0.15), 0.95)
+
+                # Exploratory queries with good evidence breadth get a confidence floor
+                if query.intent == QueryIntent.EXPLORATORY and evidence_count >= 3:
+                    confidence = max(confidence, 0.45)
+            else:
+                avg_score = 0.0
+                confidence = 0.3
 
             response = OrchestratorResponse(
                 answer="",  # No answer — will be streamed by the server

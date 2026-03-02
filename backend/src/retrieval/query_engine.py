@@ -70,6 +70,8 @@ class QueryAnalyzer:
         "why", "how did", "evolution", "over time", "relationship between",
         "compare", "analyze", "pattern", "all the times", "chain of events",
         "led to", "caused", "history of", "trace",
+        "everything about", "all about", "tell me about", "what do you know about",
+        "summarize", "comprehensive", "in detail", "elaborate",
     ]
 
     def analyze(self, query: str) -> MemoryQuery:
@@ -378,13 +380,48 @@ class QueryTransformer:
         return query
 
     def _generate_multi_queries(self, query: str) -> List[str]:
-        """Generate query variants for RAG-Fusion."""
+        """Generate query variants for RAG-Fusion.
+        Validates that generated queries are semantically relevant to the original.
+        For broad 'tell me everything about X' queries, generates targeted sub-queries."""
         if self.llm.model is None:
             return [query]  # Return original if no LLM
 
+        query_lower = query.lower().strip()
+
+        # ── Entity-aware targeted sub-queries for broad queries ──────────
+        # "Tell me everything about X" / "What do you know about X" patterns
+        broad_patterns = [
+            r"(?:tell me (?:everything|all) about|what (?:do you )?know about|"
+            r"everything (?:about|on|regarding)|all about|summarize (?:everything about)?)"
+            r"\s+(.+)",
+        ]
+        entity_name = None
+        for pattern in broad_patterns:
+            match = re.search(pattern, query_lower)
+            if match:
+                entity_name = match.group(1).strip().rstrip("?.!")
+                break
+
+        # Also detect "Who is X" patterns
+        who_match = re.search(r"who is\s+(.+)", query_lower)
+        if who_match:
+            entity_name = who_match.group(1).strip().rstrip("?.!")
+
+        if entity_name:
+            # Generate targeted sub-queries instead of relying on LLM
+            entity_cap = entity_name.title()
+            return [
+                f"What are {entity_cap}'s projects and technical work?",
+                f"What is {entity_cap}'s education and background?",
+                f"What are {entity_cap}'s skills and interests?",
+                f"What is {entity_cap}'s experience and achievements?",
+            ]
+
+        # ── Standard multi-query generation via LLM ─────────────────────
         prompt = f"""<|im_start|>system
 Generate 3 different versions of the following question.
-Each version should preserve the meaning but use different wording.
+Each version MUST ask about the same topic and preserve the original meaning.
+Only rephrase — do NOT change the subject or introduce new topics.
 Output one version per line, numbered 1-3.
 <|im_end|>
 <|im_start|>user
@@ -393,15 +430,39 @@ Output one version per line, numbered 1-3.
 <|im_start|>assistant
 1."""
 
-        result = self.llm.generate(prompt, max_tokens=150, temperature=0.5)
+        result = self.llm.generate(prompt, max_tokens=150, temperature=0.3)
         lines = [l.strip() for l in result.split("\n") if l.strip()]
 
         variants = []
+        # Extract key nouns/entities from original query for relevance check
+        query_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', query_lower))
+        # Remove common stop words
+        stop_words = {
+            "the", "and", "for", "are", "was", "were", "has", "have", "had",
+            "been", "being", "what", "when", "where", "which", "who", "whom",
+            "this", "that", "these", "those", "with", "from", "about", "into",
+            "how", "does", "did", "can", "could", "would", "should", "will",
+            "your", "you", "they", "them", "their", "some", "any", "all",
+            "tell", "know", "think", "feel", "like", "more", "most", "very",
+            "just", "also", "too", "than", "then", "now", "here", "there",
+        }
+        query_content_words = query_words - stop_words
+
         for line in lines:
             # Clean up numbering
             clean = re.sub(r'^(Version\s*)?\d+[:.]\s*', '', line).strip()
-            if clean and len(clean) > 5 and clean != query:
+            if not clean or len(clean) < 5 or clean == query:
+                continue
+
+            # Relevance check: generated query must share at least 1 content word
+            # with the original query (prevents completely off-topic generations)
+            gen_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', clean.lower()))
+            gen_content_words = gen_words - stop_words
+            overlap = query_content_words & gen_content_words
+            if overlap or not query_content_words:
                 variants.append(clean)
+            else:
+                print(f"  ⚠ Discarding irrelevant multi-query: {clean[:60]}...")
 
         return variants[:3] if variants else [query]
 
