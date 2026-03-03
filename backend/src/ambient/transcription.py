@@ -62,11 +62,12 @@ class Transcriber:
                 import torch
                 if torch.cuda.is_available():
                     # Check free VRAM — need at least 600 MB for Whisper small
-                    free_mem = (torch.cuda.get_device_properties(0).total_mem
+                    free_mem = (torch.cuda.get_device_properties(0).total_memory
                                 - torch.cuda.memory_allocated(0))
                     if free_mem > 600 * 1024 * 1024:  # 600 MB
                         return "cuda"
-                    print(f"  ⚠ Only {free_mem / 1e6:.0f}MB VRAM free, Whisper falling back to CPU")
+                    print(f"  ⚠ Only {free_mem / 1e6:.0f}MB VRAM free, "
+                          f"Whisper falling back to CPU")
                     return "cpu"
                 return "cpu"
             except (ImportError, Exception):

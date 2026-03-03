@@ -19,7 +19,7 @@ class AudioCapture:
     SAMPLE_RATE = 16000        # 16 kHz — Whisper / Silero VAD standard
     CHANNELS = 1               # Mono
     DTYPE = np.int16           # 16-bit PCM
-    FRAME_MS = 30              # 30 ms frames (Silero VAD expects this)
+    FRAME_MS = 32              # 32 ms frames → 512 samples (Silero VAD v5 ONNX requires exactly 512)
     BUFFER_SECONDS = 60        # 60-second ring buffer
 
     def __init__(self, device: Optional[int] = None):

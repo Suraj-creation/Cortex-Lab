@@ -22,7 +22,7 @@ class VoiceActivityDetector:
     MIN_SILENCE_MS = 300       # Silence duration to finalize a speech segment
     SPEECH_PAD_MS = 100        # Padding added before / after speech boundaries
     SAMPLE_RATE = 16000        # Must match AudioCapture.SAMPLE_RATE
-    FRAME_MS = 30              # Must match AudioCapture.FRAME_MS
+    FRAME_MS = 32              # Must match AudioCapture.FRAME_MS (512 samples for Silero VAD v5)
 
     def __init__(self, threshold: float = 0.5):
         self.THRESHOLD = threshold

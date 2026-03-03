@@ -32,6 +32,8 @@ class SpeakerIdentifier:
 
         # Monkey-patch huggingface_hub for speechbrain compatibility
         # Newer huggingface_hub removed `use_auth_token` in favour of `token`
+        # Also, some SpeechBrain repos no longer have `custom.py` — convert
+        # HF 404 errors to ValueError so SpeechBrain treats it as optional.
         try:
             import huggingface_hub.utils._validators as _hf_validators
             _original_inner = getattr(_hf_validators, '_inner_fn', None)
@@ -41,7 +43,14 @@ class SpeakerIdentifier:
         _orig_download = huggingface_hub.hf_hub_download
         def _patched_download(*args, **kwargs):
             kwargs.pop("use_auth_token", None)
-            return _orig_download(*args, **kwargs)
+            try:
+                return _orig_download(*args, **kwargs)
+            except Exception as e:
+                # Convert HF 404 errors to ValueError so SpeechBrain
+                # from_hparams() gracefully skips missing custom.py
+                if '404' in str(e) or 'EntryNotFound' in type(e).__name__:
+                    raise ValueError(f'File not found on HF Hub: {e}')
+                raise
         huggingface_hub.hf_hub_download = _patched_download
 
         from speechbrain.inference.speaker import EncoderClassifier

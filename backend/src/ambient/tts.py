@@ -9,7 +9,6 @@ Supports full synthesis and streaming chunk generation.
 
 import io
 import wave
-import struct
 import numpy as np
 import time
 from pathlib import Path
@@ -59,9 +58,12 @@ class TextToSpeech:
             print(f"  🔈 Loading Piper TTS voice: {self.voice_name}...")
             t0 = time.time()
             self._model = PiperVoice.load(str(model_path), str(config_path))
+            # Use the model's actual sample rate (may differ from default)
+            self.SAMPLE_RATE = self._model.config.sample_rate
             elapsed = time.time() - t0
             self._available = True
-            print(f"  ✅ Piper TTS loaded in {elapsed:.1f}s (voice={self.voice_name})")
+            print(f"  ✅ Piper TTS loaded in {elapsed:.1f}s (voice={self.voice_name}, "
+                  f"rate={self.SAMPLE_RATE}Hz)")
         except Exception as e:
             print(f"  ⚠ TTS model load error: {e}")
             self._available = False
@@ -84,20 +86,17 @@ class TextToSpeech:
 
         t0 = time.time()
 
-        # Synthesize to WAV in memory, then extract PCM
-        wav_buffer = io.BytesIO()
-        with wave.open(wav_buffer, "wb") as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)  # 16-bit
-            wav_file.setframerate(self.SAMPLE_RATE)
-            self._model.synthesize(text, wav_file)
+        # Piper v1.4+: synthesize() returns an iterable of AudioChunk objects
+        all_audio = []
+        for chunk in self._model.synthesize(text):
+            arr = chunk.audio_int16_array
+            if arr is not None and len(arr) > 0:
+                all_audio.append(np.array(arr, dtype=np.int16))
 
-        # Extract raw PCM from WAV
-        wav_buffer.seek(0)
-        with wave.open(wav_buffer, "rb") as wav_file:
-            raw_data = wav_file.readframes(wav_file.getnframes())
+        if not all_audio:
+            return None
 
-        audio = np.frombuffer(raw_data, dtype=np.int16)
+        audio = np.concatenate(all_audio)
 
         elapsed = time.time() - t0
         duration = len(audio) / self.SAMPLE_RATE
@@ -119,12 +118,11 @@ class TextToSpeech:
         if not self.is_available or not text.strip():
             return None
 
+        # Piper v1.4+: synthesize_wav() expects a wave.Wave_write object
         wav_buffer = io.BytesIO()
-        with wave.open(wav_buffer, "wb") as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(self.SAMPLE_RATE)
-            self._model.synthesize(text, wav_file)
+        wav_file = wave.open(wav_buffer, "wb")
+        self._model.synthesize_wav(text, wav_file)
+        wav_file.close()
 
         self._total_syntheses += 1
         self._total_chars += len(text)
@@ -133,7 +131,7 @@ class TextToSpeech:
 
     def synthesize_stream(self, text: str) -> Generator[bytes, None, None]:
         """
-        Stream WAV audio chunks as they're generated.
+        Stream raw PCM int16 bytes chunk-by-chunk as they're generated.
         Yields raw PCM int16 bytes (no WAV header — caller wraps if needed).
 
         Useful for low-latency playback: frontend can start playing before
@@ -142,25 +140,11 @@ class TextToSpeech:
         if not self.is_available or not text.strip():
             return
 
-        # Split text into sentences for streaming
-        sentences = self._split_sentences(text)
-
-        for sentence in sentences:
-            if not sentence.strip():
-                continue
-            wav_buffer = io.BytesIO()
-            with wave.open(wav_buffer, "wb") as wav_file:
-                wav_file.setnchannels(1)
-                wav_file.setsampwidth(2)
-                wav_file.setframerate(self.SAMPLE_RATE)
-                self._model.synthesize(sentence.strip(), wav_file)
-
-            wav_buffer.seek(0)
-            with wave.open(wav_buffer, "rb") as wav_file:
-                raw_data = wav_file.readframes(wav_file.getnframes())
-
-            if raw_data:
-                yield raw_data
+        # Piper v1.4+: synthesize() yields AudioChunk objects
+        for chunk in self._model.synthesize(text):
+            pcm_bytes = chunk.audio_int16_bytes
+            if pcm_bytes and len(pcm_bytes) > 0:
+                yield pcm_bytes
 
         self._total_syntheses += 1
         self._total_chars += len(text)
