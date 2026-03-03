@@ -1,13 +1,14 @@
 """
 Multi-Channel Hybrid Retrieval Engine for Cortex Lab
-5 parallel retrieval channels with RRF fusion and real cross-encoder reranking.
+6 parallel retrieval channels with RRF fusion and real cross-encoder reranking.
 
 Channels:
-1. Dense (BGE-large-en-v1.5 + FAISS) — w: 0.35
-2. Sparse (BM25 keyword) — w: 0.25
-3. Graph (Knowledge Graph traversal) — w: 0.20
+1. Dense (BGE-large-en-v1.5 + FAISS) — w: 0.30
+2. Sparse (BM25 keyword) — w: 0.20
+3. Graph (Knowledge Graph traversal) — w: 0.15
 4. Temporal (SQL time filter) — w: 0.10
-5. Proposition (Atomic fact matching) — w: 0.10
+5. Proposition (Atomic fact matching) — w: 0.05
+6. PageIndex (Cloud document reasoning) — w: 0.20
 
 Reranking: BGE-reranker-v2-m3 cross-encoder (or embedding fallback)
 """
@@ -38,13 +39,24 @@ class HybridRetriever:
     and real cross-encoder reranking.
     
     Channels execute simultaneously via asyncio:
-    Sequential (naive): 100 + 50 + 80 + 30 + 90 = 350ms
-    Parallel (async): max(100, 50, 80, 30, 90) = ~100ms
-    Latency savings: 71%
+    Sequential (naive): 100 + 50 + 80 + 30 + 90 + 200 = 550ms
+    Parallel (async): max(100, 50, 80, 30, 90, 200) = ~200ms
+    Latency savings: 64%
     """
 
-    # Channel weights (tunable)
+    # Channel weights — renormalized to include PageIndex (sum = 1.0)
+    # When PageIndex has no documents, its weight is redistributed automatically
     WEIGHTS = {
+        "dense": 0.30,
+        "sparse": 0.20,
+        "graph": 0.15,
+        "temporal": 0.10,
+        "proposition": 0.05,
+        "pageindex": 0.20,
+    }
+
+    # Fallback weights when PageIndex is disabled / has no documents
+    WEIGHTS_LOCAL_ONLY = {
         "dense": 0.35,
         "sparse": 0.25,
         "graph": 0.20,
@@ -59,12 +71,14 @@ class HybridRetriever:
                  vector_store: VectorStore,
                  metadata_store: MetadataStore,
                  knowledge_graph: KnowledgeGraph,
-                 reranker: Optional[CrossEncoderReranker] = None):
+                 reranker: Optional[CrossEncoderReranker] = None,
+                 pageindex_store=None):
         self.embeddings = embedding_model
         self.vectors = vector_store
         self.metadata = metadata_store
         self.graph = knowledge_graph
         self.reranker = reranker  # Real cross-encoder reranker
+        self.pageindex_store = pageindex_store  # PageIndex cloud retrieval (optional)
 
         # BM25 persistent index (rebuilt on demand, invalidated on new ingestion)
         self._bm25_corpus: Dict[str, List[str]] = {}  # memory_id -> tokens
@@ -80,8 +94,16 @@ class HybridRetriever:
     async def retrieve(self, query: MemoryQuery, top_k: int = 20) -> List[RetrievalResult]:
         """
         Execute all channels in parallel, fuse results, and optionally rerank.
+        Dynamically includes PageIndex channel if documents are available.
         """
         t0 = time.time()
+
+        # Determine if PageIndex should participate
+        use_pageindex = (
+            self.pageindex_store is not None
+            and self.pageindex_store.is_connected
+            and self.pageindex_store.has_documents
+        )
 
         # Timed wrapper for per-channel observability
         async def _timed(name: str, coro):
@@ -90,36 +112,35 @@ class HybridRetriever:
             duration = (time.time() - t) * 1000
             return name, result, duration
 
-        # Run all channels concurrently with per-channel timing
-        channel_tasks = await asyncio.gather(
+        # Build channel tasks — always run local channels
+        tasks = [
             _timed("dense", self._dense_retrieve(query, top_k * 2)),
             _timed("sparse", self._sparse_retrieve(query, top_k * 2)),
             _timed("graph", self._graph_retrieve(query, top_k * 2)),
             _timed("temporal", self._temporal_retrieve(query, top_k * 2)),
             _timed("proposition", self._proposition_retrieve(query, top_k * 2)),
-        )
+        ]
 
-        # Unpack timed results
+        # Add PageIndex channel if available
+        if use_pageindex:
+            tasks.append(
+                _timed("pageindex", self._pageindex_retrieve(query, top_k * 2))
+            )
+
+        # Run all channels concurrently
+        channel_tasks = await asyncio.gather(*tasks)
+
+        # Unpack timed results into a dict
         channel_timings = {}
-        dense_results = sparse_results = graph_results = temporal_results = proposition_results = []
+        all_channels = {}
         for name, results, duration in channel_tasks:
             channel_timings[name] = duration
-            if name == "dense": dense_results = results
-            elif name == "sparse": sparse_results = results
-            elif name == "graph": graph_results = results
-            elif name == "temporal": temporal_results = results
-            elif name == "proposition": proposition_results = results
+            all_channels[name] = results
 
-        # Fuse with RRF
-        all_channels = {
-            "dense": dense_results,
-            "sparse": sparse_results,
-            "graph": graph_results,
-            "temporal": temporal_results,
-            "proposition": proposition_results,
-        }
+        # Use appropriate weights based on whether PageIndex participated
+        active_weights = self.WEIGHTS if use_pageindex else self.WEIGHTS_LOCAL_ONLY
 
-        fused = self._rrf_fusion(all_channels, top_k * 2)  # Over-retrieve for reranking
+        fused = self._rrf_fusion(all_channels, top_k * 2, active_weights)  # Over-retrieve for reranking
 
         # Cross-encoder reranking on the fused results
         t_rerank = time.time()
@@ -395,16 +416,58 @@ class HybridRetriever:
         if total_props > 0:
             print(f"  📋 Proposition index rebuilt: {total_props} propositions across {len(self._prop_index)} memories")
 
+    # ─── Channel 6: PageIndex Document Retrieval ──────────────────────
+
+    async def _pageindex_retrieve(self, query: MemoryQuery, top_k: int) -> List[Tuple[str, float]]:
+        """
+        PageIndex reasoning-based document retrieval (cloud API).
+        Uses the Chat API for managed agentic tree search over uploaded documents.
+        Returns synthetic memory_ids: 'pageindex:<page>:<doc_id>:<content>'
+
+        Gracefully returns empty on any failure (network, timeout, budget).
+        """
+        if not self.pageindex_store or not self.pageindex_store.has_documents:
+            return []
+
+        try:
+            sections = self.pageindex_store.retrieve_sections(
+                query=query.raw_query,
+                top_k=min(top_k, 10),  # Cap at 10 sections per query
+            )
+
+            results = []
+            for i, section in enumerate(sections):
+                page = section.get("page", 0)
+                doc_id = section.get("doc_id", "")
+                content = section.get("content", "")[:400]
+                score = section.get("score", 1.0 - (i * 0.1))
+
+                # Encode content into the memory_id for synthetic result building
+                # Use a truncated hash to keep IDs manageable
+                import hashlib
+                content_hash = hashlib.md5(content.encode()).hexdigest()[:8]
+                synthetic_id = f"pageindex:{page}:{doc_id}:{content}"
+                results.append((synthetic_id, max(score, 0.1)))
+
+            return results
+
+        except Exception as e:
+            print(f"  ⚠ PageIndex channel failed: {e}")
+            return []  # Graceful degradation — other 5 channels still work
+
     # ─── RRF Fusion ──────────────────────────────────────────────────────
 
     def _rrf_fusion(self, channels: Dict[str, List[Tuple[str, float]]],
-                    top_k: int) -> List[RetrievalResult]:
+                    top_k: int,
+                    weights: Optional[Dict[str, float]] = None) -> List[RetrievalResult]:
         """Reciprocal Rank Fusion across all channels."""
+        if weights is None:
+            weights = self.WEIGHTS
         fused_scores: Dict[str, float] = defaultdict(float)
         memory_channels: Dict[str, List[str]] = defaultdict(list)
 
         for channel_name, results in channels.items():
-            weight = self.WEIGHTS.get(channel_name, 0.1)
+            weight = weights.get(channel_name, 0.1)
             for rank, (memory_id, _score) in enumerate(results):
                 rrf_score = weight / (self.RRF_K + rank + 1)
                 fused_scores[memory_id] += rrf_score
@@ -416,14 +479,36 @@ class HybridRetriever:
         # Build RetrievalResult objects
         results = []
         for memory_id in sorted_ids[:top_k]:
-            memory = self.metadata.get_memory(memory_id)
-            if memory:
+            # Handle PageIndex synthetic results (pageindex:page:doc_id:content_hash)
+            if memory_id.startswith("pageindex:"):
+                parts = memory_id.split(":", 3)
+                page_num = parts[1] if len(parts) > 1 else "0"
+                pi_doc_id = parts[2] if len(parts) > 2 else ""
+                content_text = parts[3] if len(parts) > 3 else ""
+                # Create a synthetic memory object for PageIndex results
+                from src.models import CausalMemoryObject, MemoryType, EmotionLabel
+                synthetic_memory = CausalMemoryObject(
+                    id=memory_id,
+                    content=content_text[:500] if content_text else f"[PageIndex document content from page {page_num}]",
+                    memory_type=MemoryType.SEMANTIC,
+                    source="pageindex",
+                    metadata={"page": page_num, "pi_doc_id": pi_doc_id},
+                )
                 results.append(RetrievalResult(
-                    memory=memory,
+                    memory=synthetic_memory,
                     score=fused_scores[memory_id],
                     channel=", ".join(memory_channels[memory_id]),
-                    evidence_text=memory.content[:200],
+                    evidence_text=synthetic_memory.content[:200],
                 ))
+            else:
+                memory = self.metadata.get_memory(memory_id)
+                if memory:
+                    results.append(RetrievalResult(
+                        memory=memory,
+                        score=fused_scores[memory_id],
+                        channel=", ".join(memory_channels[memory_id]),
+                        evidence_text=memory.content[:200],
+                    ))
 
         return results
 

@@ -64,6 +64,7 @@ class CortexRAGEngine:
         self.orchestrator: Optional[AgentOrchestrator] = None
         self.ingestion: Optional[MemoryIngestionPipeline] = None
         self.cache: Optional[MultiLevelCache] = None
+        self.pageindex_store = None  # PageIndex cloud document retrieval (optional)
 
         # Ambient Voice Service (lazy-initialized after RAG init)
         self.ambient_service = None
@@ -79,49 +80,49 @@ class CortexRAGEngine:
         """
         t0 = time.time()
         print("\n" + "=" * 60)
-        print("  🧠 Initializing Cortex Lab RAG Engine v2.0")
-        print("  📦 BGE-large-1024d + CrossEncoder + Fine-Tuned 7B")
+        print("  🧠 Initializing Cortex Lab RAG Engine v2.1")
+        print("  📦 BGE-large-1024d + CrossEncoder + Fine-Tuned 7B + PageIndex")
         print("=" * 60)
 
         # 1. Embedding Model (BGE-large-en-v1.5, 1024d)
         # Move to GPU if available — 1.3GB fits within 13GB headroom (§5.2, §6.3)
-        print("\n[1/10] Embedding Model (BGE-large-en-v1.5)...")
+        print("\n[1/11] Embedding Model (BGE-large-en-v1.5)...")
         _embed_device = "cuda" if torch.cuda.is_available() else "cpu"
         self.embedding_model = EmbeddingModel(device=_embed_device)
         print(f"  → {self.embedding_model.dimension}d embeddings on {_embed_device}")
 
         # 2. Cross-Encoder Reranker (BGE-reranker-v2-m3)
         # Move to GPU if available — 560MB fits within GPU headroom (§6.3)
-        print("[2/10] Cross-Encoder Reranker...")
+        print("[2/11] Cross-Encoder Reranker...")
         _rerank_device = "cuda" if torch.cuda.is_available() else "cpu"
         self.reranker = CrossEncoderReranker(device=_rerank_device)
 
         # 3. Vector Store
-        print("[3/10] Vector Store...")
+        print("[3/11] Vector Store...")
         self.vector_store = VectorStore(
             dimension=self.embedding_model.dimension,
             data_dir=f"{self.data_dir}/vectors"
         )
 
         # 4. Metadata Store
-        print("[4/10] Metadata Store...")
+        print("[4/11] Metadata Store...")
         self.metadata_store = MetadataStore(db_path=f"{self.data_dir}/cortex.duckdb")
 
         # 5. Knowledge Graph
-        print("[5/10] Knowledge Graph...")
+        print("[5/11] Knowledge Graph...")
         self.knowledge_graph = KnowledgeGraph(data_dir=f"{self.data_dir}/graph")
 
         # 6. LLM Interface (Fine-Tuned DeepSeek-R1-7B)
-        print("[6/10] LLM Interface (Fine-Tuned 7B)...")
+        print("[6/11] LLM Interface (Fine-Tuned 7B)...")
         self.llm = LocalLLM(model=model, tokenizer=tokenizer)
 
         # 7. Query Engine
-        print("[7/10] Query Engine...")
+        print("[7/11] Query Engine...")
         self.query_analyzer = QueryAnalyzer()
         self.query_transformer = QueryTransformer(self.llm, self.embedding_model)
 
         # 8. Hybrid Retriever (with cross-encoder reranker)
-        print("[8/10] Hybrid Retriever (5-channel + CrossEncoder)...")
+        print("[8/11] Hybrid Retriever (6-channel + CrossEncoder)...")
         self.hybrid_retriever = HybridRetriever(
             self.embedding_model, self.vector_store,
             self.metadata_store, self.knowledge_graph,
@@ -129,20 +130,47 @@ class CortexRAGEngine:
         )
 
         # 9. Agent Orchestrator (LLM routing + Self-RAG + FLARE)
-        print("[9/10] Agent Orchestrator (Adaptive-RAG + Self-RAG + FLARE)...")
+        print("[9/11] Agent Orchestrator (Adaptive-RAG + Self-RAG + FLARE)...")
         self.orchestrator = AgentOrchestrator(
             self.llm, self.hybrid_retriever,
             self.query_analyzer, self.query_transformer
         )
 
         # 10. Ingestion Pipeline + Cache
-        print("[10/10] Ingestion Pipeline + Cache...")
+        print("[10/11] Ingestion Pipeline + Cache...")
         self.ingestion = MemoryIngestionPipeline(
             self.llm, self.embedding_model,
             self.vector_store, self.metadata_store,
             self.knowledge_graph
         )
         self.cache = MultiLevelCache(self.embedding_model)
+
+        # 11. PageIndex Store (optional cloud-based document retrieval)
+        print("[11/11] PageIndex Document Store...")
+        try:
+            from config.pageindex_config import PAGEINDEX_CONFIG
+            if PAGEINDEX_CONFIG.get("enabled", False):
+                from src.storage.pageindex_store import PageIndexStore
+                self.pageindex_store = PageIndexStore(
+                    api_key=PAGEINDEX_CONFIG["api_key"],
+                    data_dir=f"{self.data_dir}/pageindex",
+                    config=PAGEINDEX_CONFIG,
+                )
+                # Inject into hybrid retriever as 6th channel
+                self.hybrid_retriever.pageindex_store = self.pageindex_store
+                # Sync any processing documents
+                self.pageindex_store.sync_statuses()
+                pi_stats = self.pageindex_store.get_stats()
+                print(f"  📄 PageIndex enabled: {pi_stats['documents']} docs "
+                      f"({pi_stats['ready_documents']} ready)")
+            else:
+                print("  ℹ PageIndex disabled in config")
+        except ImportError as e:
+            print(f"  ⚠ PageIndex SDK not installed: {e}")
+            print("    → Install with: pip install pageindex")
+        except Exception as e:
+            print(f"  ⚠ PageIndex init failed: {e}")
+            print("    → Document retrieval will use local-only channels")
 
         # Run tier migration on startup
         try:
@@ -170,10 +198,12 @@ class CortexRAGEngine:
 
         self.initialized = True
         elapsed = time.time() - t0
-        print(f"\n  ✅ RAG Engine v2.0 ready in {elapsed:.1f}s")
+        print(f"\n  ✅ RAG Engine v2.1 ready in {elapsed:.1f}s")
+        pi_status = "enabled" if self.pageindex_store else "disabled"
         print(f"  📊 Memories: {self.metadata_store.count_memories()} | "
               f"Vectors: {self.vector_store.count()} | "
-              f"Graph: {self.knowledge_graph.get_stats()}")
+              f"Graph: {self.knowledge_graph.get_stats()} | "
+              f"PageIndex: {pi_status}")
         print("=" * 60 + "\n")
 
         # Initialize Ambient Voice Service (lazy — models load on first start)

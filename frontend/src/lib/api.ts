@@ -486,3 +486,103 @@ export async function getPipelineTraceById(traceId: string): Promise<PipelineTra
   if (!res.ok) throw new Error(`Failed to fetch trace: ${res.status}`);
   return res.json();
 }
+
+// ── PageIndex Document Management ───────────────────────────────
+
+export interface PageIndexDocument {
+  doc_id: string;
+  filename: string;
+  uploaded_at: string;
+  status: string;
+  estimated_pages: number;
+  file_hash: string;
+}
+
+export interface PageIndexUsage {
+  queries_used: number;
+  pages_used: number;
+  queries_limit: number;
+  pages_limit: number;
+  month: string;
+}
+
+export async function uploadDocument(file: File): Promise<{
+  status: string;
+  doc_id: string;
+  filename: string;
+  processing_status: string;
+  already_indexed: boolean;
+}> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const res = await fetch(`${API_BASE}/documents/upload`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Upload failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function listDocuments(): Promise<{
+  documents: PageIndexDocument[];
+  total: number;
+  pageindex_enabled: boolean;
+}> {
+  const res = await fetch(`${API_BASE}/documents`);
+  if (!res.ok) throw new Error(`Failed to list documents: ${res.status}`);
+  return res.json();
+}
+
+export async function getDocumentInfo(docId: string): Promise<PageIndexDocument & { live_status: string }> {
+  const res = await fetch(`${API_BASE}/documents/${docId}`);
+  if (!res.ok) throw new Error(`Failed to get document: ${res.status}`);
+  return res.json();
+}
+
+export async function getDocumentTree(docId: string): Promise<{ doc_id: string; tree: unknown }> {
+  const res = await fetch(`${API_BASE}/documents/${docId}/tree`);
+  if (!res.ok) throw new Error(`Failed to get tree: ${res.status}`);
+  return res.json();
+}
+
+export async function deleteDocument(docId: string): Promise<{ status: string; doc_id: string }> {
+  const res = await fetch(`${API_BASE}/documents/${docId}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`Failed to delete document: ${res.status}`);
+  return res.json();
+}
+
+export async function queryDocuments(
+  query: string,
+  topK: number = 5,
+): Promise<{
+  answer: string;
+  sections: { page: number; content: string; doc_id: string; score: number }[];
+  doc_count: number;
+}> {
+  const res = await fetch(`${API_BASE}/documents/query`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, top_k: topK }),
+  });
+  if (!res.ok) throw new Error(`Document query failed: ${res.status}`);
+  return res.json();
+}
+
+export async function getPageIndexUsage(): Promise<{
+  enabled: boolean;
+  connected?: boolean;
+  usage: PageIndexUsage;
+  stats?: {
+    connected: boolean;
+    documents: number;
+    ready_documents: number;
+  };
+}> {
+  const res = await fetch(`${API_BASE}/documents/usage`);
+  if (!res.ok) throw new Error(`Failed to get usage: ${res.status}`);
+  return res.json();
+}

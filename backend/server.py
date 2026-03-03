@@ -25,7 +25,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TextIteratorStreamer
 from threading import Thread
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 from starlette.middleware.gzip import GZipMiddleware
@@ -217,7 +217,9 @@ app.add_middleware(
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:3001",
+        "https://*.trycloudflare.com",
     ],
+    allow_origin_regex=r"https://.*\.trycloudflare\.com",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1748,6 +1750,164 @@ async def websocket_ambient(ws: WebSocket):
         pass
     finally:
         _ws_clients.discard(ws)
+
+
+# ── PageIndex Document Management ────────────────────────────────────────────
+
+@app.post("/api/documents/upload")
+async def upload_document(file: UploadFile = File(...)):
+    """
+    Upload a PDF to PageIndex for tree-based document retrieval.
+    The document is indexed by PageIndex's reasoning engine and becomes
+    available as the 6th retrieval channel.
+    """
+    if not rag_engine.pageindex_store:
+        raise HTTPException(
+            status_code=503,
+            detail="PageIndex is not enabled. Check config/pageindex_config.py"
+        )
+
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF files are supported for document indexing."
+        )
+
+    # Save uploaded file to temp location
+    upload_dir = os.path.join(
+        rag_engine.data_dir, "pageindex", "uploads"
+    )
+    os.makedirs(upload_dir, exist_ok=True)
+    temp_path = os.path.join(upload_dir, file.filename)
+
+    try:
+        content = await file.read()
+        with open(temp_path, "wb") as f:
+            f.write(content)
+
+        result = rag_engine.pageindex_store.upload_document(
+            file_path=temp_path,
+            filename=file.filename,
+        )
+
+        return {
+            "status": "success",
+            "doc_id": result["doc_id"],
+            "filename": result["filename"],
+            "processing_status": result["status"],
+            "already_indexed": result.get("already_indexed", False),
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ConnectionError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
+
+
+@app.get("/api/documents")
+async def list_documents():
+    """List all PageIndex-indexed documents."""
+    if not rag_engine.pageindex_store:
+        return {"documents": [], "pageindex_enabled": False}
+
+    docs = rag_engine.pageindex_store.list_documents()
+    return {
+        "documents": docs,
+        "total": len(docs),
+        "pageindex_enabled": True,
+    }
+
+
+@app.get("/api/documents/usage")
+async def get_pageindex_usage():
+    """Get PageIndex API usage stats for the current month."""
+    if not rag_engine.pageindex_store:
+        return {"enabled": False, "usage": {}}
+
+    return {
+        "enabled": True,
+        "connected": rag_engine.pageindex_store.is_connected,
+        "usage": rag_engine.pageindex_store.get_usage(),
+        "stats": rag_engine.pageindex_store.get_stats(),
+    }
+
+
+@app.get("/api/documents/{doc_id}")
+async def get_document_info(doc_id: str):
+    """Get status and info for a specific document."""
+    if not rag_engine.pageindex_store:
+        raise HTTPException(status_code=503, detail="PageIndex not enabled")
+
+    info = rag_engine.pageindex_store.get_document_info(doc_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Also check live status
+    status = rag_engine.pageindex_store.check_status(doc_id)
+    info["live_status"] = status.get("status", "unknown")
+    return info
+
+
+@app.get("/api/documents/{doc_id}/tree")
+async def get_document_tree(doc_id: str):
+    """Get the hierarchical tree structure of a document."""
+    if not rag_engine.pageindex_store:
+        raise HTTPException(status_code=503, detail="PageIndex not enabled")
+
+    tree = rag_engine.pageindex_store.get_tree(doc_id)
+    if tree is None:
+        raise HTTPException(status_code=404, detail="Tree not available")
+    return {"doc_id": doc_id, "tree": tree}
+
+
+@app.delete("/api/documents/{doc_id}")
+async def delete_document(doc_id: str):
+    """Delete a document from PageIndex."""
+    if not rag_engine.pageindex_store:
+        raise HTTPException(status_code=503, detail="PageIndex not enabled")
+
+    removed = rag_engine.pageindex_store.delete_document(doc_id)
+    return {
+        "status": "deleted" if removed else "not_found",
+        "doc_id": doc_id,
+    }
+
+
+@app.post("/api/documents/query")
+async def query_documents(request: MemorySearchRequest):
+    """
+    Query uploaded documents using PageIndex reasoning retrieval.
+    Returns structured sections with page numbers.
+    """
+    if not rag_engine.pageindex_store:
+        raise HTTPException(status_code=503, detail="PageIndex not enabled")
+
+    if not rag_engine.pageindex_store.has_documents:
+        return {
+            "answer": "",
+            "sections": [],
+            "message": "No documents uploaded yet.",
+        }
+
+    # Use chat retrieval for a natural answer
+    answer = rag_engine.pageindex_store.chat_retrieve(
+        query=request.query,
+        stream=False,
+    )
+
+    # Also get structured sections
+    sections = rag_engine.pageindex_store.retrieve_sections(
+        query=request.query,
+        top_k=request.top_k,
+    )
+
+    return {
+        "answer": answer,
+        "sections": sections,
+        "doc_count": len(rag_engine.pageindex_store.get_all_doc_ids()),
+    }
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
