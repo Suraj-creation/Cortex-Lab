@@ -13,6 +13,7 @@ import os
 import sys
 import time
 import json
+import re
 import asyncio
 import uuid
 import traceback
@@ -321,6 +322,15 @@ _STREAMING_HALLUC_PHRASES = [
     "the relationship is more complex than people say",
     "lived experiences",
     "synthesizing", "based on strong empirical evidence",
+    # Self-RAG format leaks
+    "**answer:**", "**evidence:**", "**confidence:**",
+    "**relevance:**", "**sources:**",
+    "answer:\n", "evidence:\n", "confidence: high",
+    "confidence: medium", "confidence: low",
+    # Robotic database-dump prefixes
+    "based on your stored memories:",
+    "according to the evidence provided:",
+    "from your stored memories:",
 ]
 
 
@@ -347,12 +357,12 @@ def _check_no_info_streaming(query: str, evidence_texts: list) -> str:
           "my income", "my pay", "how much does", "earning"],
          ["salary", "compensation", "annual income", "monthly pay",
           "ctc", "lpa", "stipend", "remuneration"],
-         "I don't have any salary or compensation information stored in your memories."),
+         "I don't have any salary or compensation details yet. Feel free to share that info and I'll remember it!"),
 
         # PhD / Doctoral
         (["phd", "doctoral", "dissertation", "phd thesis"],
          ["phd", "doctoral", "dissertation"],
-         "I don't have any information about a PhD or doctoral degree in your memories."),
+         "I don't have any PhD or doctoral information. If that's part of your journey, let me know!"),
 
         # Marriage / family — broader triggers
         (["wife", "husband", "spouse", "children", "kids",
@@ -362,14 +372,14 @@ def _check_no_info_streaming(query: str, evidence_texts: list) -> str:
           "family members"],
          ["wife", "husband", "spouse", "married", "wedding",
           "children names", "son named", "daughter named"],
-         "I don't have any information about marriage or family in your memories."),
+         "I don't have any family or marriage details yet. You can share that with me anytime!"),
 
         # Published papers
         (["published research", "research paper", "published paper",
           "my publications", "published papers", "research papers"],
          ["published paper", "publication in", "journal paper",
           "ieee", "arxiv", "conference paper"],
-         "I don't have any published research papers stored in your memories."),
+         "I don't have any research publication records yet. If you've published papers, tell me about them!"),
     ]
 
     for query_triggers, evidence_keywords, msg in checks:
@@ -383,15 +393,37 @@ def _check_no_info_streaming(query: str, evidence_texts: list) -> str:
     for company in companies:
         if f"work at {company}" in q or f"{company} job" in q or f"employed at {company}" in q:
             if not _re.search(r'\b' + _re.escape(company) + r'\b', all_ev):
-                return f"I don't have any information about employment at {company.title()} in your memories."
+                return f"I don't have any information about working at {company.title()}. If that's part of your experience, tell me about it!"
 
     # Stanford / MIT / Harvard etc. (false premise universities)
     false_unis = ["stanford", "mit ", "harvard", "oxford", "cambridge", "princeton", "yale"]
     for uni in false_unis:
         if uni in q and uni.strip() not in all_ev:
-            return f"I don't have any information about {uni.strip().title()} in your memories."
+            return f"I don't have any details about {uni.strip().title()} in what I know about you."
 
     return ""
+
+
+def _fix_person_pronouns(text: str) -> str:
+    """Convert first-person evidence text to second-person for natural responses.
+    'My name is X' → 'Your name is X', 'I have' → 'You have', etc."""
+    import re as _re
+    # Only fix at sentence starts or after punctuation
+    replacements = [
+        (r'\bMy\b', 'Your'),
+        (r'\bmy\b', 'your'),
+        (r'\bI am\b', 'You are'),
+        (r'\bI\'m\b', "You're"),
+        (r'\bI have\b', 'You have'),
+        (r'\bI was\b', 'You were'),
+        (r'\bI do\b', 'You do'),
+        (r'\bI also\b', 'You also'),
+        (r'^I\b', 'You'),
+        (r'\. I\b', '. You'),
+    ]
+    for pattern, repl in replacements:
+        text = _re.sub(pattern, repl, text)
+    return text
 
 
 def _try_extract_factual(query: str, evidence_texts: list) -> str:
@@ -399,6 +431,7 @@ def _try_extract_factual(query: str, evidence_texts: list) -> str:
     Pre-generation extraction: for simple factual queries, try to extract
     the answer directly from evidence using regex patterns.
     This bypasses the LLM entirely for queries it consistently hallucinates on.
+    Returns conversational, natural-sounding answers.
     """
     import re
     q = query.lower().strip()
@@ -409,42 +442,161 @@ def _try_extract_factual(query: str, evidence_texts: list) -> str:
             q = q[len(prefix):].strip()
             break
 
+    # ── Detect pure greetings (no factual question after prefix removal) ──
+    q_clean = q.rstrip("?!.,")
+    greeting_only = q_clean in ["", "how are you", "how are you doing",
+                          "what's up", "whats up", "sup",
+                          "good morning", "good evening", "good afternoon",
+                          "how's it going", "hows it going", "hey there",
+                          "hi there", "hello there", "yo", "howdy",
+                          "hi", "hey", "hello", "hii", "hiii",
+                          "thanks", "thank you", "bye", "goodbye",
+                          "good night", "hey there", "yo"]
+    if greeting_only:
+        return "Hey! I'm doing great, thanks for asking! 😊 How can I help you today?"
+
     all_ev = "\n".join(evidence_texts) if evidence_texts else ""
     if not all_ev:
         return ""
 
     # ── Name ──
     if any(w in q for w in ["my name", "who am i", "full name", "what's my name"]):
+        # Try bold pattern first
         m = re.search(r'\*\*([A-Z][a-z]+ [A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\*\*', all_ev)
         if m:
-            return f"Your name is **{m.group(1)}** [1]."
+            return f"Your name is **{m.group(1)}**!"
+        # Try "My name is X Y" pattern
+        m = re.search(r'[Mm]y name is ([A-Z][a-z]+ [A-Z][a-z]+)', all_ev)
+        if m:
+            return f"Your name is **{m.group(1)}**!"
+        # Try "Name: X Y" pattern
+        m = re.search(r'[Nn]ame[:\s]+([A-Z][a-z]+ [A-Z][a-z]+)', all_ev)
+        if m:
+            return f"Your name is **{m.group(1)}**!"
+        # Fallback: first two capitalized words at start of text
         m = re.search(r'^([A-Z][a-z]+ [A-Z][a-z]+)', all_ev)
         if m:
-            return f"Your name is **{m.group(1)}** [1]."
+            return f"Your name is **{m.group(1)}**!"
 
     # ── Email ──
     if any(w in q for w in ["email", "e-mail", "mail address", "gmail"]):
         m = re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', all_ev)
         if m:
-            return f"Your email address is **{m.group(0)}** [1]."
+            email = m.group(0).rstrip('.')
+            return f"Your email address is **{email}**."
 
     # ── Phone ──
     if any(w in q for w in ["phone", "number", "contact number", "mobile"]):
         m = re.search(r'\+?\d[\d\s-]{8,15}', all_ev)
         if m:
-            return f"Your phone number is **{m.group(0).strip()}** [1]."
+            return f"Your phone number is **{m.group(0).strip()}**."
 
-    # ── University ──
-    if any(w in q for w in ["university", "college", "where do i study", "my institution"]):
-        m = re.search(r'(?:University|College|Institute)[:\s]*([^\n,|]{5,60})', all_ev, re.IGNORECASE)
-        if m:
-            return f"You study at **{m.group(0).strip()}** [1]."
+    # ── University / Education / Studying ──
+    if any(w in q for w in ["university", "college", "where do i study",
+                             "where am i studying", "my institution",
+                             "education", "my degree", "studying", "b.tech", "btech",
+                             "education background"]):
+        # Try to find degree + institution combo
+        degree_match = re.search(
+            r'(B\.?Tech|M\.?Tech|B\.?Sc|M\.?Sc|MBA|Ph\.?D|Bachelor|Master)[^\n]{0,120}',
+            all_ev, re.IGNORECASE
+        )
+        uni_match = re.search(
+            r'((?:Indian\s+)?(?:Institute|University|College)\s+of\s+[^\n,|]{5,60}|IIIT\s+[A-Za-z]+|IIT\s+[A-Za-z]+|NIT\s+[A-Za-z]+)',
+            all_ev, re.IGNORECASE
+        )
+        # Also try to find IIIT/IIT/NIT patterns
+        if not uni_match:
+            uni_match = re.search(r'(IIIT|IIT|NIT|BITS)\s+[A-Z][a-z]+', all_ev)
 
-    # ── Degree ──
-    if any(w in q for w in ["my degree", "what am i studying", "course", "major"]):
-        m = re.search(r'(B\.?Tech|M\.?Tech|B\.?Sc|M\.?Sc|MBA|Bachelor|Master)[^\n]{0,100}', all_ev, re.IGNORECASE)
-        if m:
-            return f"You are pursuing **{m.group(0).strip()}** [1]."
+        parts = []
+        if degree_match:
+            deg = degree_match.group(0).strip().rstrip(',|*')
+            parts.append(f"pursuing **{deg}**")
+        if uni_match:
+            uni = uni_match.group(0).strip().rstrip(',|*')
+            parts.append(f"at **{uni}**")
+
+        if parts:
+            return "You're " + " ".join(parts) + "."
+
+        # Broader education fallback
+        edu_match = re.search(r'(?:EDUCATION|Education)[:\s]*\n?(.{20,200})', all_ev, re.IGNORECASE)
+        if edu_match:
+            return edu_match.group(0).strip()[:250]
+
+    # ── Skills / Programming / Tech Stack ──
+    if any(w in q for w in ["skill", "language", "programming", "tech stack",
+                             "technologies", "what do i know", "coding", "frameworks"]):
+        prog_langs = ["python", "java", "javascript", "typescript", "c++", "c#",
+                      "go", "rust", "sql", "ruby", "swift", "kotlin", " c,", " r,"]
+        # Find the best evidence chunk with actual skill/language names
+        best_skills = ""
+        best_count = 0
+        for ev in evidence_texts:
+            ev_lower = ev.lower()
+            count = sum(1 for lang in prog_langs if lang in ev_lower)
+            if count > best_count:
+                best_count = count
+                # Try to extract the skills section
+                skills_match = re.search(
+                    r'(?:\*?\*?Skills?\*?\*?|\*?\*?Programming\*?\*?|\*?\*?Technical\*?\*?|\*?\*?Specialized\*?\*?)[:\s|*]*(.{20,400})',
+                    ev, re.IGNORECASE
+                )
+                if skills_match:
+                    best_skills = skills_match.group(0).strip()[:400]
+                elif count >= 2:
+                    best_skills = ev.strip()[:400]
+        if best_skills:
+            return f"Here are your technical skills:\n\n{_fix_person_pronouns(best_skills)}"
+
+    # ── Projects ──
+    if any(w in q for w in ["project", "built", "portfolio", "developed", "my work", "created"]):
+        projects = []
+        # Find project names from evidence
+        for ev in evidence_texts:
+            # "📌 Project Name: X" pattern
+            found = re.findall(r'📌\s*Project\s*Name:\s*([^\n.]{3,80})', ev)
+            projects.extend(found)
+            # Bold project titles
+            bold = re.findall(r'\*\*([A-Z][^*\n]{4,60})\*\*', ev)
+            for b in bold:
+                b_lower = b.lower()
+                skip = ["name", "email", "phone", "skills", "education", "source",
+                        "university", "experience", "summary", "contact"]
+                if not any(s in b_lower for s in skip) and len(b) > 6:
+                    projects.append(b.strip())
+        # Deduplicate
+        seen = set()
+        unique = []
+        for p in projects:
+            p_clean = p.strip().rstrip('*#').strip()
+            if p_clean.lower() not in seen and len(p_clean) >= 4:
+                seen.add(p_clean.lower())
+                unique.append(p_clean)
+        if unique:
+            project_list = "\n".join(f"• **{p}**" for p in unique[:10])
+            return f"Here are the projects you've built:\n\n{project_list}"
+
+    # ── Location / Hometown ──
+    if any(w in q for w in ["where do i live", "my location", "my city", "my hometown",
+                             "where am i from", "my address", "where i stay"]):
+        # Try specific city names first
+        loc_match = re.search(
+            r'(Patna|Bihar|Bangalore|Karnataka|Mumbai|Delhi|Hyderabad|Chennai|Kolkata)[,\s]*(?:[A-Z][a-z]+)?(?:[,\s]*India)?',
+            all_ev
+        )
+        if not loc_match:
+            loc_match = re.search(
+                r'(?:from|located in|lives in|hometown)[:\s]+([A-Z][a-z]+(?:[,\s]+[A-Z][a-z]+)*)',
+                all_ev, re.IGNORECASE
+            )
+        if loc_match:
+            location = loc_match.group(0).strip()
+            # Remove "from " prefix if captured
+            if location.lower().startswith("from "):
+                location = location[5:]
+            return f"You're from **{location}**."
 
     return ""  # Don't extract — let the model generate
 
@@ -862,6 +1014,19 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
             for e in evidence_texts
         )
 
+        # ── Detect casual / greeting queries — force no-evidence path ──
+        _q_lower = user_message.lower().strip().rstrip("?!.")
+        _casual_queries = {
+            "hi", "hello", "hey", "hii", "hiii", "yo", "sup", "howdy",
+            "hey there", "hi there", "hello there",
+            "how are you", "how are you doing", "how's it going",
+            "hows it going", "what's up", "whats up",
+            "good morning", "good evening", "good afternoon",
+            "good night", "thanks", "thank you", "bye", "goodbye",
+        }
+        if _q_lower in _casual_queries:
+            has_meaningful_evidence = False
+
         # ── Pre-generation: Check for false premises / no-data queries ──
         # If the query asks about data that doesn't exist, don't even generate
         no_info_response = _check_no_info_streaming(user_message, evidence_texts)
@@ -881,34 +1046,37 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
 
         if has_meaningful_evidence:
             rag_prompt = f"""<|im_start|>system
-You are Cortex Lab, a personal AI memory and reasoning assistant.
-Answer the user's question using ONLY the provided evidence from their memories.
-Use inline citations [1], [2] etc. to reference specific memories.
+You are Cortex Lab, an intelligent personal AI assistant who knows the user well.
+You have access to the user's stored memories below. Use them to answer naturally.
 
-RULES:
-1. Extract and state factual information directly from the evidence.
-2. If the evidence contains a direct answer (name, email, project name, skill list), state it clearly.
-3. DO NOT generate generic patterns like "belief evolution", "emotion timeline", 
-   "key insight", or "clarity of scope" unless the evidence explicitly discusses these.
-4. If the evidence does not contain relevant information, say "I don't have memories about that yet."
-5. NEVER invent, fabricate, or assume information not present in the evidence.
-6. Keep responses focused, concise, and directly relevant to the question.
+PERSONALITY:
+- Speak warmly and conversationally, like a knowledgeable friend
+- Give direct, confident answers — never say "Based on your stored memories" or "According to evidence"
+- For simple questions (name, email, location), answer in ONE short sentence
+- For broader questions (skills, projects, background), write a flowing natural paragraph — NOT bullet lists
+- Always use "you/your" when referring to the user, NEVER "I/my" (those are the USER's facts, not yours)
+- NEVER add citations like [1] [2] — just speak naturally
+- NEVER generate "Confidence:", "Evidence:", "Answer:" labels
+- NEVER say "belief evolution", "emotion timeline", "key insight", "clarity of scope", or similar generic phrases
+
+If the evidence doesn't answer the question, simply say "I don't have that information yet — feel free to tell me and I'll remember it!"
 <|im_end|>
 <|im_start|>user
-Question: {user_message}
+{user_message}
 
-Evidence from memories:
+Here is what I know about you:
 {evidence_block}
-
-Answer based ONLY on the evidence above:
 <|im_end|>
 <|im_start|>assistant
 """
         else:
+            # Greeting / casual conversation — no evidence needed
             rag_prompt = f"""<|im_start|>system
-You are Cortex Lab, a friendly AI assistant. The user has no stored memories yet, or their message is a casual greeting.
-Respond naturally and conversationally. Do NOT reference any memories or past conversations — there are none.
-Keep your response brief and friendly.
+You are Cortex Lab, a friendly and warm personal AI assistant.
+The user is greeting you or making casual conversation. Respond naturally and briefly.
+Be cheerful, helpful, and personable. Keep it to 1-2 sentences.
+Do NOT reference memories, evidence, or past conversations.
+Do NOT generate philosophical content, analysis, or "key insights".
 <|im_end|>
 <|im_start|>user
 {user_message}
@@ -1019,14 +1187,15 @@ Keep your response brief and friendly.
                         best_score = score
                         best_ev = ev
                 if best_ev:
-                    extracted = f"Based on your stored memories:\n\n{best_ev[:400]} [1]."
+                    extracted = best_ev[:400]
                 else:
-                    extracted = "I don't have specific information about that in your memories. Could you try rephrasing your question?"
+                    extracted = "I don't have specific information about that yet — feel free to tell me and I'll remember it!"
 
-            # Send the extracted answer (replace any partial hallucinated stream)
-            # Send a newline to visually separate if we already streamed some text
+            # REPLACE any partial hallucinated text — send correction that overwrites
+            # Use a special separator to signal the frontend to replace content
             if streamed_text.strip():
-                replace_chunk = {"id": msg_id, "delta": f"\n\n{extracted}"}
+                # Send a "replace" signal — the frontend should clear previous text
+                replace_chunk = {"id": msg_id, "delta": "", "replace": extracted}
             else:
                 replace_chunk = {"id": msg_id, "delta": extracted}
             yield f"data: {json.dumps(replace_chunk)}\n\n"

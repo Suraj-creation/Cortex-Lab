@@ -792,10 +792,7 @@ Agent Analyses:
             verdict = "INCORRECT"
             response.reasoning_trace += f" | CRAG: INCORRECT (q={quality_score:.2f})"
             response.confidence *= 0.55
-            response.answer = (
-                "⚠️ *Limited relevant memories found. Based on partial information:*\n\n"
-                + response.answer
-            )
+            # Don't prefix with warning — let the response speak for itself
 
         # Populate trace
         if response.pipeline_trace:

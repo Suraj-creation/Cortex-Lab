@@ -363,27 +363,25 @@ Later memory: {new_text[:300]}
         evidence_text = "\n".join(f"[{i+1}] {e[:250]}" for i, e in enumerate(evidence[:5]))
 
         prompt = f"""<|im_start|>system
-You are Cortex Lab, a personal AI memory assistant. Your task is to answer the
-user's question based STRICTLY on the evidence provided below.
+You are Cortex Lab, an intelligent personal AI assistant who knows the user well.
+Answer their question naturally using the information below.
 
 RULES:
-1. ONLY use information explicitly stated in the evidence. NEVER fabricate.
-2. Use inline citations [1], [2], etc. to reference specific evidence.
-3. If the evidence contains the direct answer (name, email, list, etc.), state it clearly.
-4. If the evidence is insufficient, say "I don't have this information in your memories."
-5. DO NOT generate generic patterns like "belief evolution", "emotion timeline", 
-   "key insight", or "clarity of scope" unless the evidence explicitly discusses these.
-6. For factual questions (name, email, skills, projects), give a direct factual answer.
-7. Keep your answer concise and directly relevant to the question.
+1. Speak conversationally, like a knowledgeable friend — NOT like a database.
+2. For simple factual questions, answer in one clear sentence.
+3. For broader questions, write a natural flowing paragraph.
+4. Always use "you/your" when referring to the user, NEVER "I/my".
+5. NEVER say "Based on your stored memories" or "According to evidence".
+6. NEVER generate labels like "Confidence:", "Evidence:", "Answer:".
+7. NEVER generate "belief evolution", "emotion timeline", "key insight", or "clarity of scope".
+8. If the information doesn't contain the answer, say "I don't have that information yet."
 {f"Session context: {session_context[:200]}" if session_context else ""}
 <|im_end|>
 <|im_start|>user
-Question: {query}
+{query}
 
-Evidence from your memories:
+Here is what I know about you:
 {evidence_text}
-
-Based ONLY on this evidence, answer the question directly:
 <|im_end|>
 <|im_start|>assistant
 """
@@ -396,7 +394,7 @@ Based ONLY on this evidence, answer the question directly:
 
         # Final safety: never return empty or near-empty
         if not result or len(result.strip()) < 15:
-            result = "I don't have specific information about that in your stored memories."
+            result = "I don't have that information yet — feel free to tell me and I'll remember it!"
 
         return result
 
@@ -419,25 +417,22 @@ Based ONLY on this evidence, answer the question directly:
         docs_text = "\n".join(all_docs)
 
         prompt = f"""<|im_start|>system
-You are Cortex Lab, a personal AI memory assistant.
-Answer the question using ONLY the relevant documents below.
-Some documents may be distractors (irrelevant) — ignore them completely.
-Cite relevant documents with [Doc N].
+You are Cortex Lab, an intelligent personal AI assistant.
+Answer the question naturally using ONLY the relevant documents below.
+Some documents may be irrelevant distractors — ignore them completely.
 
 RULES:
-1. Extract and state factual information directly from the documents.
-2. DO NOT generate generic patterns, emotion timelines, or belief evolutions
-   unless the documents explicitly discuss them.
-3. For factual questions, give a direct, concise answer.
-4. If no document answers the question, say "I don't have this information."
+1. Speak conversationally, like a friend — NOT like a database.
+2. For simple questions, answer in one clear sentence.
+3. NEVER generate labels like "Confidence:", "Evidence:", "Answer:".
+4. NEVER generate "belief evolution", "emotion timeline", or philosophical garbage.
+5. If no document answers the question, say "I don't have that information yet."
 <|im_end|>
 <|im_start|>user
-Question: {query}
+{query}
 
 Documents:
 {docs_text}
-
-Answer based ONLY on relevant documents:
 <|im_end|>
 <|im_start|>assistant
 """
@@ -449,7 +444,7 @@ Answer based ONLY on relevant documents:
 
         # Final safety: never return empty or near-empty
         if not result or len(result.strip()) < 15:
-            result = "I don't have specific information about that in your stored memories."
+            result = "I don't have that information yet — feel free to tell me and I'll remember it!"
 
         return result
 
@@ -568,7 +563,7 @@ Available tools:
                 return extracted
             # If extraction fails AND multiple indicators, return "no info"
             if halluc_count >= 2:
-                return "I don't have specific information about that in your memories. Could you try rephrasing your question?"
+                return "I don't have that information yet — feel free to tell me and I'll remember it!"
 
         # ── 3. Check relevance: query content words vs result ──
         query_words = set(re.findall(r'\b[a-z]{3,}\b', query_lower))
@@ -660,14 +655,14 @@ Available tools:
               "work at tesla", "tesla job"],
              ["google employee", "microsoft employee", "amazon employee",
               "work at google", "work at microsoft", "work at amazon"],
-             "I don't have any information about employment at that company in your memories."),
+             "I don't have any information about working at that company. If that's part of your experience, tell me about it!"),
 
             # PhD / Masters at specific universities
             (["phd at", "phd thesis", "phd from", "doctoral", "dissertation",
               "masters at", "masters from", "graduate school",
               "stanford", "mit ", "harvard", "oxford", "cambridge"],
              ["phd", "doctoral", "dissertation", "masters degree"],
-             "I don't have any information about a PhD, Masters, or doctoral degree in your memories."),
+             "I don't have any PhD or Masters information. If that's part of your journey, let me know!"),
 
             # Salary / compensation — use STRICT whole-word matching
             (["salary", "compensation", "how much do i earn", "how much do i make",
@@ -675,7 +670,7 @@ Available tools:
               "how much does", "what does he earn", "earning"],
              ["salary", "compensation", "annual income", "monthly pay",
               "ctc", "lpa", "stipend", "remuneration"],
-             "I don't have any salary or compensation information stored in your memories."),
+             "I don't have any salary or compensation details yet. Feel free to share that info!"),
 
             # Marriage / family details — expanded triggers for 3rd person
             (["wife", "husband", "spouse", "children", "kids",
@@ -684,7 +679,7 @@ Available tools:
               "is he married", "is she married", "marital status"],
              ["wife", "husband", "spouse", "married", "wedding",
               "children names", "son named", "daughter named"],
-             "I don't have any information about marriage or family in your memories."),
+             "I don't have any family or marriage details yet. You can share that with me anytime!"),
 
             # Published papers (if not actually published)
             (["published research", "research paper", "published paper",
@@ -692,7 +687,7 @@ Available tools:
               "research papers", "published papers"],
              ["published paper", "publication in", "journal paper",
               "ieee", "arxiv", "conference paper"],
-             "I don't have any published research papers stored in your memories."),
+             "I don't have any research publication records yet. If you've published papers, tell me about them!"),
         ]
 
         for query_triggers, evidence_keywords, no_info_msg in false_premise_checks:
@@ -818,9 +813,31 @@ Available tools:
             r'Synthesizing\s+\d+\s+memories?\s+about\b.*$',
             r'Based on\s+\d+\s+memories?\s+about\b.*$',
             r'\*?\*?Confidence:?\*?\*?\s*:?\s*(High|Medium|Low).*$',
+            # Self-RAG format leaks: "Answer:", "Evidence:", etc.
+            r'^\*?\*?Answer:?\*?\*?\s*',
+            r'\*?\*?Evidence:?\*?\*?\s*:?.*$',
+            r'\*?\*?Relevance:?\*?\*?\s*:?.*$',
+            r'\*?\*?Sources?:?\*?\*?\s*:?\s*\[?\d.*$',
         ]
         for pattern in fake_confidence_patterns:
             text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.MULTILINE).strip()
+
+        # ── Phase 2b: Remove robotic prefixes ──
+        robotic_prefixes = [
+            "Based on your stored memories:",
+            "Based on your memories:",
+            "Based on the evidence provided:",
+            "Based on the provided evidence:",
+            "According to your stored memories:",
+            "According to the evidence:",
+            "From your stored memories:",
+        ]
+        for prefix in robotic_prefixes:
+            if text.lower().startswith(prefix.lower()):
+                text = text[len(prefix):].strip()
+
+        # ── Phase 2c: Remove inline citations [1], [2], etc. ──
+        text = re.sub(r'\s*\[\d+\]\.?', '', text).strip()
 
         # ── Phase 3: Remove placeholder tokens ──
         # The model generates [Name], [Email], etc. instead of actual data
@@ -850,6 +867,21 @@ Available tools:
             text = ""
 
         return text.strip()
+
+    @staticmethod
+    def _fix_person(text: str) -> str:
+        """Convert first-person text to second-person for natural responses."""
+        import re as _re
+        replacements = [
+            (r'\bMy\b', 'Your'), (r'\bmy\b', 'your'),
+            (r'\bI am\b', 'You are'), (r'\bI\'m\b', "You're"),
+            (r'\bI have\b', 'You have'), (r'\bI was\b', 'You were'),
+            (r'\bI do\b', 'You do'), (r'\bI also\b', 'You also'),
+            (r'^I\b', 'You'), (r'\. I\b', '. You'),
+        ]
+        for pattern, repl in replacements:
+            text = _re.sub(pattern, repl, text)
+        return text
 
     @staticmethod
     def _extract_answer_from_evidence(query: str, evidence: List[str]) -> str:
@@ -920,53 +952,70 @@ Available tools:
                 parts.append(f"**Phone:** {phone_match.group(0).strip()}")
 
             if parts:
-                return "Based on your memories:\n\n" + "\n".join(f"• {p}" for p in parts) + " [1]."
+                return "Here's what I have for you:\n\n" + "\n".join(f"• {p}" for p in parts)
 
         # ─── Name ───
         if asks_name:
             # Look for bold name patterns (resume format)
             name_match = re.search(r'\*\*([A-Z][a-z]+ [A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\*\*', all_evidence)
             if name_match:
-                return f"Your name is **{name_match.group(1)}** [1]."
+                return f"Your name is **{name_match.group(1)}**!"
+            # "My name is X Y" pattern
+            name_match = re.search(r'[Mm]y name is ([A-Z][a-z]+ [A-Z][a-z]+)', all_evidence)
+            if name_match:
+                return f"Your name is **{name_match.group(1)}**!"
+            # "Name: X Y" pattern
+            name_match = re.search(r'[Nn]ame[:\s]+([A-Z][a-z]+ [A-Z][a-z]+)', all_evidence)
+            if name_match:
+                return f"Your name is **{name_match.group(1)}**!"
             # Plain name at start of evidence
             name_match = re.search(r'^([A-Z][a-z]+ [A-Z][a-z]+)', all_evidence)
             if name_match:
-                return f"Your name is **{name_match.group(1)}** [1]."
+                return f"Your name is **{name_match.group(1)}**!"
 
         # ─── Email ───
         if asks_email:
             email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', all_evidence)
             if email_match:
-                return f"Your email address is **{email_match.group(0)}** [1]."
+                return f"Your email address is **{email_match.group(0)}**."
 
         # ─── Phone ───
         if asks_phone:
             phone_match = re.search(r'\+?\d[\d\s-]{8,15}', all_evidence)
             if phone_match:
-                return f"Your phone number is **{phone_match.group(0).strip()}** [1]."
+                return f"Your phone number is **{phone_match.group(0).strip()}**."
 
         # ─── University / College / Education ───
         if any(w in query_lower for w in ["university", "college", "where do i study",
                                            "where am i studying", "my school", "institution",
-                                           "education", "my degree", "studying", "b.tech", "btech"]):
-            # Look for university name
-            uni_match = re.search(r'(?:University|College|Institute)[:\s]*([^\n,|]{5,60})', all_evidence, re.IGNORECASE)
-            if uni_match:
-                uni_name = uni_match.group(0).strip().rstrip(',|')
-                # Also get degree info
-                degree_match = re.search(
-                    r'(B\.?Tech|M\.?Tech|B\.?Sc|M\.?Sc|MBA|Ph\.?D|Bachelor|Master)[^\n]{0,100}',
-                    all_evidence, re.IGNORECASE
-                )
-                degree_info = degree_match.group(0).strip() if degree_match else ""
+                                           "education", "my degree", "studying", "b.tech", "btech",
+                                           "education background"]):
+            # Look for university/institution name — try specific patterns first
+            uni_match = re.search(
+                r'((?:Indian\s+)?(?:Institute|University|College)\s+of\s+[^\n,|]{5,60}|IIIT\s+[A-Za-z]+|IIT\s+[A-Za-z]+|NIT\s+[A-Za-z]+)',
+                all_evidence, re.IGNORECASE
+            )
+            if not uni_match:
+                uni_match = re.search(r'(IIIT|IIT|NIT|BITS)\s+[A-Z][a-z]+', all_evidence)
+            if not uni_match:
+                uni_match = re.search(r'(?:University|College|Institute)[:\s]*([^\n,|]{5,60})', all_evidence, re.IGNORECASE)
 
+            # Also get degree info
+            degree_match = re.search(
+                r'(B\.?Tech|M\.?Tech|B\.?Sc|M\.?Sc|MBA|Ph\.?D|Bachelor|Master)[^\n]{0,100}',
+                all_evidence, re.IGNORECASE
+            )
+
+            if uni_match or degree_match:
                 parts = []
-                if degree_info:
-                    parts.append(f"You are pursuing **{degree_info}**")
-                if uni_name:
-                    parts.append(f"at **{uni_name}**")
+                if degree_match:
+                    deg = degree_match.group(0).strip().rstrip(',|*')
+                    parts.append(f"pursuing **{deg}**")
+                if uni_match:
+                    uni = uni_match.group(0).strip().rstrip(',|*')
+                    parts.append(f"at **{uni}**")
                 if parts:
-                    return " ".join(parts) + " [1]."
+                    return "You're " + " ".join(parts) + "."
 
             # Try broader education section
             edu_match = re.search(
@@ -974,7 +1023,7 @@ Available tools:
                 all_evidence, re.IGNORECASE
             )
             if edu_match:
-                return f"Based on your memories:\n\n{edu_match.group(0).strip()[:300]} [1]."
+                return edu_match.group(0).strip()[:300]
 
         # ─── Skills / Programming Languages / Tech Stack ───
         if any(w in query_lower for w in ["skill", "language", "programming", "tech stack",
@@ -1005,12 +1054,12 @@ Available tools:
                         best_skills = ev.strip()[:400]
 
             if best_skills:
-                return f"Based on your memories, here are your technical skills:\n\n{best_skills} [1]."
+                return f"Here are your technical skills:\n\n{LocalLLM._fix_person(best_skills)}"
 
             # Fallback: look for "skilled in" pattern
             skills_match = re.search(r'skilled in \*?\*?([^.]{20,300})', all_evidence, re.IGNORECASE)
             if skills_match:
-                return f"Based on your memories, here are your technical skills:\n\n{skills_match.group(0).strip()[:400]} [1]."
+                return f"Your technical skills include:\n\n{LocalLLM._fix_person(skills_match.group(0).strip()[:400])}"
 
         # ─── Projects ───
         if any(w in query_lower for w in ["project", "built", "worked on", "portfolio",
@@ -1092,7 +1141,7 @@ Available tools:
                     unique.append(p_clean)
                 if unique:
                     project_list = "\n".join(f"• **{p}**" for p in unique[:10])
-                    return f"Based on your stored memories, here are your projects:\n\n{project_list}"
+                    return f"Here are the projects you've built:\n\n{project_list}"
 
             # Project-specific fallback: if no project names found but evidence has project data
             # Summarize the best project-related evidence
@@ -1105,7 +1154,7 @@ Available tools:
                     if clean_ev.startswith("🛠") or clean_ev.startswith("🔧") or clean_ev.startswith("🚀"):
                         continue
                     if len(clean_ev) > 50:
-                        return f"Based on your stored memories about your projects:\n\n{clean_ev[:500]} [1]."
+                        return f"Here's what I know about your projects:\n\n{clean_ev[:500]}"
 
         # ─── Location / Hometown ───
         if any(w in query_lower for w in ["where do i live", "my location", "my city",
@@ -1118,7 +1167,7 @@ Available tools:
             for pattern in loc_patterns:
                 match = re.search(pattern, all_evidence, re.IGNORECASE)
                 if match:
-                    return f"Based on your memories, your location is **{match.group(0).strip()}** [1]."
+                    return f"You're from **{match.group(0).strip()}**."
 
         # ─── Achievements / Awards ───
         if any(w in query_lower for w in ["achievement", "award", "honor", "recognition",
@@ -1133,7 +1182,7 @@ Available tools:
                 achievements.extend(found)
             if achievements:
                 ach_list = "\n".join(f"• {a.strip()}" for a in achievements[:5])
-                return f"Based on your memories, here are your achievements:\n\n{ach_list}"
+                return f"Here are your achievements:\n\n{ach_list}"
 
         # ─── Specific project query (e.g., "tell me about Hope chatbot") ───
         # Extract specific entities from query
@@ -1151,7 +1200,7 @@ Available tools:
                         clean_ev = re.sub(r'\[Source:\s*[^\]]+\]\s*', '', ev).strip()
                         clean_ev = re.sub(r'\[?s-repository\]?', '', clean_ev).strip()
                         if len(clean_ev) > 30:
-                            return f"Based on your stored memories about **{entity}**:\n\n{clean_ev[:400]} [1]."
+                            return f"Here's what I know about **{entity}**:\n\n{LocalLLM._fix_person(clean_ev[:400])}"
 
         # ─── LinkedIn / GitHub / Social Links ───
         if any(w in query_lower for w in ["linkedin", "github", "social", "profile", "link"]):
@@ -1170,7 +1219,7 @@ Available tools:
                 all_evidence, re.IGNORECASE
             )
             if summary_match:
-                return f"Based on your memories:\n\n{summary_match.group(0).strip()[:400]} [1]."
+                return summary_match.group(0).strip()[:400]
 
         # ─── Class 10th / 12th marks ───
         if any(w in query_lower for w in ["class 10", "class 12", "10th", "12th",
@@ -1181,7 +1230,7 @@ Available tools:
                 all_marks = re.findall(r'Class\s+(1[02])(?:th)?\s*[:\s]*(\d{1,3})%', all_evidence, re.IGNORECASE)
                 if all_marks:
                     marks_list = ", ".join(f"Class {cls}th: {pct}%" for cls, pct in all_marks)
-                    return f"Based on your memories: {marks_list} [1]."
+                    return f"Your board exam scores: {marks_list}."
 
         # ─── Generic: Find the most relevant evidence piece by query word matching ───
         if evidence:
@@ -1206,7 +1255,7 @@ Available tools:
                 clean = re.sub(r'\[Source:\s*[^\]]+\]\s*', '', best_ev).strip()
                 clean = re.sub(r'\[?s-repository\]?', '', clean).strip()
                 if len(clean) > 30:
-                    return f"Based on your stored memories:\n\n{clean[:400]} [1]."
+                    return f"{LocalLLM._fix_person(clean[:400])}"
 
         return ""  # No extraction possible
 

@@ -184,6 +184,15 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
               prev.filter((m) => m.id !== assistantId || m.content.length > 0),
             );
           },
+          // onReplace — server detected hallucination and sends corrected text
+          (replacedText) => {
+            streamBufferRef.current = {};
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId ? { ...m, content: replacedText } : m,
+              ),
+            );
+          },
         );
       } else {
         // ── RAG Non-streaming ───────────────────────────────────

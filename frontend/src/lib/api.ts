@@ -162,6 +162,7 @@ export async function streamRAGMessage(
   onToken: (token: string) => void,
   onDone: () => void,
   onError: (err: Error) => void,
+  onReplace?: (text: string) => void,
 ): Promise<void> {
   try {
     const res = await fetch(`${API_BASE}/rag/chat`, {
@@ -211,6 +212,10 @@ export async function streamRAGMessage(
           if (data.done) {
             onDone();
             return;
+          }
+          // Handle hallucination replacement — server sends corrected content
+          if (data.replace && onReplace) {
+            onReplace(data.replace);
           }
           if (data.delta) {
             onToken(data.delta);
