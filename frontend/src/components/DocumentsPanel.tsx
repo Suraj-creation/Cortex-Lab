@@ -69,14 +69,25 @@ export function DocumentsPanel({ onBack }: { onBack: () => void }) {
 
   const loadData = useCallback(async () => {
     try {
-      const [docsRes, usageRes] = await Promise.all([
+      const [docsRes, usageRes] = await Promise.allSettled([
         listDocuments(),
         getPageIndexUsage(),
       ]);
-      setDocuments(docsRes.documents);
-      setEnabled(docsRes.pageindex_enabled);
-      if (usageRes.usage) setUsage(usageRes.usage);
-      setConnected(usageRes.connected ?? false);
+
+      if (docsRes.status === "fulfilled") {
+        setDocuments(docsRes.value.documents || []);
+        setEnabled(docsRes.value.pageindex_enabled);
+      }
+
+      if (usageRes.status === "fulfilled") {
+        if (usageRes.value.usage) setUsage(usageRes.value.usage);
+        setConnected(usageRes.value.connected ?? false);
+      }
+
+      // Only show error if both failed
+      if (docsRes.status === "rejected" && usageRes.status === "rejected") {
+        setError("Failed to connect to backend");
+      }
     } catch (err) {
       console.error("Failed to load documents:", err);
       setError("Failed to connect to backend");

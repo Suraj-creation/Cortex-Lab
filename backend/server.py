@@ -1812,26 +1812,45 @@ async def list_documents():
     if not rag_engine.pageindex_store:
         return {"documents": [], "pageindex_enabled": False}
 
-    docs = rag_engine.pageindex_store.list_documents()
-    return {
-        "documents": docs,
-        "total": len(docs),
-        "pageindex_enabled": True,
-    }
+    try:
+        docs = rag_engine.pageindex_store.list_documents()
+        return {
+            "documents": docs,
+            "total": len(docs),
+            "pageindex_enabled": True,
+        }
+    except Exception as e:
+        print(f"⚠ list_documents error: {e}")
+        return {
+            "documents": [],
+            "total": 0,
+            "pageindex_enabled": True,
+            "error": str(e),
+        }
 
 
 @app.get("/api/documents/usage")
 async def get_pageindex_usage():
     """Get PageIndex API usage stats for the current month."""
     if not rag_engine.pageindex_store:
-        return {"enabled": False, "usage": {}}
+        return {"enabled": False, "usage": {}, "connected": False}
 
-    return {
-        "enabled": True,
-        "connected": rag_engine.pageindex_store.is_connected,
-        "usage": rag_engine.pageindex_store.get_usage(),
-        "stats": rag_engine.pageindex_store.get_stats(),
-    }
+    try:
+        return {
+            "enabled": True,
+            "connected": rag_engine.pageindex_store.is_connected,
+            "usage": rag_engine.pageindex_store.get_usage(),
+            "stats": rag_engine.pageindex_store.get_stats(),
+        }
+    except Exception as e:
+        print(f"⚠ get_pageindex_usage error: {e}")
+        return {
+            "enabled": True,
+            "connected": False,
+            "usage": {},
+            "stats": {},
+            "error": str(e),
+        }
 
 
 @app.get("/api/documents/{doc_id}")
@@ -1856,10 +1875,16 @@ async def get_document_tree(doc_id: str):
     if not rag_engine.pageindex_store:
         raise HTTPException(status_code=503, detail="PageIndex not enabled")
 
-    tree = rag_engine.pageindex_store.get_tree(doc_id)
-    if tree is None:
-        raise HTTPException(status_code=404, detail="Tree not available")
-    return {"doc_id": doc_id, "tree": tree}
+    try:
+        tree = rag_engine.pageindex_store.get_tree(doc_id)
+        if tree is None:
+            raise HTTPException(status_code=404, detail="Tree not available")
+        return {"doc_id": doc_id, "tree": tree}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"⚠ get_document_tree error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/api/documents/{doc_id}")

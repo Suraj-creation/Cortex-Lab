@@ -356,6 +356,9 @@ class PageIndexStore:
 
     def list_documents(self) -> List[Dict[str, Any]]:
         """List all tracked documents with local + remote status."""
+        # Auto-refresh status for any documents still processing
+        self.sync_statuses()
+
         docs = []
         for file_hash, info in self.doc_mapping.items():
             docs.append({
@@ -413,10 +416,37 @@ class PageIndexStore:
         return None
 
     def sync_statuses(self):
-        """Refresh status for all 'processing' documents."""
+        """Refresh status for all 'processing' documents (rate-limited)."""
+        now = time.time()
+        # Only sync every 10 seconds to avoid hammering the API
+        if hasattr(self, '_last_sync') and now - self._last_sync < 10:
+            return
+        self._last_sync = now
+
+        changed = False
         for fh, info in self.doc_mapping.items():
             if info.get("status") == "processing":
-                self.check_status(info["doc_id"])
+                try:
+                    ready = self.client.is_retrieval_ready(info["doc_id"])
+                    if ready:
+                        info["status"] = "ready"
+                        changed = True
+                        # Try to get real page count from API
+                        try:
+                            api_docs = self.client.list_documents(limit=50)
+                            for api_doc in api_docs.get("documents", []):
+                                if api_doc.get("id") == info["doc_id"]:
+                                    real_pages = api_doc.get("pageNum", 0)
+                                    if real_pages > 0:
+                                        info["estimated_pages"] = real_pages
+                                    break
+                        except Exception:
+                            pass
+                        print(f"    ✓ Document ready: {info.get('filename', info['doc_id'])}")
+                except Exception as e:
+                    print(f"    ⚠ Status check failed for {info['doc_id']}: {e}")
+        if changed:
+            self._save_mapping()
 
     # ─── Usage Tracking ──────────────────────────────────────────────
 
