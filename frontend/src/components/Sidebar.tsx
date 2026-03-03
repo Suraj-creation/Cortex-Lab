@@ -9,6 +9,7 @@ import {
   BarChart3,
   Mic,
   Activity,
+  FileText,
 } from "lucide-react";
 
 interface Conversation {
@@ -17,7 +18,7 @@ interface Conversation {
   date: string;
 }
 
-type ActiveView = "chat" | "memories" | "graph" | "dashboard" | "observability" | "ambient";
+type ActiveView = "chat" | "memories" | "graph" | "dashboard" | "observability" | "ambient" | "documents";
 
 interface Props {
   open: boolean;
@@ -48,6 +49,7 @@ export function Sidebar({
     { view: "dashboard", icon: BarChart3, label: "RAG Dashboard" },
     { view: "observability", icon: Activity, label: "Pipeline Observability" },
     { view: "ambient", icon: Mic, label: "Ambient Listening" },
+    { view: "documents", icon: FileText, label: "PageIndex Documents" },
   ];
 
   return (

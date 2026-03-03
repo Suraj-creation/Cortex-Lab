@@ -9,9 +9,10 @@ import { KnowledgeGraph } from "@/components/KnowledgeGraph";
 import { RAGDashboard } from "@/components/RAGDashboard";
 import { ObservabilityDashboard } from "@/components/ObservabilityDashboard";
 import { AmbientPanel } from "@/components/AmbientPanel";
+import { DocumentsPanel } from "@/components/DocumentsPanel";
 import { ModelStatus } from "@/lib/types";
 
-type ActiveView = "chat" | "memories" | "graph" | "dashboard" | "observability" | "ambient";
+type ActiveView = "chat" | "memories" | "graph" | "dashboard" | "observability" | "ambient" | "documents";
 
 export default function Home() {
   const [modelStatus, setModelStatus] = useState<ModelStatus>({
@@ -164,6 +165,9 @@ export default function Home() {
         )}
         {activeView === "ambient" && (
           <AmbientPanel onBack={() => setActiveView("chat")} />
+        )}
+        {activeView === "documents" && (
+          <DocumentsPanel onBack={() => setActiveView("chat")} />
         )}
       </div>
     </div>

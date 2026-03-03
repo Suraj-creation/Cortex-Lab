@@ -1,7 +1,7 @@
 "use client";
 
 import { ChatSettings } from "@/lib/types";
-import { X, RotateCcw, Brain, FileText } from "lucide-react";
+import { X, RotateCcw, Brain } from "lucide-react";
 
 interface Props {
   settings: ChatSettings;
