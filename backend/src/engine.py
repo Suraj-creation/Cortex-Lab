@@ -452,7 +452,8 @@ class CortexRAGEngine:
             "thinking": response.thinking,
             "evidence": [
                 {
-                    "content": e.memory.content[:300],
+                    # PageIndex evidence gets more space (document answers are longer)
+                    "content": e.memory.content[:2000] if e.memory.source == "pageindex" else e.memory.content[:300],
                     "score": round(e.score, 3),
                     "channel": e.channel,
                     "timestamp": e.memory.timestamp.isoformat(),
@@ -538,7 +539,8 @@ class CortexRAGEngine:
             "thinking": response.thinking,
             "evidence": [
                 {
-                    "content": e.memory.content[:300],
+                    # PageIndex evidence gets more space (document answers are longer)
+                    "content": e.memory.content[:2000] if e.memory.source == "pageindex" else e.memory.content[:300],
                     "score": round(e.score, 3),
                     "channel": e.channel,
                     "timestamp": e.memory.timestamp.isoformat(),

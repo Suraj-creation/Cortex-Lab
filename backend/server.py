@@ -982,9 +982,29 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
         _store_trace(rag_result.get("pipeline_trace"))
 
         # Step 2: Build prompt with evidence context for streaming generation
-        # Filter out query-echo evidence (user questions stored as memories)
+        # PageIndex evidence gets priority — document content should always appear
+        # when the user is asking about uploaded documents
         evidence_texts = []
-        for e in evidence[:12]:  # Check more to fill after filtering
+        has_pageindex_evidence = False
+        pageindex_evidence_count = 0
+
+        # First pass: collect PageIndex evidence (from uploaded documents)
+        for e in evidence[:20]:
+            channel = e.get("channel", "")
+            if "pageindex" in channel:
+                content = e.get("content", "").strip()
+                if len(content) >= 20:
+                    evidence_texts.append(content[:2000])  # Full doc answer
+                    has_pageindex_evidence = True
+                    pageindex_evidence_count += 1
+                    if pageindex_evidence_count >= 3:  # Max 3 PageIndex chunks
+                        break
+
+        # Second pass: fill remaining slots with local memory evidence
+        for e in evidence[:12]:
+            channel = e.get("channel", "")
+            if "pageindex" in channel:
+                continue  # Already handled above
             content = e.get("content", "").strip()
             lower = content.lower()
             # Skip short question-like evidence
@@ -1029,8 +1049,42 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
         if _q_lower in _casual_queries:
             has_meaningful_evidence = False
 
+        # ── Document intent detection ──
+        # Determine if the user is asking about uploaded documents vs personal data
+        _doc_keywords = [
+            "document", "pdf", "uploaded", "file", "paper",
+            "report", "article", "thesis", "book", "chapter",
+            "page", "section", "paragraph", "content of",
+            "in the document", "from the document", "in the pdf",
+            "from the pdf", "uploaded file", "my document",
+        ]
+        _q_doc = user_message.lower()
+        is_document_query = any(kw in _q_doc for kw in _doc_keywords)
+
+        # ── PageIndex Direct Answer Path ──
+        # When PageIndex evidence is present AND the query is about documents,
+        # bypass the local LLM entirely and return PageIndex's cloud LLM answer.
+        if has_pageindex_evidence and has_meaningful_evidence and is_document_query:
+            pi_answer = evidence_texts[0] if evidence_texts else ""
+            if pi_answer and len(pi_answer.strip()) > 20:
+                formatted = f"From your uploaded documents:\n\n{pi_answer}"
+                chunk = {"id": msg_id, "delta": formatted}
+                yield f"data: {json.dumps(chunk)}\n\n"
+                yield f"data: {json.dumps({'id': msg_id, 'delta': '', 'done': True})}\n\n"
+                return
+
+        # ── For non-document queries, strip PageIndex evidence ──
+        # Personal queries should only use local memories
+        if has_pageindex_evidence and not is_document_query:
+            evidence_texts = evidence_texts[pageindex_evidence_count:]
+            has_pageindex_evidence = False
+            has_meaningful_evidence = any(
+                len(e.strip()) > 10 and e.strip().lower() not in {"hi", "hello", "hey"}
+                for e in evidence_texts
+            )
+            evidence_block = "\n".join(f"[{i+1}] {e}" for i, e in enumerate(evidence_texts))
+
         # ── Pre-generation: Check for false premises / no-data queries ──
-        # If the query asks about data that doesn't exist, don't even generate
         no_info_response = _check_no_info_streaming(user_message, evidence_texts)
         if no_info_response:
             chunk = {"id": msg_id, "delta": no_info_response}
@@ -1047,7 +1101,32 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
             return
 
         if has_meaningful_evidence:
-            rag_prompt = f"""<|im_start|>system
+            if has_pageindex_evidence:
+                # Document-aware prompt — when PageIndex evidence is present,
+                # the user is asking about their uploaded documents
+                rag_prompt = f"""<|im_start|>system
+You are Cortex Lab, an intelligent AI assistant with access to the user's uploaded documents and memories.
+The user is asking about content from their uploaded documents. The relevant document content is provided below.
+
+RULES:
+- Answer ONLY based on the document content provided below
+- Be thorough and detailed — include specific facts, names, and numbers from the documents
+- Organize your answer clearly with bullet points or sections if the content covers multiple topics
+- If the documents don't contain the answer, say "I couldn't find that in your uploaded documents"
+- NEVER make up information that isn't in the provided content
+- NEVER add citations like [1] [2] — just speak naturally
+- NEVER generate "Confidence:", "Evidence:", "Answer:" labels
+<|im_end|>
+<|im_start|>user
+{user_message}
+
+Here is the relevant content from your uploaded documents:
+{evidence_block}
+<|im_end|>
+<|im_start|>assistant
+"""
+            else:
+                rag_prompt = f"""<|im_start|>system
 You are Cortex Lab, an intelligent personal AI assistant who knows the user well.
 You have access to the user's stored memories below. Use them to answer naturally.
 

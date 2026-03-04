@@ -44,18 +44,20 @@ class HybridRetriever:
     Latency savings: 64%
     """
 
-    # Channel weights — renormalized to include PageIndex (sum = 1.0)
-    # When PageIndex has no documents, its weight is redistributed automatically
+    # Channel weights — PageIndex bypasses RRF entirely (injected post-fusion).
+    # These weights are for the 5 local channels only when PageIndex is active.
+    # Sum = 0.55 (PageIndex's 0.45 is removed since it no longer goes through RRF).
+    # The actual RRF uses these directly — normalization not needed for RRF.
     WEIGHTS = {
         "dense": 0.30,
         "sparse": 0.20,
         "graph": 0.15,
         "temporal": 0.10,
         "proposition": 0.05,
-        "pageindex": 0.20,
     }
 
     # Fallback weights when PageIndex is disabled / has no documents
+    # (Same as WEIGHTS since PageIndex no longer goes through RRF)
     WEIGHTS_LOCAL_ONLY = {
         "dense": 0.35,
         "sparse": 0.25,
@@ -138,14 +140,56 @@ class HybridRetriever:
             all_channels[name] = results
 
         # Use appropriate weights based on whether PageIndex participated
-        active_weights = self.WEIGHTS if use_pageindex else self.WEIGHTS_LOCAL_ONLY
+        # PageIndex results bypass RRF — they're already LLM-reasoned answers
+        # and can't compete in multi-channel rank fusion.
+        # Both WEIGHTS and WEIGHTS_LOCAL_ONLY cover the 5 local channels.
+        # Use LOCAL_ONLY when no PageIndex (slightly different weight distribution).
+        active_weights = self.WEIGHTS_LOCAL_ONLY
+
+        # Extract PageIndex results before RRF (they'll be injected post-fusion)
+        pageindex_raw = all_channels.pop("pageindex", [])
 
         fused = self._rrf_fusion(all_channels, top_k * 2, active_weights)  # Over-retrieve for reranking
 
-        # Cross-encoder reranking on the fused results
+        # Cross-encoder reranking on the fused local results only
         t_rerank = time.time()
         fused = self._cross_encoder_rerank(query, fused, top_k)
         rerank_ms = (time.time() - t_rerank) * 1000
+
+        # Inject PageIndex results at the TOP of the final list
+        # These bypass RRF and reranking because they're already
+        # high-quality LLM-reasoned answers from the document tree
+        if pageindex_raw:
+            from src.models import CausalMemoryObject, MemoryType, EmotionLabel
+            pageindex_results = []
+            for rank, (memory_id, orig_score) in enumerate(pageindex_raw):
+                if memory_id.startswith("pageindex:"):
+                    parts = memory_id.split(":", 3)
+                    page_num = parts[1] if len(parts) > 1 else "0"
+                    pi_doc_id = parts[2] if len(parts) > 2 else ""
+                    content_text = parts[3] if len(parts) > 3 else ""
+                    if not content_text or len(content_text.strip()) < 10:
+                        continue
+                    synthetic_memory = CausalMemoryObject(
+                        id=memory_id[:200],  # Keep ID short
+                        content=content_text[:2000],  # Full document answer
+                        memory_type=MemoryType.SEMANTIC,
+                        source="pageindex",
+                        metadata={"page": page_num, "pi_doc_id": pi_doc_id},
+                    )
+                    # Score high enough to always appear at the top
+                    inject_score = max(0.70 - (rank * 0.05), 0.40)
+                    pageindex_results.append(RetrievalResult(
+                        memory=synthetic_memory,
+                        score=inject_score,
+                        channel="pageindex",
+                        evidence_text=content_text[:500],
+                    ))
+            # Prepend PageIndex results, then local results
+            fused = pageindex_results + fused
+            fused = fused[:top_k]  # Trim to top_k
+            # Re-add pageindex channel for trace logging
+            all_channels["pageindex"] = pageindex_raw
 
         elapsed = (time.time() - t0) * 1000
         channel_counts = {k: len(v) for k, v in all_channels.items()}
@@ -421,8 +465,14 @@ class HybridRetriever:
     async def _pageindex_retrieve(self, query: MemoryQuery, top_k: int) -> List[Tuple[str, float]]:
         """
         PageIndex reasoning-based document retrieval (cloud API).
-        Uses the Chat API for managed agentic tree search over uploaded documents.
-        Returns synthetic memory_ids: 'pageindex:<page>:<doc_id>:<content>'
+        Uses the Chat API for a direct answer from uploaded documents.
+        Returns a single high-quality synthetic result containing the
+        PageIndex answer with document context.
+
+        Strategy: Use chat_retrieve() (non-streaming, fast) instead of
+        retrieve_sections() (streaming JSON extraction, slow ~30-40s).
+        This gets a direct LLM-reasoned answer from the document tree
+        in ~5-10s instead of ~40s.
 
         Gracefully returns empty on any failure (network, timeout, budget).
         """
@@ -430,24 +480,74 @@ class HybridRetriever:
             return []
 
         try:
-            sections = self.pageindex_store.retrieve_sections(
-                query=query.raw_query,
-                top_k=min(top_k, 10),  # Cap at 10 sections per query
+            # Get ready doc_ids only (skip still-processing docs)
+            ready_ids = self.pageindex_store.get_doc_ids_for_query(query.raw_query)
+            if not ready_ids:
+                return []
+
+            # Use fast non-streaming chat retrieval with a retrieval-focused prompt
+            retrieval_query = (
+                f"Answer the following question using ONLY the document content. "
+                f"Be specific, include facts, numbers, and details from the document. "
+                f"Do NOT add preamble or commentary.\n\n"
+                f"Question: {query.raw_query}"
+            )
+            answer = self.pageindex_store.chat_retrieve(
+                query=retrieval_query,
+                doc_ids=ready_ids,
+                stream=False,
             )
 
-            results = []
-            for i, section in enumerate(sections):
-                page = section.get("page", 0)
-                doc_id = section.get("doc_id", "")
-                content = section.get("content", "")[:400]
-                score = section.get("score", 1.0 - (i * 0.1))
+            if not answer or len(answer.strip()) < 10:
+                return []
 
-                # Encode content into the memory_id for synthetic result building
-                # Use a truncated hash to keep IDs manageable
-                import hashlib
-                content_hash = hashlib.md5(content.encode()).hexdigest()[:8]
-                synthetic_id = f"pageindex:{page}:{doc_id}:{content}"
-                results.append((synthetic_id, max(score, 0.1)))
+            # Build synthetic results — split the answer into chunks for
+            # better RRF participation (each chunk = separate memory)
+            results = []
+
+            # Clean the answer — remove PageIndex API preamble and JSON metadata
+            import re
+            clean_answer = answer.strip()
+            # Remove inline JSON metadata like {"doc_name": "..."} or {"doc_name": "...", "pages": "..."}
+            clean_answer = re.sub(r'\{["\']doc_name["\'][^}]*\}', '', clean_answer)
+            # Remove citation tags like <doc=...; page=N>
+            clean_answer = re.sub(r'<doc=[^>]*>', '', clean_answer)
+            # Remove preamble — find where substantial content starts
+            # PageIndex often prepends "I'll retrieve..." before the real answer
+            lines = clean_answer.split('\n')
+            start_idx = 0
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                # Skip preamble lines (short, conversational, no substance)
+                if i < 3 and (
+                    stripped.lower().startswith("i'll ") or
+                    stripped.lower().startswith("let me ") or
+                    stripped.lower().startswith("i will ") or
+                    len(stripped) < 5
+                ):
+                    start_idx = i + 1
+                else:
+                    break
+            clean_answer = '\n'.join(lines[start_idx:]).strip()
+            # Clean up extra whitespace
+            clean_answer = re.sub(r'\n{3,}', '\n\n', clean_answer).strip()
+
+            if len(clean_answer) < 10:
+                return []
+
+            # Primary result: full answer (store full content in the ID —
+            # the retriever extracts it via split(":", 3) to build the memory)
+            doc_id = ready_ids[0] if ready_ids else ""
+            synthetic_id = f"pageindex:0:{doc_id}:{clean_answer[:2000]}"
+            results.append((synthetic_id, 1.0))
+
+            # If answer is long enough, split into paragraph-level chunks
+            # so multiple PageIndex results participate in RRF
+            paragraphs = [p.strip() for p in clean_answer.split("\n") if len(p.strip()) > 30]
+            for i, para in enumerate(paragraphs[:4]):  # Max 4 additional chunks
+                chunk_id = f"pageindex:{i+1}:{doc_id}:{para[:800]}"
+                if chunk_id != synthetic_id:  # Avoid duplicates
+                    results.append((chunk_id, max(0.9 - (i * 0.15), 0.3)))
 
             return results
 
@@ -526,19 +626,32 @@ class HybridRetriever:
         # ── Strategy A: Real Cross-Encoder (if available) ──
         if self.reranker and self.reranker.model is not None:
             try:
-                documents = [r.memory.content[:512] for r in results]
-                reranked_indices = self.reranker.rerank(
-                    query.raw_query, documents, top_k=top_k
-                )
+                # Separate PageIndex results from local results —
+                # cross-encoder wasn't trained on PageIndex document content
+                # so it unfairly demotes them. Keep PageIndex scores from RRF.
+                pageindex_results = [r for r in results if r.memory.source == "pageindex"]
+                local_results = [r for r in results if r.memory.source != "pageindex"]
 
-                reranked = []
-                for idx, score in reranked_indices:
-                    r = results[idx]
-                    # Blend cross-encoder score with original RRF score
-                    blended = 0.70 * score + 0.20 * r.score + 0.10 * r.memory.importance
-                    r.score = round(blended, 4)
-                    reranked.append(r)
-                return reranked
+                documents = [r.memory.content[:512] for r in local_results]
+                if documents:
+                    reranked_indices = self.reranker.rerank(
+                        query.raw_query, documents, top_k=top_k
+                    )
+
+                    reranked_local = []
+                    for idx, score in reranked_indices:
+                        r = local_results[idx]
+                        # Blend cross-encoder score with original RRF score
+                        blended = 0.70 * score + 0.20 * r.score + 0.10 * r.memory.importance
+                        r.score = round(blended, 4)
+                        reranked_local.append(r)
+                else:
+                    reranked_local = []
+
+                # Merge: PageIndex results keep their RRF scores, then local reranked
+                merged = pageindex_results + reranked_local
+                merged.sort(key=lambda r: r.score, reverse=True)
+                return merged[:top_k]
             except Exception as e:
                 print(f"  ⚠ Cross-encoder rerank failed: {e}, falling back to embedding")
 
