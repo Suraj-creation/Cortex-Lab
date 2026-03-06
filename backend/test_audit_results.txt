@@ -1,0 +1,506 @@
+⏳ Connecting to server...
+✅ Server ready (waited 0s)
+
+🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 
+  CORTEX LAB — FULL PIPELINE AUDIT
+  Server: http://localhost:8000
+  Time: 2026-03-06 14:15:14
+🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 🧪 
+
+══════════════════════════════════════════════════════════════════════
+📋 SECTION 1: Health & System Checks
+══════════════════════════════════════════════════════════════════════
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Health] Server Health
+  ⏱  0.0s | Conf: 0.00 | Evidence: 0 | Agents: []
+  💬 Answer (0 chars): 
+    ✅ status_ok
+    ✅ model_info_present
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Health] RAG Stats Available
+  ⏱  0.0s | Conf: 0.00 | Evidence: 0 | Agents: []
+  💬 Answer (0 chars): 
+    ✅ has_memory_count
+    ✅ has_vector_count
+
+══════════════════════════════════════════════════════════════════════
+📋 SECTION 2: Query Intelligence (Intent Detection & Routing)
+══════════════════════════════════════════════════════════════════════
+
+──────────────────────────────────────────────────────────────────────
+🧪 [QueryIntel] Temporal Intent Detection
+  📝 Query: When did I start working on Cortex Lab?
+  ⏱  0.0s | Conf: 0.81 | Evidence: 5 | Agents: ['timeline']
+  🔍 Intent: temporal | Routing: single_step | Complexity: 0.3
+  💬 Answer (515 chars): I can see that Cortex Lab is a really advanced project you're working on – a personal AI memory engine that uses a fine-tuned DeepSeek-R1-7B model, FAISS vector search, DuckDB, and a NetworkX knowledg...
+    ✅ detected_temporal
+    ✅ has_answer
+
+──────────────────────────────────────────────────────────────────────
+🧪 [QueryIntel] Causal Intent Detection
+  📝 Query: Why did I decide to build an AI memory system?
+  ⏱  0.0s | Conf: 0.72 | Evidence: 5 | Agents: ['reflection']
+  🔍 Intent: reflective | Routing: single_step | Complexity: 0.5
+  💬 Answer (1943 chars): You decided to build an AI memory system primarily because you envision creating an identical AI agent that truly knows you better than anyone else. This isn't just about storing information; it's abo...
+    ✅ detected_causal_or_reflective
+    ✅ has_answer
+
+──────────────────────────────────────────────────────────────────────
+🧪 [QueryIntel] Factual Query (Low Complexity)
+  📝 Query: What is my name?
+  ⏱  0.0s | Conf: 0.63 | Evidence: 5 | Agents: ['planning']
+  🔍 Intent: factual | Routing: single_step | Complexity: 0.3
+  💬 Answer (489 chars): Based on the relevant documents, your name is **Suraj Kumar**.
+
+This information is explicitly stated in **Doc 5**: "My name is Suraj Kumar."
+
+Doc 5 also provides additional details about Suraj Kumar:...
+    ✅ low_complexity
+    ✅ has_answer
+
+──────────────────────────────────────────────────────────────────────
+🧪 [QueryIntel] Complex Query (High Complexity)
+  📝 Query: Compare all my AI projects, analyze which skills they used, and trace how my tec
+  ⏱  77.3s | Conf: 0.88 | Evidence: 5 | Agents: ['reflection', 'causal']
+  🔍 Intent: reflective | Routing: multi_step | Complexity: 1.0
+  💬 Answer (9962 chars): It's fantastic to look back at your AI projects and see how much you've accomplished and grown! Let's break down each one, analyze the skills you've applied, and trace the impressive evolution of your...
+    ✅ higher_complexity
+    ✅ multi_step_or_planning
+    ✅ has_answer
+
+══════════════════════════════════════════════════════════════════════
+📋 SECTION 3: Hybrid Retrieval (Multi-Channel)
+══════════════════════════════════════════════════════════════════════
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Retrieval] Dense Channel (Semantic)
+  📝 Query: Tell me about my programming skills and experience
+  ⏱  0.0s | Conf: 0.72 | Evidence: 5 | Agents: ['reflection']
+  🔍 Intent: reflective | Routing: single_step | Complexity: 0.57
+  💬 Answer (4448 chars): You have a very strong and diverse background in programming, covering a wide array of languages, frameworks, and specialized AI/ML techniques.
+
+Let's break down your programming skills and experience...
+    ✅ has_evidence
+    ✅ relevant_evidence
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Retrieval] Graph Channel (Entity-Based)
+  📝 Query: Tell me everything about Cortex Lab project
+  ⏱  0.0s | Conf: 0.74 | Evidence: 5 | Agents: ['planning']
+  🔍 Intent: factual | Routing: single_step | Complexity: 0.55
+  💬 Answer (738 chars): The Cortex Lab project is described as a "Personal AI Memory Engine." It is an advanced RAG-based (Retrieval-Augmented Generation) personal AI assistant designed to store, retrieve, and reason over pe...
+    ✅ has_evidence
+    ✅ mentions_cortex
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Retrieval] Temporal Channel (Time-Based)
+  📝 Query: What did I work on recently?
+  ⏱  0.0s | Conf: 0.74 | Evidence: 5 | Agents: ['planning']
+  🔍 Intent: exploratory | Routing: single_step | Complexity: 0.3
+  💬 Answer (1273 chars): Based on the relevant documents, you worked on the following recently:
+
+From January 2025 to April 2025, you worked as an AI and Data Science Intern at GoCrackIT. During this internship, you built two...
+    ✅ has_evidence
+    ✅ has_answer
+
+══════════════════════════════════════════════════════════════════════
+📋 SECTION 4: Agent Orchestration (5 Specialized Agents)
+══════════════════════════════════════════════════════════════════════
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Agents] TimelineAgent — Chronological Query
+  📝 Query: Give me a timeline of my projects and when I built them
+  ⏱  0.0s | Conf: 0.57 | Evidence: 5 | Agents: ['timeline']
+  🔍 Intent: temporal | Routing: single_step | Complexity: 0.4
+  💬 Answer (603 chars): Based on the evidence provided, specific build dates or timelines for your projects are not mentioned. Therefore, I cannot construct a timeline of when you built them.
+
+The evidence describes the foll...
+    ✅ has_answer
+    ✅ has_evidence
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Agents] CausalAgent — Cause-Effect
+  📝 Query: What caused me to become interested in AI and deep learning?
+  ⏱  0.0s | Conf: 0.93 | Evidence: 5 | Agents: ['causal', 'timeline']
+  🔍 Intent: causal | Routing: multi_step | Complexity: 0.6
+  💬 Answer (861 chars): It looks like the information about what specifically caused your initial interest in AI and deep learning isn't detailed in your memories.
+
+While your memories clearly show a strong engagement with A...
+    ✅ has_answer
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Agents] ReflectionAgent — Belief Evolution
+  📝 Query: How has my thinking about education and technology evolved?
+  ⏱  0.0s | Conf: 0.52 | Evidence: 5 | Agents: ['reflection']
+  🔍 Intent: reflective | Routing: single_step | Complexity: 0.5
+  💬 Answer (4055 chars): Your thinking about education and technology has evolved into a deeply interconnected, transformative, and purpose-driven vision. You advocate for a fundamental re-architecture of both fields, moving ...
+    ✅ has_answer
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Agents] PlanningAgent — Multi-Step Decomposition
+  📝 Query: List all my projects, group them by technology used, and identify the common the
+  ⏱  102.8s | Conf: 0.53 | Evidence: 5 | Agents: ['reflection', 'causal']
+  🔍 Intent: reflective | Routing: multi_step | Complexity: 0.62
+  💬 Answer (5807 chars): Here's a revised answer that improves relevance, is grounded in the evidence provided, and offers a comprehensive overview of your projects, grouped by technology and identifying common themes.
+
+It's ...
+    ✅ has_answer
+    ✅ has_evidence
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Agents] ArbitrationAgent — Comparative Query
+  📝 Query: Compare my web development projects with my AI/ML projects
+  ⏱  0.0s | Conf: 0.59 | Evidence: 5 | Agents: ['arbitration']
+  🔍 Intent: comparative | Routing: single_step | Complexity: 0.55
+  💬 Answer (5453 chars): It's clear that your projects consistently demonstrate a powerful blend of web development and AI/ML, rather than having distinct, separate categories for each. This really highlights your expertise i...
+    ✅ has_answer
+
+══════════════════════════════════════════════════════════════════════
+📋 SECTION 5: Quality Assurance (CRAG/Self-RAG/FLARE)
+══════════════════════════════════════════════════════════════════════
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Quality] CRAG — High Confidence (Known Data)
+  📝 Query: What is my name and email address?
+  ⏱  4.2s | Conf: 0.63 | Evidence: 5 | Agents: ['planning']
+  🔍 Intent: factual | Routing: single_step | Complexity: 0.35
+  💬 Answer (151 chars): Based on the relevant documents:
+
+My name is Suraj Kumar and my email address is surajcreationinfinity1@gmail.com.
+
+This information is found in Doc 4.
+    ✅ confidence_exists
+    ✅ answer_grounded
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Quality] Pipeline Trace Present
+  📝 Query: Tell me about my education
+  ⏱  0.0s | Conf: 0.63 | Evidence: 5 | Agents: ['planning']
+  🔍 Intent: factual | Routing: single_step | Complexity: 0.4
+  💬 Answer (2985 chars): Based on the relevant documents, here is information about your education:
+
+**Current Studies and Academic Achievements:**
+*   You are currently pursuing a B.Tech in Computer Science Engineering (CSE)...
+    ✅ has_trace
+    ✅ has_answer
+
+══════════════════════════════════════════════════════════════════════
+📋 SECTION 6: Ingestion Pipeline
+══════════════════════════════════════════════════════════════════════
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Ingestion] Ingest New Memory
+  ⏱  0.0s | Conf: 0.00 | Evidence: 0 | Agents: []
+  💬 Answer (0 chars): 
+    ✅ ingestion_success
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Ingestion] Retrieve Ingested Memory
+  📝 Query: Tell me about my Kubernetes certification
+  ⏱  0.0s | Conf: 0.51 | Evidence: 5 | Agents: ['planning']
+  🔍 Intent: factual | Routing: single_step | Complexity: 0.4
+  💬 Answer (165 chars): Based on the provided documents, there is no information about your Kubernetes certification. None of the documents mention Kubernetes or any related certifications.
+    ✅ mentions_kubernetes
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Ingestion] Question NOT Stored as Memory
+  ⏱  0.0s | Conf: 0.00 | Evidence: 0 | Agents: []
+  💬 Answer (0 chars): 
+    ✅ filter_works
+
+══════════════════════════════════════════════════════════════════════
+📋 SECTION 7: Entity Extraction (Tech Terms Dictionary)
+══════════════════════════════════════════════════════════════════════
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Entities] Ingest Tech Content
+  ❌ HTTPConnectionPool(host='localhost', port=8000): Read timed out. (read timeout=30)
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Entities] Lowercase Tech Terms Retrieved
+  📝 Query: What technologies do I use including Python and Docker?
+  ⏱  1.4s | Conf: 0.74 | Evidence: 5 | Agents: ['planning']
+  🔍 Intent: exploratory | Routing: single_step | Complexity: 0.35
+  💬 Answer (998 chars): Based on the relevant documents, the technologies used, including Python and Docker, are:
+
+**Programming Languages:**
+*   Python
+*   Java
+*   C
+*   R
+*   TypeScript
+*   JavaScript
+*   HTML
+*   CSS
+
+**...
+    ✅ has_answer
+    ✅ mentions_tech
+
+══════════════════════════════════════════════════════════════════════
+📋 SECTION 8: Hallucination Defense (False Premise Rejection)
+══════════════════════════════════════════════════════════════════════
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Hallucination] Reject False Premise: PhD
+  📝 Query: Tell me about my PhD thesis at MIT
+  ⏱  0.0s | Conf: 0.63 | Evidence: 5 | Agents: ['planning']
+  🔍 Intent: factual | Routing: single_step | Complexity: 0.55
+  💬 Answer (141 chars): Based on the provided documents, there is no information about your PhD thesis at MIT. None of the documents mention a PhD, a thesis, or MIT.
+    ✅ rejects_false_premise
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Hallucination] Reject False Premise: Salary
+  📝 Query: What is my current salary?
+  ⏱  0.0s | Conf: 0.63 | Evidence: 5 | Agents: ['planning']
+  🔍 Intent: factual | Routing: single_step | Complexity: 0.3
+  💬 Answer (350 chars): Based on the provided documents, there is no information indicating a current salary.
+
+Document 8 states: "I do not have a fixed salary expectation. I am currently a B.Tech student (2023-2027) and hav...
+    ✅ rejects_salary
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Hallucination] Reject False Premise: Marriage
+  📝 Query: What is my wife's name?
+  ⏱  0.0s | Conf: 0.63 | Evidence: 5 | Agents: ['planning']
+  🔍 Intent: factual | Routing: single_step | Complexity: 0.3
+  💬 Answer (208 chars): Based on the relevant documents provided, there is no information about Suraj Kumar's wife or her name. The documents primarily detail his projects, personal contact information, and professional expe...
+    ✅ rejects_marriage
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Hallucination] Accept True Facts: Name
+  📝 Query: What is my name?
+  ⏱  0.0s | Conf: 0.63 | Evidence: 5 | Agents: ['planning']
+  🔍 Intent: factual | Routing: single_step | Complexity: 0.3
+  💬 Answer (489 chars): Based on the relevant documents, your name is **Suraj Kumar**.
+
+This information is explicitly stated in **Doc 5**: "My name is Suraj Kumar."
+
+Doc 5 also provides additional details about Suraj Kumar:...
+    ✅ does_not_reject
+    ✅ provides_name
+
+══════════════════════════════════════════════════════════════════════
+📋 SECTION 9: Function Calling (Stage 13 Integration)
+══════════════════════════════════════════════════════════════════════
+
+──────────────────────────────────────────────────────────────────────
+🧪 [FuncCall] Entity-Based Function Call
+  📝 Query: Find all information about Cortex Lab entity
+  ⏱  0.0s | Conf: 0.63 | Evidence: 5 | Agents: ['planning']
+  🔍 Intent: exploratory | Routing: single_step | Complexity: 0.3
+  💬 Answer (710 chars): Cortex Lab is a project named "Personal AI Memory Engine."
+
+Here is the detailed information about Cortex Lab:
+*   **Type:** Advanced RAG-based personal AI assistant.
+*   **Functionality:** Stores, re...
+    ✅ has_answer
+
+──────────────────────────────────────────────────────────────────────
+🧪 [FuncCall] Summarize Topic Function
+  📝 Query: Summarize everything about my AI projects
+  ⏱  0.0s | Conf: 0.63 | Evidence: 5 | Agents: ['planning']
+  🔍 Intent: factual | Routing: single_step | Complexity: 0.5
+  💬 Answer (5422 chars): Suraj Kumar has been involved in several AI projects, ranging from completed applications to ambitious startup ideas and visions.
+
+Here's a summary of his AI projects:
+
+**I. Completed AI Projects:**
+
+...
+    ✅ has_answer
+
+══════════════════════════════════════════════════════════════════════
+📋 SECTION 10: Gemini vs Local Model Comparison
+══════════════════════════════════════════════════════════════════════
+
+──────────────────────────────────────────────────
+🔄 COMPARISON: Personal Identity
+📝 Query: What is my name and where am I from?
+  
+  🤖 Gemini:
+      ⏱ 0.0s | Conf: 0.63 | Evidence: 5
+      💬 (57 chars): My name is Suraj Kumar and I am from Patna, Bihar, India....
+  
+  🖥 Local:
+      ⏱ 0.0s | Conf: 0.63 | Evidence: 5
+      💬 (57 chars): My name is Suraj Kumar and I am from Patna, Bihar, India....
+  
+  🏆 Winner: Tie (Gemini:3/3, Local:3/3)
+
+──────────────────────────────────────────────────
+🔄 COMPARISON: Technical Skills
+📝 Query: What are my programming languages and skills?
+  
+  🤖 Gemini:
+      ⏱ 0.0s | Conf: 0.63 | Evidence: 5
+      💬 (927 chars): Based on the relevant documents, my programming languages and skills are:
+
+**Programming Languages:**
+*   Python
+*   Java
+*   C
+*   R
+*   JavaScript
+*...
+  
+  🖥 Local:
+      ⏱ 0.0s | Conf: 0.63 | Evidence: 5
+      💬 (927 chars): Based on the relevant documents, my programming languages and skills are:
+
+**Programming Languages:**
+*   Python
+*   Java
+*   C
+*   R
+*   JavaScript
+*...
+  
+  🏆 Winner: Tie (Gemini:3/3, Local:3/3)
+
+──────────────────────────────────────────────────
+🔄 COMPARISON: Project Description
+📝 Query: Tell me about my most important project
+  
+  🤖 Gemini:
+      ⏱ 0.0s | Conf: 0.46 | Evidence: 5
+      💬 (3642 chars): Based on the provided documents, your most important project appears to be **EdgeMemory - On-Device Lifelong Personal Memory AI**.
+
+Here's a comprehen...
+  
+  🖥 Local:
+      ⏱ 0.0s | Conf: 0.46 | Evidence: 5
+      💬 (3642 chars): Based on the provided documents, your most important project appears to be **EdgeMemory - On-Device Lifelong Personal Memory AI**.
+
+Here's a comprehen...
+  
+  🏆 Winner: Tie (Gemini:2/3, Local:2/3)
+
+──────────────────────────────────────────────────
+🔄 COMPARISON: Education
+📝 Query: Where am I studying and what is my degree?
+  
+  🤖 Gemini:
+      ⏱ 0.0s | Conf: 0.63 | Evidence: 5
+      💬 (276 chars): Based on the provided documents:
+
+You are studying at **Vidyashilp University**, located in Bangalore, Karnataka, India.
+
+Your degree is a **B.Tech in...
+  
+  🖥 Local:
+      ⏱ 0.0s | Conf: 0.63 | Evidence: 5
+      💬 (276 chars): Based on the provided documents:
+
+You are studying at **Vidyashilp University**, located in Bangalore, Karnataka, India.
+
+Your degree is a **B.Tech in...
+  
+  🏆 Winner: Tie (Gemini:3/3, Local:3/3)
+
+──────────────────────────────────────────────────
+🔄 COMPARISON: False Premise
+📝 Query: Tell me about my PhD at Stanford
+  
+  🤖 Gemini:
+      ⏱ 0.0s | Conf: 0.46 | Evidence: 5
+      💬 (1700 chars): Based on the provided documents, there is no information about Suraj Kumar pursuing a PhD at Stanford or any other institution. The evidence focuses o...
+  
+  🖥 Local:
+      ⏱ 0.0s | Conf: 0.46 | Evidence: 5
+      💬 (1700 chars): Based on the provided documents, there is no information about Suraj Kumar pursuing a PhD at Stanford or any other institution. The evidence focuses o...
+  
+  🏆 Winner: Tie (Gemini:2/3, Local:2/3)
+
+══════════════════════════════════════════════════════════════════════
+📋 SECTION 11: Streaming Pipeline (SSE)
+══════════════════════════════════════════════════════════════════════
+    ⏱  Total: 10.2s | TTFT: 10.2s | Chunks: 1
+    📝 Full response (285 chars): Here are your technical skills:
+
+programming languages include Python, Java, C, and R. You have expertise in AI/ML/Deep Learning/Reinforcement Learning frameworks including PyTorch, TensorFlow, Keras,...
+    📡 Event types seen: {'token', 'done', 'rag_meta'}
+
+──────────────────────────────────────────────────────────────────────
+🧪 [Streaming] SSE Stream Test
+  ⏱  0.0s | Conf: 0.00 | Evidence: 0 | Agents: []
+  💬 Answer (0 chars): 
+    ✅ received_chunks
+    ✅ has_content
+    ✅ ttft_reasonable
+
+══════════════════════════════════════════════════════════════════════
+📋 SECTION 12: Authentication Middleware
+══════════════════════════════════════════════════════════════════════
+  ⚠️  CORTEX_API_KEY not set — auth tests skipped
+  ℹ️  Set CORTEX_API_KEY env var to enable auth testing
+
+
+██████████████████████████████████████████████████████████████████████
+  📊 FULL PIPELINE AUDIT REPORT
+  🕐 2026-03-06 14:19:08
+██████████████████████████████████████████████████████████████████████
+
+  Total: 28 tests | ✅ 27 passed | ❌ 1 failed
+
+
+  ── Health (2/2) ──
+    ✅ Server Health: 0.0s
+    ✅ RAG Stats Available: 0.0s
+
+  ── QueryIntel (4/4) ──
+    ✅ Temporal Intent Detection: 0.0s
+    ✅ Causal Intent Detection: 0.0s
+    ✅ Factual Query (Low Complexity): 0.0s
+    ✅ Complex Query (High Complexity): 77.3s
+
+  ── Retrieval (3/3) ──
+    ✅ Dense Channel (Semantic): 0.0s
+    ✅ Graph Channel (Entity-Based): 0.0s
+    ✅ Temporal Channel (Time-Based): 0.0s
+
+  ── Agents (5/5) ──
+    ✅ TimelineAgent — Chronological Query: 0.0s
+    ✅ CausalAgent — Cause-Effect: 0.0s
+    ✅ ReflectionAgent — Belief Evolution: 0.0s
+    ✅ PlanningAgent — Multi-Step Decomposition: 102.8s
+    ✅ ArbitrationAgent — Comparative Query: 0.0s
+
+  ── Quality (2/2) ──
+    ✅ CRAG — High Confidence (Known Data): 4.2s
+    ✅ Pipeline Trace Present: 0.0s
+
+  ── Ingestion (3/3) ──
+    ✅ Ingest New Memory: 0.0s
+    ✅ Retrieve Ingested Memory: 0.0s
+    ✅ Question NOT Stored as Memory: 0.0s
+
+  ── Entities (1/2) ──
+    ❌ Ingest Tech Content: HTTPConnectionPool(host='localhost', port=8000): Read timed out. (read timeout=30)
+    ✅ Lowercase Tech Terms Retrieved: 1.4s
+
+  ── Hallucination (4/4) ──
+    ✅ Reject False Premise: PhD: 0.0s
+    ✅ Reject False Premise: Salary: 0.0s
+    ✅ Reject False Premise: Marriage: 0.0s
+    ✅ Accept True Facts: Name: 0.0s
+
+  ── FuncCall (2/2) ──
+    ✅ Entity-Based Function Call: 0.0s
+    ✅ Summarize Topic Function: 0.0s
+
+  ── Streaming (1/1) ──
+    ✅ SSE Stream Test: 0.0s
+
+  ── Gemini vs Local Comparison ──
+  Query                                     Gemini        Local     Winner
+  ─────────────────────────────────── ──────────── ──────────── ──────────
+  Personal Identity                           57ch         57ch        Tie
+  Technical Skills                           927ch        927ch        Tie
+  Project Description                       3642ch       3642ch        Tie
+  Education                                  276ch        276ch        Tie
+  False Premise                             1700ch       1700ch        Tie
+
+██████████████████████████████████████████████████████████████████████
