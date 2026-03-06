@@ -141,6 +141,19 @@ class MetadataStore:
         except Exception:
             pass  # Index already exists
 
+        # ── Feedback table for self-improvement loop (§7) ────────────────
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS feedback (
+                id VARCHAR PRIMARY KEY,
+                query TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                rating INTEGER NOT NULL,
+                comment TEXT DEFAULT '',
+                session_id VARCHAR DEFAULT '',
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
     # ─── Memory CRUD ─────────────────────────────────────────────────────
 
     def store_memory(self, memory: CausalMemoryObject):
@@ -458,18 +471,55 @@ class MetadataStore:
             edge_count = self.conn.execute("SELECT COUNT(*) FROM graph_edges").fetchone()[0]
             belief_count = self.conn.execute("SELECT COUNT(*) FROM belief_deltas").fetchone()[0]
             conv_count = self.conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
+            feedback_count = 0
+            try:
+                feedback_count = self.conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0]
+            except Exception:
+                pass
             return {
                 "memories": mem_count,
                 "entities": entity_count,
                 "edges": edge_count,
                 "belief_deltas": belief_count,
                 "conversations": conv_count,
+                "feedback": feedback_count,
                 "backend": "duckdb",
             }
         return {
             "memories": len(self._fallback),
             "backend": "in-memory",
         }
+
+    # ─── Feedback Storage (Self-Improvement Loop §7) ─────────────────────
+
+    def store_feedback(self, query: str, answer: str, rating: int,
+                       comment: str = "", session_id: str = "") -> str:
+        """Store user feedback on a RAG response."""
+        feedback_id = f"fb-{datetime.now().timestamp()}"
+        if self._use_duckdb:
+            self.conn.execute(
+                "INSERT INTO feedback VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [feedback_id, query, answer, rating, comment, session_id, datetime.now()]
+            )
+        return feedback_id
+
+    def get_feedback_stats(self) -> Dict:
+        """Get aggregate feedback statistics."""
+        if self._use_duckdb:
+            try:
+                total = self.conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0]
+                avg_rating = self.conn.execute("SELECT AVG(rating) FROM feedback").fetchone()[0]
+                low_rated = self.conn.execute(
+                    "SELECT COUNT(*) FROM feedback WHERE rating <= 2"
+                ).fetchone()[0]
+                return {
+                    "total_feedback": total,
+                    "average_rating": round(float(avg_rating or 0), 2),
+                    "low_rated_count": low_rated,
+                }
+            except Exception:
+                return {"total_feedback": 0, "average_rating": 0, "low_rated_count": 0}
+        return {"total_feedback": 0, "average_rating": 0, "low_rated_count": 0}
 
     # ─── Internal ────────────────────────────────────────────────────────
 

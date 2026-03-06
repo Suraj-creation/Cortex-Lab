@@ -103,6 +103,7 @@ class MemoryIngestionPipeline:
                      source: str = "chat", session_context: str = "") -> CausalMemoryObject:
         """
         Full ingestion pipeline. Returns enriched memory object.
+        For long content (>1000 chars), splits into semantic chunks.
         """
         t0 = time.time()
 
@@ -110,6 +111,31 @@ class MemoryIngestionPipeline:
         content = self._validate_content(content)
         if not content:
             return None
+
+        # ── Semantic chunking for long documents ─────────────────────────
+        if len(content) > 1000:
+            chunks = self._chunk_long_content(content)
+            if len(chunks) > 1:
+                print(f"  📑 Semantic chunking: {len(content)} chars → {len(chunks)} chunks")
+                first_memory = None
+                for i, chunk in enumerate(chunks):
+                    mem = await self._ingest_single(
+                        chunk, session_id, source, session_context,
+                        chunk_index=i, total_chunks=len(chunks)
+                    )
+                    if i == 0:
+                        first_memory = mem
+                elapsed_ms = (time.time() - t0) * 1000
+                print(f"  ✓ Chunked ingestion complete ({elapsed_ms:.0f}ms)")
+                return first_memory
+
+        return await self._ingest_single(content, session_id, source, session_context)
+
+    async def _ingest_single(self, content: str, session_id: str = "",
+                              source: str = "chat", session_context: str = "",
+                              chunk_index: int = 0, total_chunks: int = 1) -> CausalMemoryObject:
+        """Ingest a single piece of content (or a chunk from a larger doc)."""
+        t0 = time.time()
 
         # 1. Create base memory
         memory = CausalMemoryObject(
@@ -138,16 +164,17 @@ class MemoryIngestionPipeline:
         memory.propositions = self._extract_propositions(content)
 
         # 8. Generate contextual prefix (Anthropic-style contextual enrichment)
-        # Always generate a context prefix, not just when session_context exists.
-        # This prepends a 1-2 sentence doc-level context to improve retrieval.
         if session_context:
             memory.context_prefix = self._generate_context_prefix(content, session_context)
         elif len(content) > 60:
-            # Auto-generate a minimal prefix from the content itself
             memory.context_prefix = self._auto_context_prefix(content, memory)
 
+        # Add chunk info to prefix if chunked
+        if total_chunks > 1:
+            chunk_label = f"[Chunk {chunk_index + 1}/{total_chunks}] "
+            memory.context_prefix = chunk_label + (memory.context_prefix or "")
+
         # 9. Generate embedding (passage embedding for BGE asymmetric retrieval)
-        # Embed the enriched text (prefix + content) for better retrieval
         embed_text = memory.context_prefix + " " + content if memory.context_prefix else content
         embedding = self.embeddings.embed_passage(embed_text)
         memory.embedding = embedding.tolist()
@@ -155,7 +182,6 @@ class MemoryIngestionPipeline:
         # 10. Deduplication — skip if near-duplicate exists (>0.95 similarity)
         dedup_result = self._check_deduplication(embedding, memory)
         if dedup_result is not None:
-            # Near-duplicate found — update existing memory's last_seen instead
             print(f"  ♻️  Dedup: skipped ingestion (sim={dedup_result:.3f}), updated existing memory")
             return None
 
@@ -170,6 +196,89 @@ class MemoryIngestionPipeline:
         print(f"  📝 Memory ingested: [{memory.memory_type.value}] {content[:60]}... ({elapsed_ms:.0f}ms)")
 
         return memory
+
+    def _chunk_long_content(self, content: str, max_chunk_chars: int = 800,
+                             overlap_sentences: int = 1) -> List[str]:
+        """Split long content into semantic chunks at sentence boundaries.
+        Each chunk shares overlap_sentences with the next for continuity."""
+        sentences = re.split(r'(?<=[.!?])\s+', content)
+        sentences = [s.strip() for s in sentences if len(s.strip()) > 5]
+
+        if len(sentences) <= 3:
+            return [content]
+
+        chunks = []
+        current_chunk = []
+        current_len = 0
+
+        for i, sent in enumerate(sentences):
+            current_chunk.append(sent)
+            current_len += len(sent) + 1
+
+            if current_len >= max_chunk_chars and i < len(sentences) - 1:
+                chunks.append(" ".join(current_chunk))
+                current_chunk = current_chunk[-overlap_sentences:] if overlap_sentences > 0 else []
+                current_len = sum(len(s) + 1 for s in current_chunk)
+
+        if current_chunk:
+            chunks.append(" ".join(current_chunk))
+
+        return chunks if len(chunks) > 1 else [content]
+
+    async def consolidate_old_memories(self, max_age_days: int = 180,
+                                        min_group_size: int = 3,
+                                        max_groups: int = 20) -> int:
+        """Consolidate old memories into topic-based summaries.
+        Groups memories older than max_age_days by topic, generates
+        LLM summaries, replaces originals with consolidated memories.
+        Returns count of memories consolidated."""
+        from datetime import timedelta
+
+        cutoff = datetime.now() - timedelta(days=max_age_days)
+        all_memories = self.metadata.get_all_memories(limit=5000)
+
+        old = [m for m in all_memories if m.timestamp < cutoff and m.raptor_level == 0]
+        if len(old) < min_group_size:
+            return 0
+
+        groups: Dict[str, List] = {}
+        for m in old:
+            topic = m.topics[0] if m.topics else "general"
+            groups.setdefault(topic, []).append(m)
+
+        consolidated = 0
+        for topic, memories in list(groups.items())[:max_groups]:
+            if len(memories) < min_group_size:
+                continue
+
+            combined = "\n".join(m.content[:200] for m in memories[:15])
+            if self.llm.model is not None or (hasattr(self.llm, 'has_gemini') and self.llm.has_gemini):
+                summary = self.llm.summarize(combined, max_length=300)
+            else:
+                summary = " ".join(m.content.split(".")[0] + "." for m in memories[:5])
+
+            if not summary or len(summary.strip()) < 20:
+                continue
+
+            consolidated_mem = CausalMemoryObject(
+                content=f"[Consolidated: {topic}] {summary}",
+                session_id="consolidation",
+                source="consolidation",
+                timestamp=memories[-1].timestamp,
+                memory_type=MemoryType.SEMANTIC,
+                topics=[topic],
+                entities=list(set(e for m in memories for e in m.entities[:3]))[:10],
+                importance=max(m.importance for m in memories),
+            )
+
+            embedding = self.embeddings.embed_passage(consolidated_mem.content)
+            consolidated_mem.embedding = embedding.tolist()
+            self.vectors.add(consolidated_mem.id, embedding, consolidated_mem.timestamp)
+            self.metadata.store_memory(consolidated_mem)
+            consolidated += len(memories)
+            print(f"  🔄 Consolidated {len(memories)} memories → topic '{topic}'")
+
+        return consolidated
 
     def _classify_memory_type(self, text: str) -> MemoryType:
         """Classify memory type using keyword matching."""

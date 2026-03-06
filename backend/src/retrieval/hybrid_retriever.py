@@ -83,8 +83,9 @@ class HybridRetriever:
         self.reranker = reranker  # Real cross-encoder reranker
         self.pageindex_store = pageindex_store  # PageIndex cloud retrieval (optional)
 
-        # BM25 persistent index (rebuilt on demand, invalidated on new ingestion)
-        self._bm25_corpus: Dict[str, List[str]] = {}  # memory_id -> tokens
+        # BM25 inverted index (rebuilt on demand, invalidated on new ingestion)
+        self._bm25_inverted: Dict[str, Dict[str, int]] = {}  # token -> {mid: tf}
+        self._bm25_doc_lengths: Dict[str, int] = {}  # mid -> doc_length
         self._bm25_idf: Dict[str, float] = {}
         self._bm25_avg_dl: float = 0.0
         self._bm25_doc_count: int = 0
@@ -281,68 +282,80 @@ class HybridRetriever:
     # ─── Channel 2: Sparse Retrieval (BM25) ─────────────────────────────
 
     async def _sparse_retrieve(self, query: MemoryQuery, top_k: int) -> List[Tuple[str, float]]:
-        """BM25 keyword-based retrieval with persistent index caching."""
+        """BM25 keyword-based retrieval using inverted index (O(q×avgDF))."""
         query_tokens = self._tokenize(query.raw_query)
         if not query_tokens:
             return []
 
-        # Rebuild BM25 index only when new memories are added
+        # Rebuild inverted index only when new memories are added
         current_count = self.metadata.count_memories()
-        if current_count != self._bm25_last_count or not self._bm25_corpus:
+        if current_count != self._bm25_last_count or not self._bm25_inverted:
             self._rebuild_bm25_index()
 
-        if not self._bm25_corpus:
+        if not self._bm25_inverted:
             return []
 
-        # BM25 scoring using cached corpus
-        scores = {}
+        # BM25 scoring via inverted index — only iterate docs matching query terms
+        scores = defaultdict(float)
         k1, b = 1.5, 0.75
-        for mid, doc_tokens in self._bm25_corpus.items():
-            score = 0.0
-            dl = len(doc_tokens)
-            token_counts = defaultdict(int)
-            for t in doc_tokens:
-                token_counts[t] += 1
 
-            for qt in query_tokens:
-                if qt in self._bm25_idf:
-                    tf = token_counts.get(qt, 0)
-                    numerator = tf * (k1 + 1)
-                    denominator = tf + k1 * (1 - b + b * dl / max(self._bm25_avg_dl, 1))
-                    score += self._bm25_idf[qt] * numerator / denominator
-
-            if score > 0:
-                scores[mid] = score
+        for qt in query_tokens:
+            if qt not in self._bm25_idf:
+                continue
+            idf = self._bm25_idf[qt]
+            postings = self._bm25_inverted.get(qt, {})
+            for mid, tf in postings.items():
+                dl = self._bm25_doc_lengths.get(mid, 1)
+                numerator = tf * (k1 + 1)
+                denominator = tf + k1 * (1 - b + b * dl / max(self._bm25_avg_dl, 1))
+                scores[mid] += idf * numerator / denominator
 
         # Sort and return top-k
         sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         # Normalize scores
         if sorted_scores:
             max_score = sorted_scores[0][1]
-            sorted_scores = [(mid, s / max_score) for mid, s in sorted_scores]
+            if max_score > 0:
+                sorted_scores = [(mid, s / max_score) for mid, s in sorted_scores]
 
         return sorted_scores[:top_k]
 
     def _rebuild_bm25_index(self):
-        """Rebuild the BM25 corpus index from all memories.
-        Uses lightweight query for just (id, content) pairs (§4.6)."""
+        """Rebuild the BM25 inverted index from all memories.
+        Uses inverted posting lists for O(q×avgDF) retrieval (§4.6)."""
         memory_texts = self.metadata.get_memory_texts(limit=5000)
-        self._bm25_corpus = {}
+
+        # Build inverted index: token → {mid: term_frequency}
+        self._bm25_inverted: Dict[str, Dict[str, int]] = {}
+        self._bm25_doc_lengths: Dict[str, int] = {}
+
         for mid, content in memory_texts:
-            self._bm25_corpus[mid] = self._tokenize(content)
+            tokens = self._tokenize(content)
+            self._bm25_doc_lengths[mid] = len(tokens)
 
-        self._bm25_doc_count = len(self._bm25_corpus)
-        self._bm25_avg_dl = sum(len(t) for t in self._bm25_corpus.values()) / max(self._bm25_doc_count, 1)
+            # Count term frequencies
+            tf_map: Dict[str, int] = defaultdict(int)
+            for t in tokens:
+                tf_map[t] += 1
 
-        # Pre-compute IDF for all unique tokens in corpus
-        all_tokens = set()
-        for tokens in self._bm25_corpus.values():
-            all_tokens.update(tokens)
+            # Add to inverted index
+            for token, freq in tf_map.items():
+                if token not in self._bm25_inverted:
+                    self._bm25_inverted[token] = {}
+                self._bm25_inverted[token][mid] = freq
 
+        self._bm25_doc_count = len(self._bm25_doc_lengths)
+        self._bm25_avg_dl = (
+            sum(self._bm25_doc_lengths.values()) / max(self._bm25_doc_count, 1)
+        )
+
+        # Pre-compute IDF for all tokens in inverted index
         self._bm25_idf = {}
-        for token in all_tokens:
-            df = sum(1 for tokens in self._bm25_corpus.values() if token in tokens)
-            self._bm25_idf[token] = math.log((self._bm25_doc_count - df + 0.5) / (df + 0.5) + 1)
+        for token, postings in self._bm25_inverted.items():
+            df = len(postings)
+            self._bm25_idf[token] = math.log(
+                (self._bm25_doc_count - df + 0.5) / (df + 0.5) + 1
+            )
 
         self._bm25_last_count = self.metadata.count_memories()
 
@@ -728,18 +741,33 @@ class HybridRetriever:
         self._prop_last_count = 0
 
     def incremental_bm25_add(self, memory_id: str, content: str):
-        """Add a single document to BM25 index without full rebuild (§3.1).
+        """Add a single document to BM25 inverted index without full rebuild (§3.1).
         Called after ingestion to avoid O(n) rebuild on every message."""
-        if not self._bm25_corpus:
+        if not self._bm25_inverted:
             # Index hasn't been built yet; let it build on first query
             return
         tokens = self._tokenize(content)
-        self._bm25_corpus[memory_id] = tokens
-        self._bm25_doc_count = len(self._bm25_corpus)
-        self._bm25_avg_dl = sum(len(t) for t in self._bm25_corpus.values()) / max(self._bm25_doc_count, 1)
-        # Update IDF incrementally for new tokens only
+        self._bm25_doc_lengths[memory_id] = len(tokens)
+
+        # Count term frequencies for this doc
+        tf_map: Dict[str, int] = defaultdict(int)
+        for t in tokens:
+            tf_map[t] += 1
+
+        # Add to inverted index
+        for token, freq in tf_map.items():
+            if token not in self._bm25_inverted:
+                self._bm25_inverted[token] = {}
+            self._bm25_inverted[token][memory_id] = freq
+
+        self._bm25_doc_count = len(self._bm25_doc_lengths)
+        self._bm25_avg_dl = (
+            sum(self._bm25_doc_lengths.values()) / max(self._bm25_doc_count, 1)
+        )
+
+        # Update IDF for affected tokens only
         for token in set(tokens):
-            df = sum(1 for t in self._bm25_corpus.values() if token in set(t))
+            df = len(self._bm25_inverted.get(token, {}))
             self._bm25_idf[token] = math.log(
                 (self._bm25_doc_count - df + 0.5) / (df + 0.5) + 1
             )
@@ -769,8 +797,5 @@ class HybridRetriever:
         return [t for t in tokens if t not in stopwords and len(t) > 1]
 
     def update_bm25_index(self):
-        """Rebuild BM25 index from all memories."""
-        all_memories = self.metadata.get_all_memories(limit=10000)
-        self._bm25_corpus = {
-            mem.id: self._tokenize(mem.content) for mem in all_memories
-        }
+        """Rebuild BM25 inverted index from all memories."""
+        self._rebuild_bm25_index()

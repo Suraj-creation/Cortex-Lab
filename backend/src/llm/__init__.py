@@ -36,6 +36,42 @@ _LLM_STOP_PATTERNS = [
     "\nQ:", "\nA:", "\n\nUser ", "\nQuestion:",
 ]
 
+# Unified hallucination pattern set (merged from _validate_or_extract + _strip)
+_HALLUC_PATTERNS = frozenset([
+    "life purpose", "deep work", "stay focused in meetings",
+    "rest is an input", "difficult lesson", "performance, not a reward",
+    "consistent over years", "communication skills", "deliberate practice",
+    "my view on", "improved answer", "what led me to",
+    "## summary of", "### key findings", "### key insight",
+    "limited relevant memories", "partial information",
+    "emotional trajectory", "belief evolution",
+    "had a difficult moment", "key lesson from",
+    "moving cities", "city-building", "modern technology",
+    "clarity of scope", "clarity requires constraints", "scope creep",
+    "systems matter more than goals", "the relationship is more complex than",
+    "the intersection of", "deep work patterns", "the bottleneck has shifted",
+    "the timeline for meaningful", "sporadic bursts", "cumulative insight",
+    "your thinking journey", "lived experiences", "key moments",
+    "strong empirical evidence", "belief about relationships evolution",
+    "reflecting on my relationship with my mentor",
+    "emotional resilience", "emotion evolution", "personal growth",
+    "according to research on personal growth",
+    "excited \u2014 anxious \u2014 drained", "emotion timeline:",
+    "emotion timeline", "emotional trajectory",
+    "drained by the lack of follow-through", "still processing this",
+    "confidence: high", "confidence: medium",
+    "based on strong empirical", "comprehensive answer to your question",
+    "here's a comprehensive answer", "here is a comprehensive answer",
+    "here's the revised answer", "here's what your beliefs",
+    "revised answer focused on",
+    "[name]", "s-repository]", "\u2022 s-repository",
+    "technical documentation of all projects",
+    "causal link:", "step 1 [memory", "\u2192 step 2", "\u2192 step 3", "key findings:",
+    "had an unexpected complication", "strongly motivated thr",
+    "here's your answer:", "here is your answer:",
+    "here's a decomposed analysis",
+])
+
 
 def _truncate_at_stop(text: str) -> str:
     """Truncate at the first occurrence of any stop pattern."""
@@ -396,56 +432,8 @@ Summary:"""
             extracted = self._extract_answer_from_evidence(query, evidence)
             return extracted if extracted else result
 
-        # ── 2. Detect hallucination patterns (aggressive) ──
-        # These are patterns the fine-tuned model generates instead of real answers
-        halluc_indicators = [
-            # Generic philosophical/reflective garbage
-            "life purpose", "deep work", "stay focused in meetings",
-            "rest is an input", "difficult lesson", "performance, not a reward",
-            "avoid deep work", "consistent over years",
-            "communication skills", "deliberate practice",
-            "my view on", "improved answer", "what led me to",
-            "## summary of", "### key findings", "### key insight",
-            "limited relevant memories", "partial information",
-            "emotional trajectory", "belief evolution",
-            "had a difficult moment", "key lesson from",
-            "moving cities", "city-building",
-            "personal growth", "modern technology",
-            "the key insight is", "clarity of scope",
-            "clarity requires constraints", "scope creep",
-            "systems matter more than goals",
-            "the relationship is more complex than",
-            "the intersection of", "deep work patterns",
-            "the bottleneck has shifted",
-            "the timeline for meaningful",
-            "sporadic bursts", "cumulative insight",
-            "your thinking journey", "lived experiences",
-            "key moments", "strong empirical evidence",
-            "belief about relationships evolution",
-            "reflecting on my relationship with my mentor",
-            "emotional resilience", "emotion evolution",
-            "according to research on personal growth",
-            "stay focused in meetings", "rest is an input",
-            # Fake confidence/synthesis claims
-            "synthesizing .{0,5} memories about",
-            "confidence: high", "confidence: medium",
-            "based on strong empirical", "based on .{0,5} memories",
-            "comprehensive answer to your question",
-            "here's a comprehensive answer",
-            "here is a comprehensive answer",
-            "here's the revised answer",
-            "here's what your beliefs",
-            "revised answer focused on",
-            # Format artifacts
-            "[name]",
-            "s-repository]",
-            "• s-repository",
-            "technical documentation of all projects",
-        ]
-        halluc_count = 0
-        for indicator in halluc_indicators:
-            if indicator in result_lower:
-                halluc_count += 1
+        # ── 2. Detect hallucination patterns (unified set) ──
+        halluc_count = sum(1 for p in _HALLUC_PATTERNS if p in result_lower)
 
         if halluc_count >= 1:
             # Even ONE hallucination indicator = try extraction
@@ -619,85 +607,20 @@ Summary:"""
         text = re.sub(r'<\|im_start\|[^>]*>', '', text)
         text = re.sub(r'<\|im_end\|[^>]*>', '', text)
 
-        # ── Phase 1: Remove exact hallucination phrases ──
-        # These are fine-tuning artifacts the model generates instead of real answers
-        halluc_phrases = [
-            # Belief/growth/insight garbage
-            "Your belief evolution can be traced across",
-            "The key insight is that clarity of scope prevents scope creep",
-            "This comes from watching someone you respect make it happen",
-            "The key driver behind my most impactful work has been clarity of scope",
-            "I do my best learning during transitions",
-            "I'm more motivated when I'm tired than when I'm excited",
-            "small consistent actions beat sporadic bursts",
-            "The bottleneck has shifted from resources to knowledge integration",
-            "The timeline for meaningful impact has accelerated",
-            "The timeline for meaningful change",
-            "Tracing causal chains across your thinking journey",
-            "Tracing causal chains across",
-            "chain of cumulative insight",
-            "Each step built on the previous",
-            "Your thinking journey reveals",
-            "This evolved naturally from years",
-            "The core challenge has always been",
-            # Emotion pattern garbage
-            "Excited — Anxious — Drained",
-            "Emotion Timeline:",
-            "Emotion Timeline",
-            "Emotion evolution",
-            "Emotional resilience",
-            "Emotional trajectory",
-            "Drained by the lack of follow-through",
-            "Still processing this",
-            # Other training artifacts
-            "had an unexpected complication",
-            "strongly motivated thr",
-            "sporadic bursts",
-            "personal growth and modern technology",
-            "key moments",
-            "cumulative insight",
-            "deliberate practice",
-            "Causal link:",
-            "Step 1 [Memory",
-            "→ Step 2",
-            "→ Step 3",
-            "Key Findings:",
-            # New patterns observed in raw output analysis
-            "The key insight is that clarity requires constraints",
-            "The intersection of deep work patterns",
-            "systems matter more than goals",
-            "The relationship is more complex than people say",
-            "the key insight is",
-            "clarity of scope prevents",
-            "personal growth",
-            "according to research on personal growth patterns",
-            "the way I think about this is through asking myself hard questions",
-            "You strongly believe that the best learning happens through doing",
-            "Your style shifts between excited and frustrated",
-            "Reflecting on my relationship with my mentor",
-            "Here's a decomposed analysis of your thoughts",
-            "Here's what your beliefs about relationships evolution",
-            "Here's the revised answer focused on personal growth",
-            "the intersection of deep work patterns and modern technology",
-            # Model prefix artifacts
-            "Here's your answer:",
-            "Here is your answer:",
-            "Here's your answer",
-        ]
-
+        # ── Phase 1: Remove hallucination phrases (unified set) ──
         text_lower = text.lower()
-        for phrase in halluc_phrases:
-            phrase_lower = phrase.lower()
-            if phrase_lower in text_lower:
-                # Find the position in original text (case insensitive)
-                pos = text_lower.find(phrase_lower)
+        for phrase in _HALLUC_PATTERNS:
+            if phrase in text_lower:
+                pos = text_lower.find(phrase)
                 if pos < 150:  # Hallucination starts early → mostly garbage
                     text = text[:pos].strip()
+                    text_lower = text.lower()
                     if len(text) < 20:
                         text = ""
+                        break
                 else:
-                    # Hallucination in the middle — try to keep good content before it
                     text = text[:pos].rstrip(" \n\t,;:-")
+                    text_lower = text.lower()
 
         # ── Phase 2: Remove fake confidence/synthesis claims ──
         # The model generates "Confidence: High — based on N memories" even when

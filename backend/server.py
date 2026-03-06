@@ -103,7 +103,7 @@ model_info = {}
 
 # ── Concurrency & Timeout Guards (§9.1, §9.2) ───────────────────────────────
 _inference_semaphore = asyncio.Semaphore(2)  # Max 2 concurrent RAG/chat requests
-_REQUEST_TIMEOUT = 90.0  # Hard timeout in seconds for any LLM request
+_REQUEST_TIMEOUT = 180.0  # Hard timeout in seconds for any LLM request
 
 # ── Lifespan – loads model once on startup ───────────────────────────────────
 
@@ -1257,7 +1257,7 @@ async def rag_chat(req: RAGChatRequest):
                 "pipeline_trace": result.get("pipeline_trace", None),
             }
         except asyncio.TimeoutError:
-            raise HTTPException(504, "Request timed out after 90 seconds")
+            raise HTTPException(504, "Request timed out after 180 seconds")
         except Exception as e:
             print(f"  ❌ RAG error: {e}")
             traceback.print_exc()
@@ -1634,6 +1634,53 @@ async def delete_memory(memory_id: str):
         raise HTTPException(503, "RAG engine not ready.")
     success = rag_engine.delete_memory(memory_id)
     return {"status": "ok" if success else "not_found"}
+
+
+# ── Feedback & Self-Improvement (§7) ────────────────────────────────────────
+
+@app.post("/api/feedback")
+async def submit_feedback(body: dict):
+    """Store user feedback on a RAG response for the self-improvement loop."""
+    query = body.get("query", "")
+    answer = body.get("answer", "")
+    rating = body.get("rating")
+    comment = body.get("comment", "")
+    session_id = body.get("session_id", "")
+
+    if rating is None or not isinstance(rating, int) or not (1 <= rating <= 5):
+        raise HTTPException(400, "rating must be an integer 1-5")
+    if not query or not answer:
+        raise HTTPException(400, "query and answer are required")
+
+    if not rag_engine.initialized:
+        raise HTTPException(503, "RAG engine not ready.")
+
+    feedback_id = rag_engine.metadata_store.store_feedback(
+        query=query, answer=answer, rating=rating,
+        comment=comment, session_id=session_id,
+    )
+    return {"status": "ok", "feedback_id": feedback_id}
+
+
+@app.get("/api/feedback/stats")
+async def get_feedback_stats():
+    """Get aggregate feedback statistics."""
+    if not rag_engine.initialized:
+        raise HTTPException(503, "RAG engine not ready.")
+    return rag_engine.metadata_store.get_feedback_stats()
+
+
+@app.post("/api/memories/consolidate")
+async def consolidate_memories(body: dict = None):
+    """Consolidate old memories into topic-based summaries."""
+    if not rag_engine.initialized:
+        raise HTTPException(503, "RAG engine not ready.")
+    if not rag_engine.ingestion:
+        raise HTTPException(503, "Ingestion pipeline not available.")
+
+    max_age = (body or {}).get("max_age_days", 180)
+    count = await rag_engine.ingestion.consolidate_old_memories(max_age_days=max_age)
+    return {"status": "ok", "memories_consolidated": count}
 
 
 # ── Knowledge Graph Endpoints ────────────────────────────────────────────────

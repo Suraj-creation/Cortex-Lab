@@ -25,12 +25,14 @@ class MultiLevelCache:
         self._max_semantic = 50
         self._semantic_threshold = 0.92
 
-    def _hash_key(self, query: str) -> str:
-        return hashlib.sha256(query.strip().lower().encode()).hexdigest()
+    def _hash_key(self, query: str, provider: str = "") -> str:
+        raw = f"{provider}:{query.strip().lower()}"
+        return hashlib.sha256(raw.encode()).hexdigest()
 
-    def get(self, query: str) -> Tuple[Optional[Dict], str]:
-        """Look up a cached result. Returns (result, cache_level)."""
-        key = self._hash_key(query)
+    def get(self, query: str, provider: str = "") -> Tuple[Optional[Dict], str]:
+        """Look up a cached result. Returns (result, cache_level).
+        Provider ensures Gemini and Local model responses are cached separately."""
+        key = self._hash_key(query, provider)
 
         # Level 1: exact match
         if key in self._exact_cache:
@@ -45,6 +47,9 @@ class MultiLevelCache:
                 best_score = 0.0
                 best_result = None
                 for entry in self._semantic_cache:
+                    # Only match entries from the same provider
+                    if entry.get("provider", "") != provider:
+                        continue
                     sim = float(np.dot(q_emb, entry["embedding"]))
                     if sim > best_score:
                         best_score = sim
@@ -52,16 +57,17 @@ class MultiLevelCache:
                 if best_score >= self._semantic_threshold and best_result:
                     self._hits["semantic"] += 1
                     return best_result, "semantic"
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"  ⚠ Cache semantic lookup error: {e}")
 
         # Level 3: miss
         self._hits["miss"] += 1
         return None, "miss"
 
-    def set(self, query: str, result: Dict):
-        """Store a result in both exact and semantic caches."""
-        key = self._hash_key(query)
+    def set(self, query: str, result: Dict, provider: str = ""):
+        """Store a result in both exact and semantic caches.
+        Provider ensures Gemini and Local model responses are cached separately."""
+        key = self._hash_key(query, provider)
 
         # Exact cache
         if len(self._exact_cache) >= self._max_exact:
@@ -79,14 +85,15 @@ class MultiLevelCache:
                     "query": query,
                     "embedding": embedding,
                     "result": result,
+                    "provider": provider,
                     "timestamp": time.time(),
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"  ⚠ Cache semantic store error: {e}")
 
-    def set_exact(self, query: str, result: Dict):
+    def set_exact(self, query: str, result: Dict, provider: str = ""):
         """Store in exact cache only."""
-        key = self._hash_key(query)
+        key = self._hash_key(query, provider)
         self._exact_cache[key] = result
 
     def invalidate_topic(self, topic: str):

@@ -280,8 +280,8 @@ class CortexRAGEngine:
                   f"Vectors: {vec_c} | "
                   f"Graph: {graph_s} | "
                   f"PageIndex: {pi_status}")
-        except Exception:
-            print("  📊 Stats unavailable")
+        except Exception as e:
+            print(f"  📊 Stats unavailable: {e}")
         print("=" * 60 + "\n")
 
         # Initialize Ambient Voice Service (lazy — models load on first start)
@@ -384,119 +384,90 @@ class CortexRAGEngine:
     @staticmethod
     def _is_meaningful_content(text: str) -> bool:
         """Check if content is substantial enough to store as a memory.
-        Greetings, single words, very short messages, and USER QUERIES
-        (questions asking for information) are NOT memories — only statements
-        that contain information worth remembering should be ingested.
+        Uses factual density scoring: only net-positive content is ingested.
 
-        Examples that should be REJECTED:
-          - "What is my name?"
-          - "hey what is my name"
-          - "List my projects"
-          - "Tell me about Jarurat Care"
-          - "hi how are you"
-          - "hello"
-
-        Examples that should be ACCEPTED:
-          - "I just finished building the Jarurat Care chatbot using Google Gemini"
-          - "Today I learned that reinforcement learning can be applied to..."
-          - "My project uses FastAPI for the backend and React for the frontend"
+        Rejected: greetings, pure questions, very short filler.
+        Accepted: informational statements worth remembering.
         """
         import re
 
-        stripped = text.strip().lower().rstrip("!?.,")
-        # Too short
-        if len(stripped) < 8 or len(stripped.split()) < 3:
+        stripped = text.strip()
+        lower = stripped.lower().rstrip("!?.,")
+        words = lower.split()
+
+        # ── Immediate rejects ──
+        if len(lower) < 8 or len(words) < 3:
             return False
 
-        # Pure greetings / filler
-        trivial = {
+        TRIVIAL = {
             "hi", "hey", "hello", "hii", "hiii", "yo", "sup", "howdy",
             "good morning", "good evening", "good night", "good afternoon",
             "thanks", "thank you", "ok", "okay", "bye", "goodbye",
             "yes", "no", "yeah", "nah", "sure", "hmm", "hm", "hmmmm",
             "what", "who", "why", "how", "when", "where",
         }
-        if stripped in trivial:
+        if lower in TRIVIAL:
             return False
 
-        # ── CRITICAL FIX: Don't ingest user queries/questions as memories ──
-        # Questions asking for information (retrieval queries) should NOT be
-        # stored as memories — they pollute the vector store and get retrieved
-        # as top evidence instead of actual data.
+        # ── Strip greeting prefix ──
+        core = lower
+        for gp in ("hey ", "hi ", "hello ", "hii ", "yo ", "sup ",
+                    "hey, ", "hi, ", "hello, ", "okay ", "ok ",
+                    "hey there ", "hi there ", "hello there ",
+                    "good morning ", "good evening ", "good afternoon "):
+            if core.startswith(gp):
+                core = core[len(gp):].strip()
+                break
 
-        lower_clean = text.strip().lower()
+        # ── Factual density scoring ──
+        score = 0.0
 
-        # Strip leading greeting prefixes so "hey what is my name" → "what is my name"
-        greeting_prefixes = (
-            "hey ", "hi ", "hello ", "hii ", "yo ", "sup ",
-            "hey, ", "hi, ", "hello, ", "okay ", "ok ",
-            "hey there ", "hi there ", "hello there ",
-            "good morning ", "good evening ", "good afternoon ",
-        )
-        core_text = lower_clean
-        for gp in greeting_prefixes:
-            if core_text.startswith(gp):
-                core_text = core_text[len(gp):].strip()
-                break  # Only strip one prefix
+        # +1.5 max for word count (diminishing returns)
+        score += min(len(words) / 15.0, 1.5)
 
-        # Question word patterns — check BOTH original and greeting-stripped text
-        question_words = (
+        # +2 for strong informational signals
+        INFO_SIGNALS = [
+            "i learned", "i built", "i created", "i worked on", "i made",
+            "i developed", "i designed", "i implemented", "i think",
+            "i believe", "i decided", "i realized", "i discovered",
+            "my project", "my experience", "my work", "we built",
+            "we created", "we developed", "today i", "yesterday i",
+        ]
+        if any(sig in lower for sig in INFO_SIGNALS):
+            score += 2.0
+
+        # +0.5 for personal pronouns (first person = factual content)
+        if re.search(r'\b(i|my|we|our)\b', lower):
+            score += 0.5
+
+        # -3 for question patterns (strong negative signal)
+        QUESTION_STARTS = (
             "what ", "what's ", "who ", "who's ", "where ", "where's ",
             "when ", "when's ", "how ", "how's ", "why ", "why's ",
-            "which ", "whose ", "whom ",
-            "is ", "are ", "was ", "were ", "do ", "does ", "did ",
-            "can ", "could ", "will ", "would ", "should ", "shall ",
-            "have ", "has ", "had ",
+            "which ", "whose ", "whom ", "is ", "are ", "was ", "were ",
+            "do ", "does ", "did ", "can ", "could ", "will ", "would ",
+            "should ", "shall ", "have ", "has ", "had ",
             "tell me", "list ", "describe ", "summarize ", "explain ",
             "show me", "give me", "find ", "search ",
         )
-
-        starts_with_question = (
-            any(core_text.startswith(q) for q in question_words)
-            or any(lower_clean.startswith(q) for q in question_words)
+        is_question = (
+            any(core.startswith(q) for q in QUESTION_STARTS)
+            or any(lower.startswith(q) for q in QUESTION_STARTS)
+            or lower.rstrip().endswith("?")
+            or bool(re.search(
+                r'\b(what|who|where|when|how|why|which)\b.{0,50}'
+                r'\b(is|are|was|were|do|does|did|my|the|about)\b',
+                core
+            ))
         )
-        ends_with_question = lower_clean.rstrip().endswith("?")
+        if is_question:
+            score -= 3.0
 
-        # Also check: does the text CONTAIN a question word pattern anywhere?
-        # This catches "hey so what is my name" or "please tell me my email"
-        contains_question_word = bool(re.search(
-            r'\b(what|who|where|when|how|why|which|whose|whom)\b.{0,50}\b(is|are|was|were|do|does|did|my|the|about)\b',
-            core_text
-        ))
+        # -1 for very short content (<60 chars) without info signals
+        if len(stripped) < 60 and score < 1.0:
+            score -= 1.0
 
-        is_question = starts_with_question or ends_with_question or contains_question_word
-
-        # Short questions (< 150 chars) are almost always retrieval queries
-        if is_question and len(text.strip()) < 150:
-            return False
-
-        # Even longer questions need factual content markers to be stored
-        if is_question and len(text.strip()) < 300:
-            factual_markers = [
-                "i learned", "i built", "i created", "i worked on",
-                "i made", "i developed", "i designed", "i implemented",
-                "i think", "i believe", "i decided", "i realized",
-                "i discovered", "i found out", "i noticed",
-                "my project", "my experience", "my work",
-                "we built", "we created", "we developed",
-                "today i", "yesterday i", "last week",
-            ]
-            has_facts = any(m in lower_clean for m in factual_markers)
-            if not has_facts:
-                return False
-
-        # Final check: very short content (< 60 chars) without strong
-        # informational signals should not be ingested
-        if len(text.strip()) < 60:
-            info_signals = [
-                "i ", "my ", "we ", "our ", "built", "created",
-                "learned", "project", "work", "experience",
-                "today", "yesterday", "decided", "realized",
-            ]
-            if not any(sig in lower_clean for sig in info_signals):
-                return False
-
-        return True
+        return score >= 0.0
 
     async def _background_ingest(self, content: str, session_id: str,
                                   session_context: str = ""):
@@ -561,10 +532,11 @@ class CortexRAGEngine:
                 user_message, session_id, session_context
             ))
 
-        # 2. Check cache
-        cached, cache_level = self.cache.get(user_message)
+        # 2. Check cache (provider-aware: Gemini vs Local have separate caches)
+        _provider = getattr(self.llm, 'provider', 'local') if self.llm else 'local'
+        cached, cache_level = self.cache.get(user_message, provider=_provider)
         if cached:
-            print(f"  ⚡ Cache hit ({cache_level})")
+            print(f"  ⚡ Cache hit ({cache_level}, provider={_provider})")
             cached["cache_hit"] = True
             cached["cache_level"] = cache_level
             return cached
@@ -616,8 +588,8 @@ class CortexRAGEngine:
             "pipeline_trace": response.pipeline_trace.to_dict() if response.pipeline_trace else None,
         }
 
-        # 5. Cache result
-        self.cache.set(user_message, result)
+        # 5. Cache result (provider-aware)
+        self.cache.set(user_message, result, provider=_provider)
 
         # 6. Store assistant conversation turn (user turn stored in background ingestion)
         self.metadata_store.store_conversation_turn(
@@ -666,8 +638,9 @@ class CortexRAGEngine:
                 user_message, session_id, session_context
             ))
 
-        # Check cache
-        cached, cache_level = self.cache.get(user_message)
+        # Check cache (provider-aware)
+        _provider = getattr(self.llm, 'provider', 'local') if self.llm else 'local'
+        cached, cache_level = self.cache.get(user_message, provider=_provider)
         if cached:
             cached["cache_hit"] = True
             cached["cache_level"] = cache_level
@@ -797,7 +770,8 @@ class CortexRAGEngine:
             return []
         try:
             return self.metadata_store.get_belief_deltas(limit=limit)
-        except Exception:
+        except Exception as e:
+            print(f"  ⚠ Belief deltas retrieval error: {e}")
             return []
 
     def get_community_summaries(self) -> List[Dict]:
@@ -846,8 +820,8 @@ class CortexRAGEngine:
                     loop.create_task(self.ambient_service.stop())
                 else:
                     asyncio.run(self.ambient_service.stop())
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"  ⚠ Ambient stop error: {e}")
 
         self.save_all()
         if self.metadata_store:
