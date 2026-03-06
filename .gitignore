@@ -12,7 +12,8 @@ __pycache__/
 out/
 
 # Model files (large binaries - not tracked)
-models/
+# Use /models/ (root-anchored) so backend/src/models/ source code is NOT ignored
+/models/
 /cache/
 checkpoints/
 output/
