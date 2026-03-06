@@ -226,6 +226,8 @@ export interface ModelStatus {
     fine_tuned?: boolean;
     training_stages_completed?: number;
     base_model?: string;
+    llm_provider?: string;
+    gemini_available?: boolean;
   };
 }
 
@@ -235,6 +237,7 @@ export interface ChatSettings {
   maxTokens: number;
   stream: boolean;
   useRAG: boolean;
+  llmProvider: "local" | "gemini";
 }
 
 export const DEFAULT_SETTINGS: ChatSettings = {
@@ -243,6 +246,7 @@ export const DEFAULT_SETTINGS: ChatSettings = {
   maxTokens: 2048,
   stream: true,
   useRAG: true,
+  llmProvider: "local",
 };
 
 // ── Ambient Voice Types ─────────────────────────────────────────

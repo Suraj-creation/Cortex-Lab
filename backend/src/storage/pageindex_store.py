@@ -68,11 +68,11 @@ class PageIndexStore:
         try:
             result = self.client.list_documents(limit=1)
             self._connected = True
-            doc_count = result.get("total", 0)
+            doc_count = result.get("total", 0) if isinstance(result, dict) else 0
             print(f"    ✓ PageIndex connected ({doc_count} documents)")
         except Exception as e:
             self._connected = False
-            print(f"    ⚠ PageIndex connection failed: {e}")
+            print(f"    ℹ PageIndex not connected: {e}")
 
     @property
     def is_connected(self) -> bool:

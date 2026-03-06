@@ -21,9 +21,23 @@ from datetime import datetime
 from typing import Optional, List
 from contextlib import asynccontextmanager
 
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TextIteratorStreamer
+try:
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TextIteratorStreamer
+except ImportError:
+    torch = None
+    AutoModelForCausalLM = None
+    AutoTokenizer = None
+    BitsAndBytesConfig = None
+    TextIteratorStreamer = None
 from threading import Thread
+
+# Load environment variables from .env
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+except ImportError:
+    pass  # python-dotenv not installed — use system env vars
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -98,6 +112,50 @@ async def lifespan(app: FastAPI):
     print("\n" + "=" * 64)
     print("  Cortex Lab  ·  Fine-Tuned DeepSeek-R1-7B  ·  FastAPI Backend")
     print("=" * 64 + "\n")
+
+    # Check if local model loading should be skipped (Gemini-only mode)
+    skip_local = os.environ.get("SKIP_LOCAL_MODEL", "false").lower() == "true"
+
+    if skip_local:
+        print("  ⚡ SKIP_LOCAL_MODEL=true — running in Gemini-only mode")
+        print("  ⚡ Local model will NOT be loaded. Only Gemini API available.\n")
+        model_loaded = False
+        model_info = {
+            "name": "Gemini-Only Mode (no local model)",
+            "parameters": "N/A",
+            "quantization": "N/A",
+            "device": "API",
+            "gpu_memory": "N/A",
+            "max_context": 8192,
+            "load_time_seconds": 0,
+            "fine_tuned": False,
+            "training_stages_completed": 0,
+            "model_path": "N/A",
+            "base_model": "gemini-2.5-flash",
+        }
+
+        # Still initialize RAG engine without a local model
+        # Run in thread so the event loop stays responsive during init
+        import asyncio
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(
+                None, lambda: rag_engine.init(model=None, tokenizer=None)
+            )
+        except Exception as e:
+            print(f"  ⚠ RAG Engine initialization error: {e}")
+            print("  ⚠ RAG features may be limited in Gemini-only mode.")
+
+        # Set provider to Gemini since we have no local model
+        if rag_engine.initialized and hasattr(rag_engine.llm, "set_provider"):
+            rag_engine.llm.set_provider("gemini")
+
+        model_loaded = True  # Mark ready so health check returns "ok"
+        print(f"\n  Server ready → http://{HOST}:{PORT}\n")
+
+        yield
+        rag_engine.shutdown()
+        return
 
     # ── Tokenizer ────────────────────────────────────────────────────────
     print(f"[1/2] Loading tokenizer from: {MODEL_NAME[:80]}…")
@@ -240,6 +298,7 @@ class ChatRequest(BaseModel):
     top_p: float = Field(0.95, ge=0.0, le=1.0)
     max_tokens: int = Field(2048, ge=1, le=32768)
     stream: bool = False
+    llm_provider: str = Field("local", description="'local' for fine-tuned DeepSeek or 'gemini' for Gemini API")
 
 class ChatResponse(BaseModel):
     id: str
@@ -264,6 +323,7 @@ class RAGChatRequest(BaseModel):
     stream: bool = False
     use_rag: bool = True  # Enable/disable RAG enhancement
     session_id: str = ""
+    llm_provider: str = Field("local", description="'local' for fine-tuned DeepSeek or 'gemini' for Gemini API")
 
 class MemoryIngestRequest(BaseModel):
     content: str
@@ -676,6 +736,107 @@ def _split_thinking(text: str):
         content = _truncate_at_stop_patterns(content)
     return thinking, content
 
+
+# ── LLM Provider Helpers ─────────────────────────────────────────────────────
+
+def _set_request_provider(provider: str):
+    """Set the LLM provider for this request (called at the start of handlers).
+    If 'local' is requested but no local model is loaded, keep Gemini active."""
+    if rag_engine.initialized and hasattr(rag_engine.llm, "set_provider"):
+        # Don't switch to local if there's no local model
+        if provider == "local" and (rag_engine.llm.local_llm is None
+                                     or rag_engine.llm.local_llm.model is None):
+            provider = "gemini" if rag_engine.llm.has_gemini else "local"
+        rag_engine.llm.set_provider(provider)
+
+
+def _is_gemini_active() -> bool:
+    """Check if Gemini is the currently active LLM provider."""
+    return (
+        rag_engine.initialized
+        and hasattr(rag_engine.llm, "provider")
+        and rag_engine.llm.provider == "gemini"
+        and rag_engine.llm.has_gemini
+    )
+
+
+async def _stream_gemini_generate(prompt: str, req):
+    """Stream Gemini API response as SSE events (for /api/chat Gemini path)."""
+    msg_id = f"msg-{uuid.uuid4().hex[:12]}"
+    gemini = rag_engine.llm.gemini_llm
+
+    try:
+        for chunk_text in gemini.generate_stream(
+            prompt,
+            max_tokens=req.max_tokens,
+            temperature=req.temperature,
+            top_p=req.top_p,
+        ):
+            if chunk_text:
+                yield f"data: {json.dumps({'id': msg_id, 'delta': chunk_text})}\n\n"
+                await asyncio.sleep(0)
+    except Exception as e:
+        print(f"  ⚠ Gemini stream error: {e}")
+
+    yield f"data: {json.dumps({'id': msg_id, 'delta': '', 'done': True})}\n\n"
+
+
+async def _stream_gemini_rag_generate(
+    user_message: str, history: list, req, evidence_texts: list,
+    has_meaningful_evidence: bool, has_pageindex_evidence: bool,
+    is_document_query: bool, msg_id: str
+):
+    """Stream Gemini API response with RAG evidence context."""
+    gemini = rag_engine.llm.gemini_llm
+
+    evidence_block = "\n".join(f"[{i+1}] {e}" for i, e in enumerate(evidence_texts))
+
+    if has_meaningful_evidence:
+        if has_pageindex_evidence and is_document_query:
+            system = (
+                "You are Cortex Lab, an AI assistant with access to the user's uploaded documents. "
+                "Answer ONLY based on the document content provided. Be thorough and detailed. "
+                "NEVER make up information. NEVER add citations like [1] [2]."
+            )
+            context_label = "Relevant document content"
+        else:
+            system = (
+                "You are Cortex Lab, an intelligent personal AI assistant who knows the user well. "
+                "Use the user's stored memories below to answer naturally. "
+                "Speak warmly and conversationally. Give direct, confident answers. "
+                "Use 'you/your' when referring to the user. "
+                "NEVER say 'Based on stored memories' or cite evidence numbers. "
+                "If the evidence doesn't answer the question, say so honestly."
+            )
+            context_label = "What I know about you"
+    else:
+        system = (
+            "You are Cortex Lab, a friendly personal AI assistant. "
+            "Respond naturally and briefly. Be cheerful and helpful."
+        )
+        context_label = None
+
+    if context_label and evidence_block:
+        prompt = f"{system}\n\nUser: {user_message}\n\n{context_label}:\n{evidence_block}\n\nAssistant:"
+    else:
+        prompt = f"{system}\n\nUser: {user_message}\n\nAssistant:"
+
+    try:
+        for chunk_text in gemini.generate_stream(
+            prompt,
+            max_tokens=req.max_tokens,
+            temperature=req.temperature,
+            top_p=req.top_p,
+        ):
+            if chunk_text:
+                yield f"data: {json.dumps({'id': msg_id, 'delta': chunk_text})}\n\n"
+                await asyncio.sleep(0)
+    except Exception as e:
+        print(f"  ⚠ Gemini RAG stream error: {e}")
+
+    yield f"data: {json.dumps({'id': msg_id, 'delta': '', 'done': True})}\n\n"
+
+
 # ── Routes ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/health", response_model=HealthResponse)
@@ -689,14 +850,18 @@ async def health():
     return HealthResponse(
         status="ok" if model_loaded else "loading",
         model_loaded=model_loaded,
-        model_info=model_info,
+        model_info={
+            **model_info,
+            "llm_provider": rag_engine.llm.provider if rag_engine.initialized and hasattr(rag_engine.llm, "provider") else "local",
+            "gemini_available": rag_engine.llm.has_gemini if rag_engine.initialized and hasattr(rag_engine.llm, "has_gemini") else False,
+        },
     )
 
 
 @app.get("/api/system/gpu")
 async def gpu_status():
     """GPU memory monitoring endpoint (§6.2)."""
-    if not torch.cuda.is_available():
+    if torch is None or not torch.cuda.is_available():
         return {"gpu_available": False}
     try:
         allocated = torch.cuda.memory_allocated(0)
@@ -718,11 +883,86 @@ async def gpu_status():
         return {"gpu_available": True, "error": str(e)}
 
 
+# ── LLM Provider Toggle ─────────────────────────────────────────────────────
+
+@app.get("/api/llm/provider")
+async def get_llm_provider():
+    """Get current LLM provider and available providers."""
+    has_gemini = (
+        rag_engine.initialized
+        and hasattr(rag_engine, "llm")
+        and hasattr(rag_engine.llm, "has_gemini")
+        and rag_engine.llm.has_gemini
+    )
+    current = "local"
+    if rag_engine.initialized and hasattr(rag_engine.llm, "provider"):
+        current = rag_engine.llm.provider
+    return {
+        "provider": current,
+        "available": ["local", "gemini"] if has_gemini else ["local"],
+        "gemini_configured": has_gemini,
+        "local_model_loaded": model_loaded,
+    }
+
+
+@app.post("/api/llm/provider")
+async def set_llm_provider(body: dict):
+    """Switch the active LLM provider ('local' or 'gemini')."""
+    provider = body.get("provider", "local")
+    if provider not in ("local", "gemini"):
+        raise HTTPException(400, "Provider must be 'local' or 'gemini'")
+    if provider == "gemini":
+        if not (rag_engine.initialized and rag_engine.llm.has_gemini):
+            raise HTTPException(400, "Gemini is not configured. Set GOOGLE_API_KEY in backend/.env")
+    rag_engine.llm.set_provider(provider)
+    return {"provider": provider, "status": "switched"}
+
+
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
-    if not model_loaded:
+    if not model_loaded and req.llm_provider == "local":
         raise HTTPException(503, "Model is still loading. Please wait.")
 
+    # Apply per-request LLM provider switch
+    _set_request_provider(req.llm_provider)
+
+    # ── Gemini path (no local model needed) ──────────────────────────────
+    if _is_gemini_active():
+        gemini = rag_engine.llm.gemini_llm
+        # Build a clean prompt (no ChatML tokens)
+        system = (
+            "You are Cortex Lab, a personal AI memory and reasoning assistant. "
+            "You help the user by answering their questions thoughtfully and concisely. "
+            "Never fabricate personal details about the user. "
+            "Keep responses focused and do NOT generate follow-up questions."
+        )
+        user_text = req.messages[-1].content if req.messages else ""
+        history_text = ""
+        for m in req.messages[:-1]:
+            history_text += f"{m.role.capitalize()}: {m.content}\n"
+        full_prompt = f"{system}\n\n{history_text}User: {user_text}\nAssistant:"
+
+        if req.stream:
+            return StreamingResponse(
+                _stream_gemini_generate(full_prompt, req),
+                media_type="text/event-stream",
+            )
+        content = gemini.generate(
+            full_prompt,
+            max_tokens=req.max_tokens,
+            temperature=req.temperature,
+            top_p=req.top_p,
+        )
+        return ChatResponse(
+            id=f"msg-{uuid.uuid4().hex[:12]}",
+            model="gemini-2.5-flash",
+            created=int(time.time()),
+            content=content or "I'm not sure how to respond to that.",
+            thinking=None,
+            usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        )
+
+    # ── Local model path ─────────────────────────────────────────────────
     prompt = _build_prompt(req.messages)
 
     # ── Streaming ────────────────────────────────────────────────────────
@@ -886,10 +1126,14 @@ async def _stream_generate(prompt: str, req: ChatRequest):
 async def rag_chat(req: RAGChatRequest):
     """RAG-enhanced chat: uses memory retrieval + multi-agent reasoning.
     Supports both streaming and non-streaming modes."""
-    if not model_loaded:
+    # Gemini can work even without the local model loaded
+    if not model_loaded and req.llm_provider == "local":
         raise HTTPException(503, "Model is still loading.")
     if not rag_engine.initialized:
         raise HTTPException(503, "RAG engine is still initializing.")
+
+    # Apply per-request LLM provider switch
+    _set_request_provider(req.llm_provider)
 
     user_message = req.messages[-1].content if req.messages else ""
     if not user_message:
@@ -1164,6 +1408,16 @@ Do NOT generate philosophical content, analysis, or "key insights".
 <|im_end|>
 <|im_start|>assistant
 """
+
+        # ── Gemini streaming path — bypass local model entirely ──────────
+        if _is_gemini_active():
+            async for event in _stream_gemini_rag_generate(
+                user_message, history, req, evidence_texts,
+                has_meaningful_evidence, has_pageindex_evidence,
+                is_document_query, msg_id,
+            ):
+                yield event
+            return
 
         inputs = tokenizer(rag_prompt, return_tensors="pt", truncation=True, max_length=4096)
         if torch.cuda.is_available():

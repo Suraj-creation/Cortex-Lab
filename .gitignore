@@ -13,7 +13,7 @@ out/
 
 # Model files (large binaries - not tracked)
 models/
-cache/
+/cache/
 checkpoints/
 output/
 

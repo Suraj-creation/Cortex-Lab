@@ -25,6 +25,7 @@ export async function sendMessage(
       top_p: settings.topP,
       max_tokens: settings.maxTokens,
       stream: false,
+      llm_provider: settings.llmProvider || "local",
     }),
   });
 
@@ -55,6 +56,7 @@ export async function streamMessage(
         top_p: settings.topP,
         max_tokens: settings.maxTokens,
         stream: true,
+        llm_provider: settings.llmProvider || "local",
       }),
     });
 
@@ -132,6 +134,7 @@ export async function ragChat(
       stream: false,
       use_rag: true,
       session_id: sessionId,
+      llm_provider: settings.llmProvider || "local",
     }),
   });
 
@@ -176,6 +179,7 @@ export async function streamRAGMessage(
         stream: true,
         use_rag: true,
         session_id: sessionId,
+        llm_provider: settings.llmProvider || "local",
       }),
     });
 
@@ -233,6 +237,36 @@ export async function streamRAGMessage(
 }
 
 // ── Memory Management ───────────────────────────────────────────
+
+// ── LLM Provider Toggle ────────────────────────────────────────
+
+export async function getLLMProvider(): Promise<{
+  provider: string;
+  available: string[];
+  gemini_configured: boolean;
+  local_model_loaded: boolean;
+}> {
+  const res = await fetch(`${API_BASE}/llm/provider`);
+  if (!res.ok) throw new Error(`Failed to fetch LLM provider: ${res.status}`);
+  return res.json();
+}
+
+export async function setLLMProvider(
+  provider: "local" | "gemini",
+): Promise<{ provider: string; status: string }> {
+  const res = await fetch(`${API_BASE}/llm/provider`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to switch provider: ${res.status}`);
+  }
+  return res.json();
+}
+
+// ── Memory Management (continued) ──────────────────────────────
 
 export async function getMemories(
   limit: number = 50,

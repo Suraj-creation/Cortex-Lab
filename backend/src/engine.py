@@ -10,14 +10,17 @@ import time
 from datetime import datetime
 from typing import Dict, List, Optional
 
-import torch
+try:
+    import torch
+except ImportError:
+    torch = None
 
 from src.models import (
     CausalMemoryObject, MemoryQuery, OrchestratorResponse,
     RetrievalResult, BeliefDelta
 )
 from src.models.embeddings import EmbeddingModel, CrossEncoderReranker
-from src.llm import LocalLLM
+from src.llm import LocalLLM, LLMProvider
 from src.storage.vector_store import VectorStore
 from src.storage.metadata_store import MetadataStore
 from src.storage.knowledge_graph import KnowledgeGraph
@@ -57,7 +60,7 @@ class CortexRAGEngine:
         self.vector_store: Optional[VectorStore] = None
         self.metadata_store: Optional[MetadataStore] = None
         self.knowledge_graph: Optional[KnowledgeGraph] = None
-        self.llm: Optional[LocalLLM] = None
+        self.llm: Optional[LLMProvider] = None
         self.query_analyzer: Optional[QueryAnalyzer] = None
         self.query_transformer: Optional[QueryTransformer] = None
         self.hybrid_retriever: Optional[HybridRetriever] = None
@@ -84,65 +87,113 @@ class CortexRAGEngine:
         print("  📦 BGE-large-1024d + CrossEncoder + Fine-Tuned 7B + PageIndex")
         print("=" * 60)
 
+        _has_cuda = torch is not None and torch.cuda.is_available()
+
         # 1. Embedding Model (BGE-large-en-v1.5, 1024d)
-        # Move to GPU if available — 1.3GB fits within 13GB headroom (§5.2, §6.3)
         print("\n[1/11] Embedding Model (BGE-large-en-v1.5)...")
-        _embed_device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.embedding_model = EmbeddingModel(device=_embed_device)
-        print(f"  → {self.embedding_model.dimension}d embeddings on {_embed_device}")
+        try:
+            _embed_device = "cuda" if _has_cuda else "cpu"
+            self.embedding_model = EmbeddingModel(device=_embed_device)
+            print(f"  → {self.embedding_model.dimension}d embeddings on {_embed_device}")
+        except Exception as e:
+            print(f"  ⚠ Embedding model failed: {e}")
 
         # 2. Cross-Encoder Reranker (BGE-reranker-v2-m3)
-        # Move to GPU if available — 560MB fits within GPU headroom (§6.3)
         print("[2/11] Cross-Encoder Reranker...")
-        _rerank_device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.reranker = CrossEncoderReranker(device=_rerank_device)
+        try:
+            _rerank_device = "cuda" if _has_cuda else "cpu"
+            self.reranker = CrossEncoderReranker(device=_rerank_device)
+        except Exception as e:
+            print(f"  ⚠ Reranker failed: {e}")
 
         # 3. Vector Store
         print("[3/11] Vector Store...")
-        self.vector_store = VectorStore(
-            dimension=self.embedding_model.dimension,
-            data_dir=f"{self.data_dir}/vectors"
-        )
+        try:
+            dim = self.embedding_model.dimension if self.embedding_model else 1024
+            self.vector_store = VectorStore(
+                dimension=dim,
+                data_dir=f"{self.data_dir}/vectors"
+            )
+        except Exception as e:
+            print(f"  ⚠ Vector store failed: {e}")
 
         # 4. Metadata Store
         print("[4/11] Metadata Store...")
-        self.metadata_store = MetadataStore(db_path=f"{self.data_dir}/cortex.duckdb")
+        try:
+            self.metadata_store = MetadataStore(db_path=f"{self.data_dir}/cortex.duckdb")
+        except Exception as e:
+            print(f"  ⚠ Metadata store failed: {e}")
 
         # 5. Knowledge Graph
         print("[5/11] Knowledge Graph...")
-        self.knowledge_graph = KnowledgeGraph(data_dir=f"{self.data_dir}/graph")
+        try:
+            self.knowledge_graph = KnowledgeGraph(data_dir=f"{self.data_dir}/graph")
+        except Exception as e:
+            print(f"  ⚠ Knowledge graph failed: {e}")
 
-        # 6. LLM Interface (Fine-Tuned DeepSeek-R1-7B)
-        print("[6/11] LLM Interface (Fine-Tuned 7B)...")
-        self.llm = LocalLLM(model=model, tokenizer=tokenizer)
+        # 6. LLM Interface — Provider wraps Local + optional Gemini
+        print("[6/11] LLM Interface (Fine-Tuned 7B + Gemini Provider)...")
+        self.llm = LLMProvider()
+        try:
+            self.llm.local_llm = LocalLLM(model=model, tokenizer=tokenizer)
+        except Exception as e:
+            print(f"  ⚠ Local LLM init failed: {e}")
+
+        # Try to initialize Gemini if API key is available
+        try:
+            import os
+            from dotenv import load_dotenv
+            load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "..", ".env"))
+            gemini_key = os.environ.get("GOOGLE_API_KEY", "")
+            if gemini_key:
+                from src.llm.gemini_llm import GeminiLLM
+                self.llm.gemini_llm = GeminiLLM(api_key=gemini_key)
+                print("  ✓ Gemini API configured (gemini-2.5-flash)")
+            else:
+                print("  ℹ No GOOGLE_API_KEY — Gemini unavailable")
+        except Exception as e:
+            print(f"  ⚠ Gemini init skipped: {e}")
 
         # 7. Query Engine
         print("[7/11] Query Engine...")
-        self.query_analyzer = QueryAnalyzer()
-        self.query_transformer = QueryTransformer(self.llm, self.embedding_model)
+        try:
+            self.query_analyzer = QueryAnalyzer()
+            self.query_transformer = QueryTransformer(self.llm, self.embedding_model)
+        except Exception as e:
+            print(f"  ⚠ Query engine failed: {e}")
 
         # 8. Hybrid Retriever (with cross-encoder reranker)
         print("[8/11] Hybrid Retriever (6-channel + CrossEncoder)...")
-        self.hybrid_retriever = HybridRetriever(
-            self.embedding_model, self.vector_store,
-            self.metadata_store, self.knowledge_graph,
-            reranker=self.reranker,
-        )
+        try:
+            self.hybrid_retriever = HybridRetriever(
+                self.embedding_model, self.vector_store,
+                self.metadata_store, self.knowledge_graph,
+                reranker=self.reranker,
+            )
+        except Exception as e:
+            print(f"  ⚠ Hybrid retriever failed: {e}")
 
         # 9. Agent Orchestrator (LLM routing + Self-RAG + FLARE)
         print("[9/11] Agent Orchestrator (Adaptive-RAG + Self-RAG + FLARE)...")
-        self.orchestrator = AgentOrchestrator(
-            self.llm, self.hybrid_retriever,
-            self.query_analyzer, self.query_transformer
-        )
+        try:
+            self.orchestrator = AgentOrchestrator(
+                self.llm, self.hybrid_retriever,
+                self.query_analyzer, self.query_transformer
+            )
+        except Exception as e:
+            print(f"  ⚠ Orchestrator failed: {e}")
 
         # 10. Ingestion Pipeline + Cache
         print("[10/11] Ingestion Pipeline + Cache...")
-        self.ingestion = MemoryIngestionPipeline(
-            self.llm, self.embedding_model,
-            self.vector_store, self.metadata_store,
-            self.knowledge_graph
-        )
+        try:
+            self.ingestion = MemoryIngestionPipeline(
+                self.llm, self.embedding_model,
+                self.vector_store, self.metadata_store,
+                self.knowledge_graph
+            )
+        except Exception as e:
+            print(f"  ⚠ Ingestion pipeline failed: {e}")
         self.cache = MultiLevelCache(self.embedding_model)
 
         # 11. PageIndex Store (optional cloud-based document retrieval)
@@ -174,36 +225,57 @@ class CortexRAGEngine:
 
         # Run tier migration on startup
         try:
-            self.vector_store.migrate_tiers()
+            if self.vector_store:
+                self.vector_store.migrate_tiers()
         except Exception as e:
             print(f"  ⚠ Tier migration skipped: {e}")
 
         # Migrate junction tables for indexed topic/entity lookups (§4.1)
         try:
-            self.metadata_store.migrate_junction_tables()
+            if self.metadata_store:
+                self.metadata_store.migrate_junction_tables()
         except Exception as e:
             print(f"  ⚠ Junction table migration skipped: {e}")
 
         # ── AUTO-REINDEX: ensure all memories have vectors ──────────────
         # If vector store coverage is below 80%, bulk-embed missing memories
-        mem_count = self.metadata_store.count_memories()
-        vec_count = self.vector_store.count()
-        if mem_count > 0 and vec_count / mem_count < 0.8:
-            print(f"\n  ⚠ Vector coverage low: {vec_count}/{mem_count} ({vec_count/mem_count:.0%})")
-            print(f"  🔄 Auto-reindexing missing memories...")
-            try:
-                self._reindex_missing_vectors()
-            except Exception as e:
-                print(f"  ⚠ Auto-reindex failed: {e}")
+        try:
+            if self.metadata_store and self.vector_store:
+                mem_count = self.metadata_store.count_memories()
+                vec_count = self.vector_store.count()
+                if mem_count > 0 and vec_count / mem_count < 0.8:
+                    print(f"\n  ⚠ Vector coverage low: {vec_count}/{mem_count} ({vec_count/mem_count:.0%})")
+                    print(f"  🔄 Auto-reindexing missing memories...")
+                    self._reindex_missing_vectors()
+        except Exception as e:
+            print(f"  ⚠ Auto-reindex skipped: {e}")
+
+        # ── PRE-BUILD proposition index to avoid first-query delay ──────
+        # Skip on startup — proposition channel has low weight (0.10) and
+        # will rebuild lazily on first query. Startup speed is more important.
+        # try:
+        #     if self.hybrid_retriever and self.metadata_store:
+        #         self.hybrid_retriever._rebuild_proposition_index()
+        # except Exception as e:
+        #     print(f"  ⚠ Proposition index pre-build skipped: {e}")
+        print("  ℹ Proposition index will build lazily on first query")
 
         self.initialized = True
         elapsed = time.time() - t0
         print(f"\n  ✅ RAG Engine v2.1 ready in {elapsed:.1f}s")
-        pi_status = "enabled" if self.pageindex_store else "disabled"
-        print(f"  📊 Memories: {self.metadata_store.count_memories()} | "
-              f"Vectors: {self.vector_store.count()} | "
-              f"Graph: {self.knowledge_graph.get_stats()} | "
-              f"PageIndex: {pi_status}")
+
+        # Print stats safely
+        try:
+            pi_status = "enabled" if self.pageindex_store else "disabled"
+            mem_c = self.metadata_store.count_memories() if self.metadata_store else 0
+            vec_c = self.vector_store.count() if self.vector_store else 0
+            graph_s = self.knowledge_graph.get_stats() if self.knowledge_graph else {}
+            print(f"  📊 Memories: {mem_c} | "
+                  f"Vectors: {vec_c} | "
+                  f"Graph: {graph_s} | "
+                  f"PageIndex: {pi_status}")
+        except Exception:
+            print("  📊 Stats unavailable")
         print("=" * 60 + "\n")
 
         # Initialize Ambient Voice Service (lazy — models load on first start)
@@ -430,7 +502,7 @@ class CortexRAGEngine:
 
         # 1. Ingest user message as memory in background (§5.1) — don't block chat
         memory = None
-        if self._is_meaningful_content(user_message):
+        if self._is_meaningful_content(user_message) and self.ingestion:
             asyncio.create_task(self._background_ingest(
                 user_message, session_id, session_context
             ))
@@ -444,6 +516,20 @@ class CortexRAGEngine:
             return cached
 
         # 3. Run orchestrator
+        if not self.orchestrator:
+            return {
+                "answer": "",
+                "thinking": "RAG retrieval subsystems are not available. No memories or evidence found in the database.",
+                "evidence": [],
+                "agents_used": [],
+                "confidence": 0.0,
+                "reasoning_trace": "Orchestrator unavailable — subsystems not initialized",
+                "query_analysis": {"intent": "unknown", "complexity": 0, "routing": "unknown"},
+                "processing_time_ms": round((time.time() - t0) * 1000, 1),
+                "cache_hit": False,
+                "pipeline_trace": None,
+            }
+
         response = await self.orchestrator.process(user_message, session_context)
 
         # 4. Format result
@@ -518,7 +604,7 @@ class CortexRAGEngine:
 
         # Ingest user message as memory in background (§5.1) — don't block retrieval
         memory = None
-        if self._is_meaningful_content(user_message):
+        if self._is_meaningful_content(user_message) and self.ingestion:
             asyncio.create_task(self._background_ingest(
                 user_message, session_id, session_context
             ))
@@ -531,6 +617,20 @@ class CortexRAGEngine:
             return cached
 
         # Run the retrieve-only orchestrator (no LLM generation — much faster)
+        if not self.orchestrator:
+            return {
+                "answer": "",
+                "thinking": "No memories or evidence found in the database. The RAG retrieval subsystems are not initialized.",
+                "evidence": [],
+                "agents_used": [],
+                "confidence": 0.0,
+                "reasoning_trace": "Orchestrator unavailable — subsystems not initialized",
+                "query_analysis": {"intent": "unknown", "complexity": 0, "routing": "unknown"},
+                "processing_time_ms": round((time.time() - t0) * 1000, 1),
+                "cache_hit": False,
+                "pipeline_trace": None,
+            }
+
         response = await self.orchestrator.retrieve_only(user_message, session_context)
 
         # Format evidence (no final answer — caller will stream it)
@@ -574,6 +674,8 @@ class CortexRAGEngine:
         """Manually ingest a memory."""
         if not self.initialized:
             return {"error": "RAG system not initialized"}
+        if not self.ingestion:
+            return {"error": "Ingestion pipeline not available"}
 
         memory = await self.ingestion.ingest(
             content=content, session_id=session_id, source=source
@@ -581,7 +683,8 @@ class CortexRAGEngine:
 
         # Invalidate caches (new memory might change future answers)
         self.cache.invalidate_topic(memory.topics[0] if memory.topics else "")
-        self.hybrid_retriever.invalidate_caches()
+        if self.hybrid_retriever:
+            self.hybrid_retriever.invalidate_caches()
 
         return memory.to_dict()
 
@@ -620,13 +723,13 @@ class CortexRAGEngine:
 
     def get_graph_data(self) -> Dict:
         """Get graph data for visualization."""
-        if not self.initialized:
+        if not self.initialized or not self.knowledge_graph:
             return {"nodes": [], "edges": []}
         return self.knowledge_graph.get_graph_data()
 
     def get_entities(self, limit: int = 100) -> List[Dict]:
         """Get all entities."""
-        if not self.initialized:
+        if not self.initialized or not self.metadata_store:
             return []
         return self.metadata_store.get_entities(limit=limit)
 
@@ -654,11 +757,11 @@ class CortexRAGEngine:
 
         return {
             "status": "ready",
-            "memories": self.metadata_store.get_stats(),
-            "vectors": self.vector_store.get_stats(),
-            "graph": self.knowledge_graph.get_stats(),
-            "cache": self.cache.get_stats(),
-            "llm": self.llm.get_stats(),
+            "memories": self.metadata_store.get_stats() if self.metadata_store else {},
+            "vectors": self.vector_store.get_stats() if self.vector_store else {},
+            "graph": self.knowledge_graph.get_stats() if self.knowledge_graph else {},
+            "cache": self.cache.get_stats() if self.cache else {},
+            "llm": self.llm.get_stats() if self.llm else {},
         }
 
     # ─── Persistence ─────────────────────────────────────────────────────
@@ -668,8 +771,10 @@ class CortexRAGEngine:
         if not self.initialized:
             return
         print("\n💾 Saving all data...")
-        self.vector_store.save()
-        self.knowledge_graph.save()
+        if self.vector_store:
+            self.vector_store.save()
+        if self.knowledge_graph:
+            self.knowledge_graph.save()
         print("  ✅ All data saved\n")
 
     def shutdown(self):

@@ -49,21 +49,22 @@ class HybridRetriever:
     # Sum = 0.55 (PageIndex's 0.45 is removed since it no longer goes through RRF).
     # The actual RRF uses these directly — normalization not needed for RRF.
     WEIGHTS = {
-        "dense": 0.30,
-        "sparse": 0.20,
-        "graph": 0.15,
+        "dense": 0.35,
+        "sparse": 0.25,
+        "graph": 0.20,
         "temporal": 0.10,
-        "proposition": 0.05,
+        # proposition: disabled — very slow with Gemini API (26 API calls/query)
+        # re-enable when sentence-transformers is installed (local, instant)
     }
 
     # Fallback weights when PageIndex is disabled / has no documents
     # (Same as WEIGHTS since PageIndex no longer goes through RRF)
     WEIGHTS_LOCAL_ONLY = {
-        "dense": 0.35,
-        "sparse": 0.25,
+        "dense": 0.40,
+        "sparse": 0.30,
         "graph": 0.20,
         "temporal": 0.10,
-        "proposition": 0.10,
+        # proposition: disabled — see WEIGHTS note above
     }
 
     # RRF constant
@@ -115,13 +116,17 @@ class HybridRetriever:
             return name, result, duration
 
         # Build channel tasks — always run local channels
+        # Proposition channel is disabled when using API embeddings (too slow).
+        # It uses local embedding model detection to auto-enable when available.
         tasks = [
             _timed("dense", self._dense_retrieve(query, top_k * 2)),
             _timed("sparse", self._sparse_retrieve(query, top_k * 2)),
             _timed("graph", self._graph_retrieve(query, top_k * 2)),
             _timed("temporal", self._temporal_retrieve(query, top_k * 2)),
-            _timed("proposition", self._proposition_retrieve(query, top_k * 2)),
         ]
+        # Only add proposition channel if local (not API) embeddings available
+        if getattr(self.embeddings, '_backend', 'stub') == 'local':
+            tasks.append(_timed("proposition", self._proposition_retrieve(query, top_k * 2)))
 
         # Add PageIndex channel if available
         if use_pageindex:
@@ -347,6 +352,9 @@ class HybridRetriever:
         """Knowledge graph traversal."""
         results = []
 
+        if not query.entities:
+            return results
+
         for entity_name in query.entities:
             entity_id = self.graph.find_entity_by_name(entity_name)
             if entity_id:
@@ -443,22 +451,33 @@ class HybridRetriever:
 
     def _rebuild_proposition_index(self):
         """Pre-compute proposition embeddings for all memories.
-        Uses lightweight query for just (id, propositions) pairs (§4.6)."""
+        Uses batch embedding to minimize API calls (§4.6)."""
         memory_props = self.metadata.get_memory_propositions(limit=2000)
         self._prop_index = {}
-        total_props = 0
 
+        # Flatten all propositions into a single list for batch embedding
+        flat_props = []  # [(mem_id, prop_text), ...]
         for mem_id, propositions in memory_props:
-            entries = []
             for prop in propositions:
-                prop_emb = self.embeddings.embed(prop)
-                entries.append((prop, prop_emb))
-                total_props += 1
-            self._prop_index[mem_id] = entries
+                flat_props.append((mem_id, prop))
+
+        if not flat_props:
+            self._prop_last_count = self.metadata.count_memories()
+            return
+
+        # Batch embed all propositions at once
+        all_texts = [prop for _, prop in flat_props]
+        print(f"  📋 Embedding {len(all_texts)} propositions (batch)...")
+        all_embeddings = self.embeddings.embed_batch(all_texts)
+
+        # Reconstruct per-memory index
+        for (mem_id, prop_text), prop_emb in zip(flat_props, all_embeddings):
+            if mem_id not in self._prop_index:
+                self._prop_index[mem_id] = []
+            self._prop_index[mem_id].append((prop_text, prop_emb))
 
         self._prop_last_count = self.metadata.count_memories()
-        if total_props > 0:
-            print(f"  📋 Proposition index rebuilt: {total_props} propositions across {len(self._prop_index)} memories")
+        print(f"  📋 Proposition index rebuilt: {len(all_texts)} propositions across {len(self._prop_index)} memories")
 
     # ─── Channel 6: PageIndex Document Retrieval ──────────────────────
 
@@ -730,10 +749,8 @@ class HybridRetriever:
         """Add propositions for a single memory without full rebuild (§3.2)."""
         if not propositions or not self._prop_index and self._prop_last_count == 0:
             return  # Index not built yet
-        entries = []
-        for prop in propositions:
-            prop_emb = self.embeddings.embed(prop)
-            entries.append((prop, prop_emb))
+        prop_embeddings = self.embeddings.embed_batch(propositions)
+        entries = list(zip(propositions, prop_embeddings))
         self._prop_index[memory_id] = entries
         self._prop_last_count = self.metadata.count_memories()
 

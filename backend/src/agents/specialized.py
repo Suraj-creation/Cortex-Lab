@@ -68,7 +68,7 @@ class BaseAgent:
             if re.match(r'^(tell me|what is|what are|who is|where is|how is|list|describe|explain)\b', lower):
                 if len(content) < 200 and "[source:" not in lower:
                     continue
-            texts.append(content[:500])
+            texts.append(content[:1500])
             if len(texts) >= max_items:
                 break
         return texts
@@ -235,12 +235,14 @@ class PlanningAgent(BaseAgent):
                 intent=query.intent,
                 complexity=0.4,
                 embedding=self.retriever.embeddings.embed(sq).tolist(),
+                entities=query.entities,
+                topics=query.topics,
             )
             results = await self.retriever.retrieve(sub_query, top_k=8)
             all_results.extend(results)
 
             if results:
-                evidence = self._evidence_texts(results, max_items=3)
+                evidence = self._evidence_texts(results, max_items=5)
                 sub_answer = self.llm.generate_faithful(sq, evidence)
                 sub_answers.append(f"Q: {sq}\nA: {sub_answer}")
 
@@ -256,12 +258,15 @@ class PlanningAgent(BaseAgent):
         if len(unique_results) >= 3:
             # Top-scored are oracle, lower-scored are potential distractors
             sorted_results = sorted(unique_results, key=lambda r: r.score, reverse=True)
-            oracle_docs = [r.memory.content[:250] for r in sorted_results[:3]]
-            distractor_docs = [r.memory.content[:250] for r in sorted_results[3:6]]
+            oracle_docs = [r.memory.content[:1500] for r in sorted_results[:5]]
+            distractor_docs = [r.memory.content[:1500] for r in sorted_results[5:8]]
+
+            print(f"  📋 PlanningAgent: {len(oracle_docs)} oracle docs (avg {sum(len(d) for d in oracle_docs)//max(len(oracle_docs),1)} chars), {len(distractor_docs)} distractors")
 
             final_answer = self.llm.raft_generate(
                 query.raw_query, oracle_docs, distractor_docs
             )
+            print(f"  📋 PlanningAgent: raft_generate returned {len(final_answer)} chars")
         elif sub_answers:
             # Synthesize from sub-answers with faithful generation
             combined_context = "\n\n".join(sub_answers)

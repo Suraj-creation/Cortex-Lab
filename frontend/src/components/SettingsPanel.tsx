@@ -1,7 +1,7 @@
 "use client";
 
 import { ChatSettings } from "@/lib/types";
-import { X, RotateCcw, Brain } from "lucide-react";
+import { X, RotateCcw, Brain, Zap } from "lucide-react";
 
 interface Props {
   settings: ChatSettings;
@@ -17,6 +17,7 @@ export function SettingsPanel({ settings, onUpdate, onClose }: Props) {
       maxTokens: 2048,
       stream: true,
       useRAG: true,
+      llmProvider: "local",
     });
   };
 
@@ -184,6 +185,35 @@ export function SettingsPanel({ settings, onUpdate, onClose }: Props) {
               <span
                 className={`absolute top-1 left-1 h-4 w-4 rounded-full bg-white transition-transform duration-200 shadow-sm ${
                   settings.useRAG ? "translate-x-5" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </div>
+
+          {/* LLM Provider toggle */}
+          <div className="flex items-center justify-between py-1">
+            <div>
+              <label className="text-xs font-medium text-slate-600 flex items-center gap-1.5">
+                <Zap size={12} className={settings.llmProvider === "gemini" ? "text-blue-500" : "text-violet-500"} />
+                LLM Provider
+              </label>
+              <p className="text-[10px] text-slate-400 mt-0.5">
+                {settings.llmProvider === "gemini" ? "Using Google Gemini 2.5 Flash API" : "Using local DeepSeek-R1-7B fine-tuned model"}
+              </p>
+            </div>
+            <button
+              onClick={() =>
+                onUpdate({ ...settings, llmProvider: settings.llmProvider === "local" ? "gemini" : "local" })
+              }
+              className={`relative h-6 w-11 rounded-full transition-all duration-300 ${
+                settings.llmProvider === "gemini"
+                  ? "bg-blue-500 shadow-sm shadow-blue-200"
+                  : "bg-violet-500 shadow-sm shadow-violet-200"
+              }`}
+            >
+              <span
+                className={`absolute top-1 left-1 h-4 w-4 rounded-full bg-white transition-transform duration-200 shadow-sm ${
+                  settings.llmProvider === "gemini" ? "translate-x-5" : "translate-x-0"
                 }`}
               />
             </button>

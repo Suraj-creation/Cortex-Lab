@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Square, Settings2, Sparkles, Brain } from "lucide-react";
+import { Send, Square, Settings2, Sparkles, Brain, Zap } from "lucide-react";
 import { ChatMessage as ChatMessageType, ModelStatus, ChatSettings, DEFAULT_SETTINGS, VoiceQueryResult } from "@/lib/types";
 import { sendMessage, streamMessage, ragChat, streamRAGMessage, RAGStreamMeta } from "@/lib/api";
 import { MessageBubble } from "./MessageBubble";
@@ -346,7 +346,7 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
     }
   }, [messages.length, onTitleUpdate]);
 
-  const isOnline = modelStatus.model_loaded;
+  const isOnline = modelStatus.model_loaded || modelStatus.model_info?.gemini_available === true;
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden relative">
@@ -460,9 +460,23 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
             <div className="flex items-center justify-between border-t border-slate-100 px-4 py-2 text-[11px] text-slate-400">
               <div className="flex items-center gap-3">
                 <div className="flex items-center gap-1.5">
-                  <Sparkles size={11} className="text-indigo-500/60" />
-                  <span>DeepSeek-R1-7B Fine-Tuned</span>
+                  <Sparkles size={11} className={settings.llmProvider === "gemini" ? "text-blue-500/60" : "text-indigo-500/60"} />
+                  <span>{settings.llmProvider === "gemini" ? "Gemini 2.5 Flash" : "DeepSeek-R1-7B Fine-Tuned"}</span>
                 </div>
+                <button
+                  onClick={() => setSettings((prev) => ({
+                    ...prev,
+                    llmProvider: prev.llmProvider === "local" ? "gemini" : "local",
+                  }))}
+                  className={`flex items-center gap-1 px-2 py-0.5 rounded-md transition-all text-[10px] font-medium ${
+                    settings.llmProvider === "gemini"
+                      ? "bg-blue-50 text-blue-600 border border-blue-200"
+                      : "bg-violet-50 text-violet-600 border border-violet-200"
+                  }`}
+                >
+                  <Zap size={10} />
+                  {settings.llmProvider === "gemini" ? "GEMINI" : "LOCAL"}
+                </button>
                 <button
                   onClick={() => setSettings((prev) => ({ ...prev, useRAG: !prev.useRAG }))}
                   className={`flex items-center gap-1 px-2 py-0.5 rounded-md transition-all text-[10px] font-medium ${

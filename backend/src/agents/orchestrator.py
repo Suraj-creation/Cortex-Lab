@@ -596,7 +596,7 @@ Never fabricate personal details.
 <|im_end|>
 <|im_start|>assistant
 """,
-            max_tokens=300, temperature=0.3
+            max_tokens=1024, temperature=0.3
         )
 
         return OrchestratorResponse(
@@ -677,7 +677,7 @@ Never fabricate personal details.
                 unique_evidence.append(e)
 
         # Use faithful generation (Stage 1) for synthesis with citations
-        evidence_texts = [e.memory.content[:250] for e in unique_evidence[:5]]
+        evidence_texts = [e.memory.content[:1500] for e in unique_evidence[:8]]
         if evidence_texts:
             final_answer = self.llm.generate_faithful(
                 query.raw_query, evidence_texts,
@@ -697,7 +697,7 @@ Agent Analyses:
 <|im_end|>
 <|im_start|>assistant
 """
-            final_answer = self.llm.generate(synthesis_prompt, max_tokens=500, temperature=0.3)
+            final_answer = self.llm.generate(synthesis_prompt, max_tokens=1024, temperature=0.3)
 
         avg_confidence = sum(r.confidence for r in agent_responses) / len(agent_responses)
 
@@ -818,7 +818,7 @@ Agent Analyses:
         if self.llm.model is None:
             return response
 
-        evidence_texts = [r.memory.content[:200] for r in response.evidence[:5]]
+        evidence_texts = [r.memory.content[:1000] for r in response.evidence[:5]]
         if not evidence_texts:
             return response
 
@@ -854,18 +854,18 @@ Agent Analyses:
                 critique_trace.revision_focus = weak
 
                 revision_prompt = f"""<|im_start|>system
-Revise this answer to improve {weak}. Be grounded in the evidence.
+Revise this answer to improve {weak}. Be grounded in the evidence. Provide a comprehensive answer.
 <|im_end|>
 <|im_start|>user
 Question: {query.raw_query}
-Original answer: {response.answer[:300]}
-Evidence: {chr(10).join(f"[{i+1}] {e}" for i, e in enumerate(evidence_texts[:3]))}
+Original answer: {response.answer[:800]}
+Evidence: {chr(10).join(f"[{i+1}] {e}" for i, e in enumerate(evidence_texts[:5]))}
 
 Improved answer (focus on {weak}):
 <|im_end|>
 <|im_start|>assistant
 """
-                revised = self.llm.generate(revision_prompt, max_tokens=400, temperature=0.3)
+                revised = self.llm.generate(revision_prompt, max_tokens=1024, temperature=0.3)
                 if len(revised.strip()) > 20:
                     response.answer = revised.strip()
                     response.reasoning_trace += f" → revised ({weak})"

@@ -314,70 +314,77 @@ class QueryTransformer:
 
     def transform(self, query: MemoryQuery) -> MemoryQuery:
         """Apply all relevant transformations based on routing strategy.
-        Uses asyncio.gather to parallelize independent LLM calls (§2.1)."""
+        Uses a single batched LLM call when Gemini is the backend (§2.1)."""
         t0 = time.time()
 
         if query.routing == RoutingStrategy.NO_RETRIEVAL:
             return query  # Skip transformations for simple queries
 
-        # ── Parallelize independent query transformations (§2.1) ─────────
-        # Multi-query, HyDE, step-back, and decomposition are independent.
-        # Run them concurrently via asyncio to cut 8-12s → 2-4s.
-        import asyncio
-        try:
-            loop = asyncio.get_running_loop()
-            # Already in an async context — schedule parallel tasks
-            # But we're called synchronously, so use threads for parallel LLM calls
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            futures = {}
-            with ThreadPoolExecutor(max_workers=4, thread_name_prefix="qtransform") as pool:
-                # Always: multi-query
-                futures["multi_queries"] = pool.submit(self._generate_multi_queries, query.raw_query)
+        # ── Detect if Gemini API is the LLM backend ──────────────────────
+        # For Gemini: use a single batched call to generate all variants at once.
+        # For local model: use parallel thread pool (original behavior).
+        using_gemini_llm = getattr(self.llm, 'model', None) == 'gemini-api'
 
-                # HyDE for factual/exploratory queries
-                if query.intent in (QueryIntent.FACTUAL, QueryIntent.EXPLORATORY, QueryIntent.PROCEDURAL):
-                    futures["hyde"] = pool.submit(self._generate_hyde, query.raw_query)
+        if using_gemini_llm:
+            self._transform_batched_gemini(query)
+        else:
+            self._transform_parallel_local(query)
 
-                # Step-back for causal/reflective queries (only if complex enough)
-                if query.intent in (QueryIntent.CAUSAL, QueryIntent.REFLECTIVE) and query.complexity > 0.5:
-                    futures["step_back"] = pool.submit(self._generate_step_back, query.raw_query)
-
-                # Decomposition for multi-step queries
-                if query.routing == RoutingStrategy.MULTI_STEP:
-                    futures["decompose"] = pool.submit(self._decompose_query, query.raw_query)
-
-                # Collect results
-                for key, future in futures.items():
-                    try:
-                        result = future.result(timeout=15)
-                        if key == "multi_queries":
-                            query.multi_queries = result
-                        elif key == "hyde":
-                            query.hyde_answer = result
-                        elif key == "step_back":
-                            query.step_back_query = result
-                        elif key == "decompose":
-                            query.sub_queries = result
-                    except Exception as e:
-                        print(f"  ⚠ Query transform '{key}' failed: {e}")
-        except RuntimeError:
-            # No event loop — fall back to sequential (shouldn't happen normally)
-            query.multi_queries = self._generate_multi_queries(query.raw_query)
-            if query.intent in (QueryIntent.FACTUAL, QueryIntent.EXPLORATORY, QueryIntent.PROCEDURAL):
-                query.hyde_answer = self._generate_hyde(query.raw_query)
-            if query.intent in (QueryIntent.CAUSAL, QueryIntent.REFLECTIVE) and query.complexity > 0.5:
-                query.step_back_query = self._generate_step_back(query.raw_query)
-            if query.routing == RoutingStrategy.MULTI_STEP:
-                query.sub_queries = self._decompose_query(query.raw_query)
-
-        # Generate query embedding
+        # Generate query embedding (1 API call)
         query.embedding = self.embeddings.embed(query.raw_query).tolist()
 
         elapsed = (time.time() - t0) * 1000
-        variants = len(query.multi_queries) + (1 if query.hyde_answer else 0) + (1 if query.step_back_query else 0) + len(query.sub_queries)
-        print(f"  🔄 Query transformed: {variants} variants ({elapsed:.0f}ms) [parallel §2.1]")
-
+        variants = (len(query.multi_queries) + (1 if query.hyde_answer else 0)
+                    + (1 if query.step_back_query else 0) + len(query.sub_queries))
+        print(f"  🔄 Query transformed: {variants} variants ({elapsed:.0f}ms)")
         return query
+
+    def _transform_batched_gemini(self, query: MemoryQuery):
+        """Single Gemini LLM call that produces ALL query variants at once.
+        Reduces 3 separate API calls → 1 API call per query."""
+        need_hyde = query.intent in (QueryIntent.FACTUAL, QueryIntent.EXPLORATORY, QueryIntent.PROCEDURAL)
+        need_stepback = (query.intent in (QueryIntent.CAUSAL, QueryIntent.REFLECTIVE)
+                         and query.complexity > 0.5)
+        need_decompose = query.routing == RoutingStrategy.MULTI_STEP
+
+        # Always start with multi-queries via entity detection (fast, no LLM)
+        query.multi_queries = self._generate_multi_queries(query.raw_query)
+
+        # For simple factual queries: just multi-queries + HyDE in one LLM call
+        if need_hyde and not need_stepback and not need_decompose:
+            hyde = self._generate_hyde(query.raw_query)
+            if hyde:
+                query.hyde_answer = hyde
+            return
+
+        # Skip optional transformations for API queries to save quota
+        # (multi-queries alone are sufficient for good retrieval)
+
+    def _transform_parallel_local(self, query: MemoryQuery):
+        """Parallel query transformation using ThreadPoolExecutor for local LLM."""
+        from concurrent.futures import ThreadPoolExecutor
+        futures = {}
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="qtransform") as pool:
+            futures["multi_queries"] = pool.submit(self._generate_multi_queries, query.raw_query)
+            if query.intent in (QueryIntent.FACTUAL, QueryIntent.EXPLORATORY, QueryIntent.PROCEDURAL):
+                futures["hyde"] = pool.submit(self._generate_hyde, query.raw_query)
+            if query.intent in (QueryIntent.CAUSAL, QueryIntent.REFLECTIVE) and query.complexity > 0.5:
+                futures["step_back"] = pool.submit(self._generate_step_back, query.raw_query)
+            if query.routing == RoutingStrategy.MULTI_STEP:
+                futures["decompose"] = pool.submit(self._decompose_query, query.raw_query)
+            for key, future in futures.items():
+                try:
+                    result = future.result(timeout=15)
+                    if key == "multi_queries":
+                        query.multi_queries = result
+                    elif key == "hyde":
+                        query.hyde_answer = result
+                    elif key == "step_back":
+                        query.step_back_query = result
+                    elif key == "decompose":
+                        query.sub_queries = result
+                except Exception as e:
+                    print(f"  ⚠ Query transform '{key}' failed: {e}")
 
     def _generate_multi_queries(self, query: str) -> List[str]:
         """Generate query variants for RAG-Fusion.

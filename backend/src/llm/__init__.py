@@ -24,7 +24,10 @@ import time
 import re
 import json
 from typing import Optional, Dict, List, Any
-import torch
+try:
+    import torch
+except ImportError:
+    torch = None
 
 # Stop patterns that indicate the model is hallucinating new turns
 _LLM_STOP_PATTERNS = [
@@ -1276,3 +1279,46 @@ Available tools:
         self._call_count = 0
         self._total_tokens = 0
         self._total_time_ms = 0
+
+
+class LLMProvider:
+    """
+    Proxy that transparently delegates LLM calls to either the local
+    fine-tuned model (LocalLLM) or Google Gemini (GeminiLLM).
+
+    All downstream code (orchestrator, agents, ingestion, query engine)
+    receives this provider and calls .generate(), .route_query(), etc.
+    without knowing which backend is active.
+    """
+
+    def __init__(self):
+        self.local_llm: Optional[LocalLLM] = None
+        self.gemini_llm = None          # GeminiLLM instance (or None)
+        self.provider: str = "local"    # "local" | "gemini"
+
+    @property
+    def active_llm(self):
+        """Return whichever LLM is currently selected."""
+        if self.provider == "gemini" and self.gemini_llm is not None:
+            return self.gemini_llm
+        return self.local_llm
+
+    @property
+    def has_gemini(self) -> bool:
+        return self.gemini_llm is not None
+
+    def set_provider(self, name: str):
+        if name in ("local", "gemini"):
+            self.provider = name
+
+    # ── Delegate everything else to the active LLM ───────────────────────
+    def __getattr__(self, name):
+        # Called only for attributes not found on this instance.
+        # 'local_llm', 'gemini_llm', 'provider', 'active_llm',
+        # 'has_gemini', 'set_provider' are all found normally.
+        active = self.active_llm
+        if active is None:
+            raise AttributeError(
+                f"LLMProvider has no active LLM (provider={self.provider!r})"
+            )
+        return getattr(active, name)
