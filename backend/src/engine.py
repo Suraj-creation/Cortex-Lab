@@ -542,11 +542,15 @@ class CortexRAGEngine:
         self._current_session_id = session_id
 
         # Build session context from history
+        # Dynamic sizing: Gemini has 1M token context → send more history
         session_context = ""
         if conversation_history:
-            recent = conversation_history[-6:]  # Last 3 exchanges
+            is_gemini = (hasattr(self.llm, 'provider') and self.llm.provider == 'gemini')
+            history_limit = 30 if is_gemini else 6   # 15 vs 3 exchanges
+            char_limit = 2000 if is_gemini else 200   # More per message for Gemini
+            recent = conversation_history[-history_limit:]
             session_context = "\n".join(
-                f"{m.get('role', 'user')}: {m.get('content', '')[:200]}"
+                f"{m.get('role', 'user')}: {m.get('content', '')[:char_limit]}"
                 for m in recent
             )
 
@@ -646,9 +650,12 @@ class CortexRAGEngine:
 
         session_context = ""
         if conversation_history:
-            recent = conversation_history[-6:]
+            is_gemini = (hasattr(self.llm, 'provider') and self.llm.provider == 'gemini')
+            history_limit = 30 if is_gemini else 6
+            char_limit = 2000 if is_gemini else 200
+            recent = conversation_history[-history_limit:]
             session_context = "\n".join(
-                f"{m.get('role', 'user')}: {m.get('content', '')[:200]}"
+                f"{m.get('role', 'user')}: {m.get('content', '')[:char_limit]}"
                 for m in recent
             )
 
@@ -684,6 +691,7 @@ class CortexRAGEngine:
         response = await self.orchestrator.retrieve_only(user_message, session_context)
 
         # Format evidence (no final answer — caller will stream it)
+        # Send up to 20 evidence items so the streaming code has enough context
         result = {
             "answer": "",  # Empty — will be streamed by server
             "thinking": response.thinking,
@@ -698,7 +706,7 @@ class CortexRAGEngine:
                     "emotion": e.memory.emotion.value,
                     "entities": e.memory.entities[:5],
                 }
-                for e in response.evidence[:5]
+                for e in response.evidence[:20]
             ],
             "agents_used": response.agents_used,
             "confidence": round(response.confidence, 3),

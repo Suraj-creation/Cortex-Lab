@@ -24,6 +24,7 @@ import time
 import re
 import json
 from typing import Optional, Dict, List, Any
+from src.prompts import PromptBuilder, sanitize
 try:
     import torch
 except ImportError:
@@ -149,6 +150,9 @@ class LocalLLM:
                        "<|im_sep|>", "<｜end▁of▁sentence｜>",
                        "<｜User｜>", "<｜Assistant｜>"]:
             generated = generated.replace(token, "")
+        # Also catch partial/malformed ChatML tokens like <|im_start|user|...>
+        generated = re.sub(r'<\|im_start\|[^>]*>', '', generated)
+        generated = re.sub(r'<\|im_end\|[^>]*>', '', generated)
         generated = generated.strip()
 
         elapsed_ms = (time.time() - t0) * 1000
@@ -221,21 +225,7 @@ Summary:"""
         Stage 2 (Agentic Routing): Structured JSON intent classification.
         Returns: {intent, complexity, agents, reasoning, needs_retrieval}
         """
-        prompt = f"""<|im_start|>system
-You are Cortex Lab's query router. Analyze the user's query and output a JSON routing decision.
-
-Available intents: temporal, causal, reflective, factual, procedural, comparative, exploratory
-Available agents: timeline, causal, reflection, planning, arbitration
-Complexity: low (0.0-0.3), medium (0.3-0.6), high (0.6-1.0)
-<|im_end|>
-<|im_start|>user
-{f"Session context: {session_context[:200]}" if session_context else ""}
-Query: {query}
-
-Output routing decision as JSON:
-<|im_end|>
-<|im_start|>assistant
-"""
+        prompt = PromptBuilder.route_query(query, session_context)
         result = self.extract_json(prompt, max_tokens=200)
 
         # Validate and provide defaults
@@ -259,26 +249,7 @@ Output routing decision as JSON:
         Returns structured critique with scores.
         """
         evidence_text = "\n".join(f"[{i+1}] {e[:200]}" for i, e in enumerate(evidence[:5]))
-
-        prompt = f"""<|im_start|>system
-You are a retrieval quality evaluator. For the given query, answer, and evidence,
-evaluate three criteria and provide scores:
-
-ISREL (Is Relevant): Does the evidence address the query? Score 1-10.
-ISSUP (Is Supported): Is the answer grounded in the evidence? Score 1-10.
-ISUSE (Is Useful): Is the answer useful and complete for the user? Score 1-10.
-
-Output JSON with scores and brief justifications.
-<|im_end|>
-<|im_start|>user
-Query: {query}
-Answer: {answer[:300]}
-
-Evidence:
-{evidence_text}
-<|im_end|>
-<|im_start|>assistant
-"""
+        prompt = PromptBuilder.self_rag_critique(query, answer[:300], evidence_text)
         result = self.extract_json(prompt, max_tokens=200)
 
         # Parse scores with fallbacks
@@ -300,23 +271,7 @@ Evidence:
         Stage 3 (Causal Reasoning): Trace cause-effect chains from memories.
         """
         mem_text = "\n".join(f"[{i+1}] {m[:200]}" for i, m in enumerate(memories[:8]))
-
-        prompt = f"""<|im_start|>system
-You are Cortex Lab's causal reasoning engine. Analyze the user's memories to trace
-cause-effect relationships. Structure your response as:
-1. Identify the causal chain (what caused what)
-2. Note any contributing factors
-3. Describe the effects/outcomes
-Be grounded in the evidence — never fabricate causal links.
-<|im_end|>
-<|im_start|>user
-Query: {query}
-
-Memories:
-{mem_text}
-<|im_end|>
-<|im_start|>assistant
-"""
+        prompt = PromptBuilder.causal_reasoning(query, mem_text)
         result = self.generate(prompt, max_tokens=500, temperature=0.3)
         result = self._strip_hallucination_patterns(result)
         result = self._validate_or_extract(query, result, memories)
@@ -331,18 +286,7 @@ Memories:
         Stage 5 (Belief Evolution): Detect stance changes between two memories.
         Returns: {change_type, old_stance, new_stance, confidence, explanation}
         """
-        prompt = f"""<|im_start|>system
-You are a belief evolution detector. Compare two memories about the same topic
-and classify the change. Types: CONTRADICTION, REFINEMENT, EXPANSION, REINFORCEMENT, NONE.
-Output JSON with: change_type, old_stance, new_stance, confidence (0-1), explanation.
-<|im_end|>
-<|im_start|>user
-Topic: {topic or "general"}
-Earlier memory: {old_text[:300]}
-Later memory: {new_text[:300]}
-<|im_end|>
-<|im_start|>assistant
-"""
+        prompt = PromptBuilder.belief_change(old_text[:300], new_text[:300], topic or "general")
         result = self.extract_json(prompt, max_tokens=200)
         defaults = {
             "change_type": "NONE",
@@ -364,30 +308,7 @@ Later memory: {new_text[:300]}
         If the model hallucinates, falls back to evidence-based extraction.
         """
         evidence_text = "\n".join(f"[{i+1}] {e[:250]}" for i, e in enumerate(evidence[:5]))
-
-        prompt = f"""<|im_start|>system
-You are Cortex Lab, an intelligent personal AI assistant who knows the user well.
-Answer their question naturally using the information below.
-
-RULES:
-1. Speak conversationally, like a knowledgeable friend — NOT like a database.
-2. For simple factual questions, answer in one clear sentence.
-3. For broader questions, write a natural flowing paragraph.
-4. Always use "you/your" when referring to the user, NEVER "I/my".
-5. NEVER say "Based on your stored memories" or "According to evidence".
-6. NEVER generate labels like "Confidence:", "Evidence:", "Answer:".
-7. NEVER generate "belief evolution", "emotion timeline", "key insight", or "clarity of scope".
-8. If the information doesn't contain the answer, say "I don't have that information yet."
-{f"Session context: {session_context[:200]}" if session_context else ""}
-<|im_end|>
-<|im_start|>user
-{query}
-
-Here is what I know about you:
-{evidence_text}
-<|im_end|>
-<|im_start|>assistant
-"""
+        prompt = PromptBuilder.faithful_generation(query, evidence_text, session_context)
         result = self.generate(prompt, max_tokens=500, temperature=0.1)
         result = self._strip_hallucination_patterns(result)
 
@@ -419,26 +340,7 @@ Here is what I know about you:
         random.shuffle(all_docs)
         docs_text = "\n".join(all_docs)
 
-        prompt = f"""<|im_start|>system
-You are Cortex Lab, an intelligent personal AI assistant.
-Answer the question naturally using ONLY the relevant documents below.
-Some documents may be irrelevant distractors — ignore them completely.
-
-RULES:
-1. Speak conversationally, like a friend — NOT like a database.
-2. For simple questions, answer in one clear sentence.
-3. NEVER generate labels like "Confidence:", "Evidence:", "Answer:".
-4. NEVER generate "belief evolution", "emotion timeline", or philosophical garbage.
-5. If no document answers the question, say "I don't have that information yet."
-<|im_end|>
-<|im_start|>user
-{query}
-
-Documents:
-{docs_text}
-<|im_end|>
-<|im_start|>assistant
-"""
+        prompt = PromptBuilder.raft_generation(query, docs_text)
         result = self.generate(prompt, max_tokens=400, temperature=0.1)
         result = self._strip_hallucination_patterns(result)
 
@@ -460,21 +362,7 @@ Documents:
             f"- {t['name']}: {t.get('description', '')} | params: {json.dumps(t.get('parameters', {}))}"
             for t in available_tools
         )
-
-        prompt = f"""<|im_start|>system
-You are a function calling assistant. Given the user's request and available tools,
-decide which tool to call and with what arguments.
-Output JSON: {{"tool_name": "...", "arguments": {{...}}, "reasoning": "..."}}
-If no tool is needed, set tool_name to "none".
-
-Available tools:
-{tools_desc}
-<|im_end|>
-<|im_start|>user
-{query}
-<|im_end|>
-<|im_start|>assistant
-"""
+        prompt = PromptBuilder.function_calling(query, tools_desc)
         result = self.extract_json(prompt, max_tokens=200)
         if "tool_name" not in result:
             result["tool_name"] = "none"
@@ -727,6 +615,9 @@ Available tools:
                        "<think>", "</think>", "<|im_sep|>",
                        "<｜end▁of▁sentence｜>", "<｜User｜>", "<｜Assistant｜>"]:
             text = text.replace(token, "")
+        # Catch partial/malformed ChatML tokens like <|im_start|user|entity|...>
+        text = re.sub(r'<\|im_start\|[^>]*>', '', text)
+        text = re.sub(r'<\|im_end\|[^>]*>', '', text)
 
         # ── Phase 1: Remove exact hallucination phrases ──
         # These are fine-tuning artifacts the model generates instead of real answers

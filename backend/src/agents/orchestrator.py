@@ -207,9 +207,35 @@ class AgentOrchestrator:
 
         trace.routing_decision = query.routing.value
 
-        # 3. Route based on complexity
+        # 2b. Function calling check (Stage 13) — try tool use before agent execution
+        tool_response = None
+        if self.llm.model is not None and query.routing != RoutingStrategy.NO_RETRIEVAL:
+            t_step = time.time()
+            tool_response = await self._try_function_calling(query, trace)
+            fc_ms = (time.time() - t_step) * 1000
+            if tool_response:
+                trace.add_step(PipelineStep(
+                    step_name="Function Calling",
+                    step_type="function_calling",
+                    status="completed",
+                    duration_ms=fc_ms,
+                    details={"tool_used": True}
+                ))
+            else:
+                trace.add_step(PipelineStep(
+                    step_name="Function Calling",
+                    step_type="function_calling",
+                    status="skipped",
+                    duration_ms=fc_ms,
+                    details={"reason": "no_tool_needed"}
+                ))
+
+        # 3. Route based on complexity (skip if function calling handled it)
         t_step = time.time()
-        if query.routing == RoutingStrategy.NO_RETRIEVAL:
+        if tool_response:
+            response = tool_response
+            route_label = "FUNCTION_CALL"
+        elif query.routing == RoutingStrategy.NO_RETRIEVAL:
             response = await self._handle_no_retrieval(query)
             route_label = "NO_RETRIEVAL"
         elif query.routing == RoutingStrategy.SINGLE_STEP:
@@ -972,6 +998,101 @@ Improved answer (focus on {weak}):
             response.pipeline_trace.flare_trace = flare
 
         return response
+
+    async def _try_function_calling(self, query: MemoryQuery,
+                                     trace: PipelineTrace) -> Optional[OrchestratorResponse]:
+        """
+        Stage 13 (Function Calling): Check if query should be handled by a tool.
+        Returns OrchestratorResponse if a tool was successfully executed, else None.
+        
+        Tool execution:
+        - search_memories → HybridRetriever.retrieve()
+        - search_by_time → MetadataStore.search_by_time()
+        - find_entity → KnowledgeGraph.find_entity_by_name()
+        - trace_causal_chain → CausalAgent
+        - detect_belief_evolution → LLM detect_belief_change
+        - summarize_topic → LLM summarize
+        """
+        try:
+            # Ask the LLM which tool to use
+            fc_result = self.llm.call_function(query.raw_query, AVAILABLE_TOOLS)
+            tool_name = fc_result.get("tool_name", "none")
+            arguments = fc_result.get("arguments", {})
+
+            if tool_name == "none" or not tool_name:
+                return None
+
+            print(f"  🔧 Function call: {tool_name}({arguments})")
+
+            # Execute the tool
+            if tool_name == "search_memories":
+                search_query = arguments.get("query", query.raw_query)
+                top_k = int(arguments.get("top_k", 10))
+                search_mq = MemoryQuery(
+                    raw_query=search_query,
+                    intent=query.intent,
+                    complexity=0.4,
+                    embedding=self.retriever.embeddings.embed(search_query).tolist(),
+                )
+                results = await self.retriever.retrieve(search_mq, top_k=top_k)
+                if results:
+                    evidence_texts = [r.memory.content[:1500] for r in results[:5]]
+                    answer = self.llm.generate_faithful(query.raw_query, evidence_texts)
+                    return OrchestratorResponse(
+                        answer=answer, evidence=results[:10],
+                        agents_used=["function_calling"],
+                        confidence=min(0.5 + len(results) * 0.05, 0.90),
+                        reasoning_trace=f"Function call: search_memories('{search_query[:50]}') → {len(results)} results",
+                    )
+
+            elif tool_name == "find_entity":
+                entity_name = arguments.get("entity_name", "")
+                if entity_name:
+                    entity_id = self.retriever.graph.find_entity_by_name(entity_name)
+                    if entity_id and self.retriever.graph.graph:
+                        # Get all memories linked to this entity
+                        node_data = self.retriever.graph.graph.nodes.get(entity_id, {})
+                        memory_ids = node_data.get("memory_ids", [])
+                        memories = []
+                        for mid in memory_ids[:10]:
+                            mem = self.retriever.metadata.get_memory(mid)
+                            if mem:
+                                memories.append(mem.content[:300])
+                        if memories:
+                            answer = self.llm.generate_faithful(query.raw_query, memories)
+                            return OrchestratorResponse(
+                                answer=answer, agents_used=["function_calling"],
+                                confidence=0.75,
+                                reasoning_trace=f"Function call: find_entity('{entity_name}') → {len(memories)} memories",
+                            )
+
+            elif tool_name == "summarize_topic":
+                topic = arguments.get("topic", query.raw_query)
+                summary_mq = MemoryQuery(
+                    raw_query=topic,
+                    intent=QueryIntent.EXPLORATORY,
+                    complexity=0.4,
+                    embedding=self.retriever.embeddings.embed(topic).tolist(),
+                )
+                results = await self.retriever.retrieve(summary_mq, top_k=15)
+                if results:
+                    texts = [r.memory.content[:300] for r in results[:10]]
+                    combined = "\n".join(texts)
+                    summary = self.llm.summarize(combined, max_length=200)
+                    if summary and len(summary.strip()) > 20:
+                        return OrchestratorResponse(
+                            answer=summary, evidence=results[:5],
+                            agents_used=["function_calling"],
+                            confidence=0.70,
+                            reasoning_trace=f"Function call: summarize_topic('{topic[:50]}') → summary from {len(results)} memories",
+                        )
+
+            # Tool not handled or didn't produce results → fall back to normal pipeline
+            return None
+
+        except Exception as e:
+            print(f"  ⚠ Function calling failed: {e}")
+            return None
 
     def process_sync(self, raw_query: str, session_context: str = "") -> OrchestratorResponse:
         """Synchronous wrapper."""

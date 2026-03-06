@@ -39,10 +39,11 @@ try:
 except ImportError:
     pass  # python-dotenv not installed — use system env vars
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 from starlette.middleware.gzip import GZipMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field
 
 # Add backend dir to path for src imports
@@ -276,9 +277,10 @@ app.add_middleware(
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:3001",
+        "http://192.168.3.169:3000",
         "https://*.trycloudflare.com",
     ],
-    allow_origin_regex=r"https://.*\.trycloudflare\.com",
+    allow_origin_regex=r"https?://.*\.(trycloudflare\.com|localhost|192\.168\.\d+\.\d+)",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -286,6 +288,55 @@ app.add_middleware(
 
 # GZip compression for large responses (§9.6)
 app.add_middleware(GZipMiddleware, minimum_size=500)
+
+# ── API Key Authentication Middleware (§Gap 7) ───────────────────────────────
+
+_CORTEX_API_KEY = os.environ.get("CORTEX_API_KEY", "")
+_AUTH_ENABLED = bool(_CORTEX_API_KEY)  # Auto-enable when env var is set
+
+# Paths that don't require authentication
+_PUBLIC_PATHS = {"/api/health", "/docs", "/openapi.json", "/redoc"}
+
+
+class APIKeyAuthMiddleware(BaseHTTPMiddleware):
+    """Bearer token authentication middleware.
+    Enable by setting CORTEX_API_KEY environment variable.
+    All /api/* endpoints require: Authorization: Bearer <key>
+    """
+    async def dispatch(self, request: Request, call_next):
+        if not _AUTH_ENABLED:
+            return await call_next(request)
+
+        path = request.url.path
+        # Skip auth for public endpoints and WebSocket upgrades
+        if path in _PUBLIC_PATHS or request.scope.get("type") == "websocket":
+            return await call_next(request)
+
+        # Check for Bearer token
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return Response(
+                content='{"detail":"Missing or invalid Authorization header. Use: Bearer <API_KEY>"}',
+                status_code=401,
+                media_type="application/json",
+            )
+
+        token = auth_header[7:].strip()
+        if token != _CORTEX_API_KEY:
+            return Response(
+                content='{"detail":"Invalid API key"}',
+                status_code=403,
+                media_type="application/json",
+            )
+
+        return await call_next(request)
+
+
+if _AUTH_ENABLED:
+    app.add_middleware(APIKeyAuthMiddleware)
+    print(f"  🔒 API key authentication ENABLED (set via CORTEX_API_KEY)")
+else:
+    print(f"  ⚠ API key authentication DISABLED — set CORTEX_API_KEY env var to enable")
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
 
@@ -408,16 +459,35 @@ def _check_no_info_streaming(query: str, evidence_texts: list) -> str:
     q = query.lower().strip()
     all_ev = "\n".join(e.lower() for e in evidence_texts) if evidence_texts else ""
 
+    # If no evidence at all, don't trigger false "no info" checks — let the
+    # LLM handle it. This prevents false positives when evidence was stripped.
+    if not evidence_texts:
+        return ""
+
     def _ev_has_word(keywords):
         for k in keywords:
             if _re.search(r'\b' + _re.escape(k) + r'\b', all_ev):
                 return True
         return False
 
+    def _q_has_phrase(triggers):
+        """Check if query contains trigger phrases using word-boundary matching
+        to avoid false positives like 'earning' matching in 'learning'."""
+        for t in triggers:
+            # Multi-word phrases: use simple 'in' (already specific enough)
+            if ' ' in t:
+                if t in q:
+                    return True
+            else:
+                # Single words: use word-boundary regex to prevent partial matches
+                if _re.search(r'\b' + _re.escape(t) + r'\b', q):
+                    return True
+        return False
+
     checks = [
         # Salary / compensation — strict whole-word evidence matching
         (["salary", "compensation", "how much do i earn", "how much do i make",
-          "my income", "my pay", "how much does", "earning"],
+          "my income", "my pay", "how much does"],
          ["salary", "compensation", "annual income", "monthly pay",
           "ctc", "lpa", "stipend", "remuneration"],
          "I don't have any salary or compensation details yet. Feel free to share that info and I'll remember it!"),
@@ -446,7 +516,7 @@ def _check_no_info_streaming(query: str, evidence_texts: list) -> str:
     ]
 
     for query_triggers, evidence_keywords, msg in checks:
-        if any(t in q for t in query_triggers):
+        if _q_has_phrase(query_triggers):
             if not _ev_has_word(evidence_keywords):
                 return msg
 
@@ -615,6 +685,14 @@ def _try_extract_factual(query: str, evidence_texts: list) -> str:
 
     # ── Projects ──
     if any(w in q for w in ["project", "built", "portfolio", "developed", "my work", "created"]):
+        # For filtered/exploratory queries (e.g., "projects related to deep learning"),
+        # skip extraction and let the LLM do proper filtering + description
+        _filter_words = ["related to", "involving", "about", "using", "with",
+                         "in the field", "regarding", "deep learning", "machine learning",
+                         "ai ", "web", "mobile", "data", "all project", "list all",
+                         "describe", "explain", "detail"]
+        if any(fw in q for fw in _filter_words):
+            return ""  # Let the LLM generate a proper filtered response
         projects = []
         # Find project names from evidence
         for ev in evidence_texts:
@@ -1318,11 +1396,17 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
                 yield f"data: {json.dumps({'id': msg_id, 'delta': '', 'done': True})}\n\n"
                 return
 
-        # ── For non-document queries, strip PageIndex evidence ──
-        # Personal queries should only use local memories
+        # ── For non-document queries, prefer local memories but keep PageIndex as fallback ──
+        # Only strip PageIndex evidence if there's enough non-PageIndex evidence to use.
+        # If PageIndex is the only/best evidence (e.g., user asked about projects
+        # that happen to be in an uploaded doc), keep it.
         if has_pageindex_evidence and not is_document_query:
-            evidence_texts = evidence_texts[pageindex_evidence_count:]
-            has_pageindex_evidence = False
+            non_pi_evidence = evidence_texts[pageindex_evidence_count:]
+            if non_pi_evidence and any(len(e.strip()) > 30 for e in non_pi_evidence):
+                # Good local evidence exists — prefer it over PageIndex
+                evidence_texts = non_pi_evidence
+                has_pageindex_evidence = False
+            # else: keep PageIndex evidence — it's all we have and may be relevant
             has_meaningful_evidence = any(
                 len(e.strip()) > 10 and e.strip().lower() not in {"hi", "hello", "hey"}
                 for e in evidence_texts

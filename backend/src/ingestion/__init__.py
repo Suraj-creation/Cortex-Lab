@@ -214,44 +214,117 @@ class MemoryIngestionPipeline:
 
         return EmotionLabel.NEUTRAL, 0.5
 
-    def _extract_entities(self, text: str) -> List[str]:
-        """Extract entities using pattern matching, possessive stripping,
-        and multi-word entity detection."""
-        entities = []
+    # ── Tech Terms Dictionary for Entity Extraction (§Gap 3) ────────────
+    # Lowercase tech terms, frameworks, tools, and acronyms that capitalization
+    # heuristics miss. Organized by category for maintainability.
+    _TECH_TERMS = {
+        # Programming languages
+        "python", "javascript", "typescript", "java", "c++", "c#", "golang",
+        "rust", "ruby", "swift", "kotlin", "scala", "php", "perl", "lua",
+        "haskell", "elixir", "clojure", "dart", "r",
+        # Frameworks & libraries
+        "react", "angular", "vue", "svelte", "nextjs", "next.js", "nuxt",
+        "django", "flask", "fastapi", "express", "nestjs", "spring",
+        "tensorflow", "pytorch", "keras", "scikit-learn", "pandas", "numpy",
+        "langchain", "llamaindex", "huggingface", "transformers",
+        "tailwind", "bootstrap", "jquery", "three.js",
+        # Cloud & infrastructure
+        "aws", "azure", "gcp", "docker", "kubernetes", "k8s", "terraform",
+        "ansible", "jenkins", "github", "gitlab", "bitbucket",
+        "vercel", "netlify", "heroku", "railway", "supabase", "firebase",
+        # Databases
+        "postgresql", "postgres", "mysql", "mongodb", "redis", "elasticsearch",
+        "duckdb", "sqlite", "cassandra", "dynamodb", "neo4j", "pinecone",
+        "chromadb", "weaviate", "faiss", "milvus",
+        # AI/ML concepts
+        "ai", "ml", "nlp", "llm", "rag", "gpt", "bert", "gan", "cnn", "rnn",
+        "lstm", "transformer", "diffusion", "reinforcement learning",
+        "deep learning", "machine learning", "computer vision",
+        "natural language processing", "neural network",
+        # Tools & platforms
+        "linux", "ubuntu", "macos", "windows", "nginx", "apache",
+        "git", "npm", "pip", "conda", "yarn", "pnpm",
+        "vscode", "vim", "neovim", "jupyter", "colab",
+        "figma", "postman", "swagger", "grafana", "prometheus",
+        # Protocols & standards
+        "api", "rest", "graphql", "grpc", "websocket", "http", "tcp",
+        "oauth", "jwt", "ssl", "tls", "ssh",
+        # Hardware
+        "gpu", "cpu", "tpu", "cuda", "vram", "nvidia", "amd", "intel",
+        # Companies & services
+        "google", "microsoft", "amazon", "meta", "apple", "openai",
+        "anthropic", "deepseek", "mistral", "cohere", "hugging face",
+    }
 
-        # Find multi-word capitalized sequences (e.g. "Cortex Lab", "TechCorp Inc")
+    # Multi-word tech terms that should be matched as phrases
+    _TECH_PHRASES = {
+        "deep learning", "machine learning", "computer vision",
+        "natural language processing", "reinforcement learning",
+        "neural network", "knowledge graph", "vector database",
+        "large language model", "next.js", "three.js", "hugging face",
+        "scikit-learn",
+    }
+
+    def _extract_entities(self, text: str) -> List[str]:
+        """Extract entities using pattern matching, tech term dictionary,
+        possessive stripping, and multi-word entity detection."""
+        entities = []
+        text_lower = text.lower()
+
+        # ── Phase 1: Tech phrase matching (multi-word lowercase terms) ──
+        for phrase in self._TECH_PHRASES:
+            if phrase in text_lower:
+                # Use title case for display
+                entities.append(phrase.title() if len(phrase) > 3 else phrase.upper())
+
+        # ── Phase 2: Tech term matching (single-word lowercase terms) ──
+        words_lower = re.findall(r'\b[\w.#+]+\b', text_lower)
+        for word in words_lower:
+            if word in self._TECH_TERMS and word not in {p.split()[0] for p in self._TECH_PHRASES if p in text_lower}:
+                # Skip if already captured as part of a tech phrase
+                already_in = any(word in e.lower() for e in entities)
+                if not already_in:
+                    # Use original casing if available, else title/upper
+                    if len(word) <= 4 and word.isalpha():
+                        entities.append(word.upper())  # AI, ML, NLP, GPU etc.
+                    else:
+                        entities.append(word.title())   # Python, Docker, React etc.
+
+        # ── Phase 3: Multi-word capitalized sequences (e.g. "Cortex Lab") ──
         multi_word = re.findall(r'(?<!\. )([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)', text)
         for mw in multi_word:
-            # Strip trailing possessive
             clean_mw = re.sub(r"[''']s$", "", mw).strip()
             if len(clean_mw) > 2:
-                entities.append(clean_mw)
+                already_in = any(clean_mw.lower() == e.lower() for e in entities)
+                if not already_in:
+                    entities.append(clean_mw)
 
-        # Find single capitalized words (likely proper nouns)
+        # ── Phase 4: Single capitalized words (proper nouns) ──
         words = text.split()
         for i, word in enumerate(words):
-            # Strip possessive forms before cleaning (TechCorp's → TechCorp)
             word = re.sub(r"[''']s$", "", word)
             clean = re.sub(r'[^\w]', '', word)
             if clean and clean[0].isupper() and i > 0 and len(clean) > 1:
-                # Not at start of sentence (likely proper noun)
-                # Skip if already captured as part of multi-word entity
-                if not any(clean in mw for mw in entities):
+                already_in = any(clean.lower() == e.lower() for e in entities)
+                if not already_in and not any(clean in mw for mw in entities):
                     entities.append(clean)
 
-        # Find quoted strings
+        # ── Phase 5: Quoted strings ──
         quoted = re.findall(r'"([^"]+)"', text)
-        entities.extend(quoted)
+        for q in quoted:
+            if q.lower() not in {e.lower() for e in entities}:
+                entities.append(q)
 
-        # Deduplicate (case-insensitive)
+        # Deduplicate (case-insensitive) and cap
         seen = set()
         unique = []
         for e in entities:
-            if e.lower() not in seen:
-                seen.add(e.lower())
+            key = e.lower().strip()
+            if key not in seen and len(key) > 1:
+                seen.add(key)
                 unique.append(e)
 
-        return unique[:10]  # Cap at 10 entities
+        return unique[:15]  # Increased cap from 10 → 15 for richer entity coverage
 
     def _extract_topics(self, text: str) -> List[str]:
         """Extract topics using simple keyword/category matching."""

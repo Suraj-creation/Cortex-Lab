@@ -2,6 +2,12 @@ import { ChatSettings, DEFAULT_SETTINGS, MemoryObject, GraphData, RAGStats, Evid
 
 const API_BASE = "/api";
 
+// Direct backend URL for long-running SSE connections that may exceed
+// the Next.js proxy timeout (RAG retrieval can take 30-60s before streaming).
+const BACKEND_DIRECT = typeof window !== "undefined"
+  ? `http://${window.location.hostname}:8000/api`
+  : "http://localhost:8000/api";
+
 // ── Non-streaming chat ──────────────────────────────────────────
 
 export async function sendMessage(
@@ -123,7 +129,8 @@ export async function ragChat(
   cache_hit?: boolean;
   pipeline_trace?: PipelineTrace;
 }> {
-  const res = await fetch(`${API_BASE}/rag/chat`, {
+  // Use direct backend URL to bypass Next.js proxy timeout
+  const res = await fetch(`${BACKEND_DIRECT}/rag/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -168,7 +175,9 @@ export async function streamRAGMessage(
   onReplace?: (text: string) => void,
 ): Promise<void> {
   try {
-    const res = await fetch(`${API_BASE}/rag/chat`, {
+    // Use direct backend URL to bypass Next.js proxy timeout for long SSE streams.
+    // RAG retrieval can take 30-60s before the first token is streamed.
+    const res = await fetch(`${BACKEND_DIRECT}/rag/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

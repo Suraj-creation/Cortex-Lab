@@ -8,6 +8,17 @@ const nextConfig = {
   // get confused by the parent Cortex-Lab directory or stray lockfiles.
   outputFileTracingRoot: path.join(__dirname),
 
+  // Increase proxy timeout for long-running RAG streaming requests
+  // The RAG pipeline can take 30-60s for retrieval before streaming starts
+  experimental: {
+    proxyTimeout: 300000,  // 5 minutes
+  },
+
+  // Keep HTTP connections alive for SSE streaming
+  httpAgentOptions: {
+    keepAlive: true,
+  },
+
   async rewrites() {
     return [
       {
