@@ -1,14 +1,27 @@
 """
 Vector Store for Cortex Lab
 FAISS-based vector storage with tiered indexing (Hot/Warm/Cold).
+L2-normalized vectors for cosine similarity via inner-product search.
 """
 
 import numpy as np
 import os
 import json
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from datetime import datetime, timedelta
+
+
+def _l2_normalize(vec: np.ndarray) -> np.ndarray:
+    """L2-normalize a vector (or batch) so cosine sim == inner product."""
+    vec = np.array(vec, dtype=np.float32)
+    if vec.ndim == 1:
+        norm = np.linalg.norm(vec)
+        return vec / max(norm, 1e-10)
+    else:
+        norms = np.linalg.norm(vec, axis=1, keepdims=True)
+        norms = np.maximum(norms, 1e-10)
+        return vec / norms
 
 
 class VectorStore:
@@ -39,6 +52,9 @@ class VectorStore:
         self.hot_ids: List[str] = []
         self.warm_ids: List[str] = []
         self.cold_ids: List[str] = []
+
+        # Deletion tracking — FAISS doesn't support in-place deletion
+        self._deleted_ids: Set[str] = set()
 
         # Simple flat store as fallback / primary
         self.vectors: Dict[str, np.ndarray] = {}
@@ -144,7 +160,7 @@ class VectorStore:
                     print(f"  🧊 Migrated {len(cold_vecs)} vectors to cold tier")
 
     def add(self, memory_id: str, embedding: np.ndarray, timestamp: Optional[datetime] = None):
-        """Add a vector to the store."""
+        """Add a vector to the store (L2-normalized for cosine similarity)."""
         if timestamp is None:
             timestamp = datetime.now()
 
@@ -152,8 +168,14 @@ class VectorStore:
         if embedding.ndim == 1:
             embedding = embedding.reshape(1, -1)
 
+        # L2-normalize so FAISS L2 distance ≈ cosine distance
+        embedding = _l2_normalize(embedding)
+
         self.vectors[memory_id] = embedding.flatten()
         self.timestamps[memory_id] = timestamp
+
+        # Remove from deleted set if re-added
+        self._deleted_ids.discard(memory_id)
 
         if self._use_faiss and self.hot_index is not None:
             self.hot_index.add(embedding)
@@ -162,10 +184,12 @@ class VectorStore:
     def search(self, query_embedding: np.ndarray, top_k: int = 20,
                time_start: Optional[datetime] = None,
                time_end: Optional[datetime] = None) -> List[Tuple[str, float]]:
-        """Search for similar vectors across all tiers. Returns list of (memory_id, score)."""
+        """Search for similar vectors across all tiers. Returns list of (memory_id, score).
+        Filters out deleted IDs. Query is L2-normalized for consistency."""
         query_embedding = np.array(query_embedding, dtype=np.float32)
         if query_embedding.ndim == 1:
             query_embedding = query_embedding.reshape(1, -1)
+        query_embedding = _l2_normalize(query_embedding)
 
         results = []
 
@@ -229,24 +253,33 @@ class VectorStore:
                 filtered.append((mid, score))
             results = filtered
 
+        # Filter out deleted IDs (FAISS cannot delete in-place)
+        if self._deleted_ids:
+            results = [(mid, s) for mid, s in results if mid not in self._deleted_ids]
+
         # Sort by score descending
         results.sort(key=lambda x: x[1], reverse=True)
         return results[:top_k]
 
     def delete(self, memory_id: str):
-        """Remove a vector (marks as deleted, rebuilt on next compact)."""
+        """Mark a vector as deleted. FAISS doesn't support in-place removal,
+        so we track deleted IDs and filter them from search results.
+        The flat dict is also cleaned so count() stays accurate."""
+        self._deleted_ids.add(memory_id)
         self.vectors.pop(memory_id, None)
         self.timestamps.pop(memory_id, None)
 
     def count(self) -> int:
+        """Return number of live (non-deleted) vectors."""
         return len(self.vectors)
 
     def save(self):
-        """Persist state to disk."""
+        """Persist state to disk (all tiers + deleted IDs)."""
         state = {
             "hot_ids": self.hot_ids,
             "warm_ids": self.warm_ids,
             "cold_ids": self.cold_ids,
+            "deleted_ids": list(self._deleted_ids),
             "timestamps": {k: v.isoformat() for k, v in self.timestamps.items()},
         }
         with open(os.path.join(self.data_dir, "vector_state.json"), "w") as f:
@@ -260,14 +293,21 @@ class VectorStore:
             with open(os.path.join(self.data_dir, "vector_ids.json"), "w") as f:
                 json.dump(ids, f)
 
-        # Save FAISS index
+        # Save FAISS hot index
         if self._use_faiss and self.hot_index is not None and self.hot_index.ntotal > 0:
             self.faiss.write_index(self.hot_index, os.path.join(self.data_dir, "hot.index"))
+
+        # Save warm/cold FAISS indices
+        if self._use_faiss:
+            if self.warm_index is not None and self.warm_index.ntotal > 0:
+                self.faiss.write_index(self.warm_index, os.path.join(self.data_dir, "warm.index"))
+            if self.cold_index is not None and self.cold_index.ntotal > 0:
+                self.faiss.write_index(self.cold_index, os.path.join(self.data_dir, "cold.index"))
 
         print(f"  ✓ Vector store saved ({self.count()} vectors)")
 
     def _load_state(self):
-        """Load state from disk."""
+        """Load state from disk (all tiers + deleted IDs)."""
         state_path = os.path.join(self.data_dir, "vector_state.json")
         ids_path = os.path.join(self.data_dir, "vector_ids.json")
         vecs_path = os.path.join(self.data_dir, "vectors.npy")
@@ -278,6 +318,7 @@ class VectorStore:
             self.hot_ids = state.get("hot_ids", [])
             self.warm_ids = state.get("warm_ids", [])
             self.cold_ids = state.get("cold_ids", [])
+            self._deleted_ids = set(state.get("deleted_ids", []))
             self.timestamps = {
                 k: datetime.fromisoformat(v)
                 for k, v in state.get("timestamps", {}).items()
@@ -290,7 +331,7 @@ class VectorStore:
             for i, mid in enumerate(ids):
                 self.vectors[mid] = vecs[i]
 
-            # Try loading saved FAISS index from disk first (§4.3)
+            # Try loading saved FAISS hot index from disk
             hot_path = os.path.join(self.data_dir, "hot.index")
             if self._use_faiss and os.path.exists(hot_path):
                 try:
@@ -306,6 +347,24 @@ class VectorStore:
                 # Fallback: rebuild FAISS from vectors
                 self.hot_index.add(vecs)
                 self.hot_ids = ids[:]
+
+            # Load warm index from disk
+            warm_path = os.path.join(self.data_dir, "warm.index")
+            if self._use_faiss and os.path.exists(warm_path):
+                try:
+                    self.warm_index = self.faiss.read_index(warm_path)
+                    print(f"  ✓ FAISS warm index loaded from disk ({self.warm_index.ntotal} vectors)")
+                except Exception as e:
+                    print(f"  ⚠ Failed to load warm index: {e}")
+
+            # Load cold index from disk
+            cold_path = os.path.join(self.data_dir, "cold.index")
+            if self._use_faiss and os.path.exists(cold_path):
+                try:
+                    self.cold_index = self.faiss.read_index(cold_path)
+                    print(f"  ✓ FAISS cold index loaded from disk ({self.cold_index.ntotal} vectors)")
+                except Exception as e:
+                    print(f"  ⚠ Failed to load cold index: {e}")
 
             print(f"  ✓ Vector store loaded ({len(ids)} vectors)")
 

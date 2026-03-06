@@ -14,6 +14,7 @@ Fine-tuned model integration for enriched memory processing:
 
 import re
 import time
+import numpy as np
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -25,6 +26,7 @@ from src.llm import LocalLLM
 from src.storage.vector_store import VectorStore
 from src.storage.metadata_store import MetadataStore
 from src.storage.knowledge_graph import KnowledgeGraph
+from src.prompts import PromptBuilder, sanitize
 
 
 class MemoryIngestionPipeline:
@@ -59,13 +61,14 @@ class MemoryIngestionPipeline:
         self._emotion_keywords = {
             EmotionLabel.HAPPY: ["happy", "joy", "great", "wonderful", "love", "amazing",
                                  "glad", "pleased", "delighted", "enjoyed", "fun", "nice",
-                                 "pleasant", "awesome", "fantastic", "blessed"],
+                                 "pleasant", "awesome", "fantastic", "blessed",
+                                 "coffee with"],
             EmotionLabel.SAD: ["sad", "depressed", "down", "unhappy", "miserable", "grief",
                                "loss", "miss", "heartbroken", "sorrow", "devastated"],
             EmotionLabel.ANGRY: ["angry", "furious", "mad", "rage", "outraged", "infuriated",
                                  "livid", "hostile"],
             EmotionLabel.ANXIOUS: ["anxious", "worried", "nervous", "stress", "panic", "fear",
-                                   "uncertain", "avoiding", "afraid", "dreading", "uneasy",
+                                   "uncertain", "afraid", "dreading", "uneasy",
                                    "apprehensive"],
             EmotionLabel.EXCITED: ["excited", "thrilled", "eager", "pumped", "can't wait",
                                    "stoked", "new paper", "breakthrough", "discovered",
@@ -77,7 +80,7 @@ class MemoryIngestionPipeline:
             EmotionLabel.FRUSTRATED: ["frustrated", "stuck", "annoyed", "struggling",
                                       "difficult", "irritated", "toxic", "unreasonable",
                                       "doesn't listen", "seriously considering leaving",
-                                      "fed up"],
+                                      "fed up", "avoiding"],
         }
 
         self._memory_type_keywords = {
@@ -91,7 +94,9 @@ class MemoryIngestionPipeline:
                                     "i love", "i hate", "opinion", "perspective",
                                     "considering", "culture", "valued", "frustrated",
                                     "i'm frustrated", "doesn't matter",
-                                    "seriously considering"],
+                                    "seriously considering",
+                                    "i prefer", "my philosophy", "what matters",
+                                    "i've come to", "looking back"],
         }
 
     async def ingest(self, content: str, session_id: str = "",
@@ -132,20 +137,33 @@ class MemoryIngestionPipeline:
         # 7. Decompose into propositions
         memory.propositions = self._extract_propositions(content)
 
-        # 8. Generate contextual prefix
+        # 8. Generate contextual prefix (Anthropic-style contextual enrichment)
+        # Always generate a context prefix, not just when session_context exists.
+        # This prepends a 1-2 sentence doc-level context to improve retrieval.
         if session_context:
             memory.context_prefix = self._generate_context_prefix(content, session_context)
+        elif len(content) > 60:
+            # Auto-generate a minimal prefix from the content itself
+            memory.context_prefix = self._auto_context_prefix(content, memory)
 
         # 9. Generate embedding (passage embedding for BGE asymmetric retrieval)
+        # Embed the enriched text (prefix + content) for better retrieval
         embed_text = memory.context_prefix + " " + content if memory.context_prefix else content
         embedding = self.embeddings.embed_passage(embed_text)
         memory.embedding = embedding.tolist()
 
-        # 10. Store everything
+        # 10. Deduplication — skip if near-duplicate exists (>0.95 similarity)
+        dedup_result = self._check_deduplication(embedding, memory)
+        if dedup_result is not None:
+            # Near-duplicate found — update existing memory's last_seen instead
+            print(f"  ♻️  Dedup: skipped ingestion (sim={dedup_result:.3f}), updated existing memory")
+            return None
+
+        # 11. Store everything
         self.vectors.add(memory.id, embedding, memory.timestamp)
         self.metadata.store_memory(memory)
 
-        # 11. Update knowledge graph with entities
+        # 12. Update knowledge graph with entities + typed causal edges
         self._update_graph(memory)
 
         elapsed_ms = (time.time() - t0) * 1000
@@ -167,17 +185,9 @@ class MemoryIngestionPipeline:
 
         # LLM fallback for ambiguous cases
         if self.llm.model is not None:
+            prompt = PromptBuilder.classify_memory_type(text)
             result = self.llm.classify(
-                f"""<|im_start|>system
-Classify this memory into one type.
-<|im_end|>
-<|im_start|>user
-"{text[:200]}"
-
-Types: episodic (events/activities), semantic (facts/knowledge), procedural (processes/how-to), reflective (thoughts/realizations)
-<|im_end|>
-<|im_start|>assistant
-""",
+                prompt,
                 ["episodic", "semantic", "procedural", "reflective"],
                 default="episodic"
             )
@@ -205,24 +215,35 @@ Types: episodic (events/activities), semantic (facts/knowledge), procedural (pro
         return EmotionLabel.NEUTRAL, 0.5
 
     def _extract_entities(self, text: str) -> List[str]:
-        """Extract entities using pattern matching and capitalization heuristics."""
+        """Extract entities using pattern matching, possessive stripping,
+        and multi-word entity detection."""
         entities = []
 
-        # Find capitalized words (likely proper nouns)
+        # Find multi-word capitalized sequences (e.g. "Cortex Lab", "TechCorp Inc")
+        multi_word = re.findall(r'(?<!\. )([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)', text)
+        for mw in multi_word:
+            # Strip trailing possessive
+            clean_mw = re.sub(r"[''']s$", "", mw).strip()
+            if len(clean_mw) > 2:
+                entities.append(clean_mw)
+
+        # Find single capitalized words (likely proper nouns)
         words = text.split()
         for i, word in enumerate(words):
-            # Strip possessive forms before cleaning
+            # Strip possessive forms before cleaning (TechCorp's → TechCorp)
             word = re.sub(r"[''']s$", "", word)
             clean = re.sub(r'[^\w]', '', word)
             if clean and clean[0].isupper() and i > 0 and len(clean) > 1:
                 # Not at start of sentence (likely proper noun)
-                entities.append(clean)
+                # Skip if already captured as part of multi-word entity
+                if not any(clean in mw for mw in entities):
+                    entities.append(clean)
 
         # Find quoted strings
         quoted = re.findall(r'"([^"]+)"', text)
         entities.extend(quoted)
 
-        # Deduplicate
+        # Deduplicate (case-insensitive)
         seen = set()
         unique = []
         for e in entities:
@@ -289,23 +310,13 @@ Types: episodic (events/activities), semantic (facts/knowledge), procedural (pro
         """
         Extract atomic propositions using LLM-based decomposition (EMNLP 2024).
         Falls back to enhanced sentence splitting if LLM unavailable.
+        Handles numbered lists (1) ... 2) ...) correctly.
         """
         # Try LLM-based atomic fact decomposition first
         if self.llm.model is not None and len(text) > 30:
             try:
-                result = self.llm.generate(
-                    f"""<|im_start|>system
-Decompose text into independent atomic facts.
-Each fact must be self-contained. One fact per line. No numbering.
-<|im_end|>
-<|im_start|>user
-{text[:500]}
-<|im_end|>
-<|im_start|>assistant
-""",
-                    max_tokens=300,
-                    temperature=0.1,
-                )
+                prompt = PromptBuilder.proposition_extraction(text)
+                result = self.llm.generate(prompt, max_tokens=300, temperature=0.1)
                 props = [p.strip().lstrip("- •·") for p in result.strip().split("\n")]
                 props = [p for p in props if len(p) > 10 and not p.startswith("Atomic")]
                 if props:
@@ -313,8 +324,19 @@ Each fact must be self-contained. One fact per line. No numbering.
             except Exception:
                 pass
 
-        # Enhanced fallback: split by clauses and sentences
+        # Enhanced fallback: split by clauses, sentences, AND numbered lists
         propositions = []
+
+        # First: split numbered lists (1) ... 2) ... or 1. ... 2. ...)
+        numbered_items = re.split(r'(?:^|\n)\s*\d+[).]\s+', text)
+        if len(numbered_items) > 2:
+            # It's a numbered list — each item is a proposition
+            for item in numbered_items:
+                item = item.strip().rstrip('.!?')
+                if len(item) > 10:
+                    propositions.append(item)
+            return propositions[:12]
+
         # Split by sentence boundaries
         sentences = re.split(r'(?<=[.!?])\s+', text)
         for sent in sentences:
@@ -332,25 +354,44 @@ Each fact must be self-contained. One fact per line. No numbering.
     def _generate_context_prefix(self, content: str, session_context: str) -> str:
         """Generate contextual prefix using session context (Anthropic-style)."""
         if self.llm.model is not None and session_context:
-            prefix = self.llm.generate(
-                f"""<|im_start|>system
-Write a SHORT context (1-2 sentences) to situate this memory.
-Include who/what/when if relevant.
-<|im_end|>
-<|im_start|>user
-Session context:
-{session_context[:500]}
-
-Memory:
-{content[:300]}
-<|im_end|>
-<|im_start|>assistant
-""",
-                max_tokens=60,
-                temperature=0.2,
-            )
+            prompt = PromptBuilder.context_prefix(content, session_context)
+            prefix = self.llm.generate(prompt, max_tokens=60, temperature=0.2)
             return prefix.strip()
         return ""
+
+    def _auto_context_prefix(self, content: str, memory: 'CausalMemoryObject') -> str:
+        """Auto-generate a minimal context prefix from memory metadata.
+        Used when no session_context is available but we still want enrichment."""
+        parts = []
+        if memory.memory_type != MemoryType.EPISODIC:
+            parts.append(f"This is a {memory.memory_type.value} memory.")
+        if memory.topics:
+            parts.append(f"Topics: {', '.join(memory.topics[:3])}.")
+        if memory.entities:
+            parts.append(f"Involves: {', '.join(memory.entities[:3])}.")
+        return " ".join(parts) if parts else ""
+
+    def _check_deduplication(self, embedding: np.ndarray, memory: 'CausalMemoryObject') -> Optional[float]:
+        """Check if a near-duplicate memory exists (cosine sim > 0.95).
+        If so, update the existing memory's timestamp and return the similarity score.
+        Returns None if no duplicate found (memory should be stored)."""
+        if self.vectors.count() == 0:
+            return None
+
+        similar = self.vectors.search(embedding, top_k=5)
+        for mem_id, sim_score in similar:
+            if sim_score > 0.95 and mem_id != memory.id:
+                # Near-duplicate — update existing memory's metadata instead
+                try:
+                    existing = self.metadata.get_memory(mem_id)
+                    if existing:
+                        # Update last_seen timestamp on the existing memory
+                        self.metadata.update_memory_timestamp(mem_id, datetime.now())
+                except Exception:
+                    pass
+                return sim_score
+
+        return None
 
     def _update_graph(self, memory: CausalMemoryObject):
         """Update knowledge graph with extracted entities and relationships."""
@@ -425,11 +466,19 @@ Memory:
         return "unknown"
 
     def _infer_relation(self, entity1: str, entity2: str, context: str) -> str:
-        """Infer the relation between two co-occurring entities."""
+        """Infer the relation between two co-occurring entities.
+        Returns typed causal edges when causal language is detected."""
         context_lower = context.lower()
-        causal_words = ["because", "caused", "led to", "resulted in", "due to"]
-        if any(w in context_lower for w in causal_words):
+        # Strong causal indicators → typed causal edges
+        caused_words = ["because of", "caused by", "was caused", "the reason"]
+        if any(w in context_lower for w in caused_words):
             return "caused"
+        led_to_words = ["led to", "resulted in", "which meant", "so that", "therefore"]
+        if any(w in context_lower for w in led_to_words):
+            return "led_to"
+        influence_words = ["influenced", "affected", "impacted", "shaped"]
+        if any(w in context_lower for w in influence_words):
+            return "influenced"
         collab_words = ["worked with", "collaborated", "together", "team"]
         if any(w in context_lower for w in collab_words):
             return "works_with"
@@ -609,3 +658,117 @@ Memory:
             content = content.replace(marker, "")
 
         return content.strip() if content.strip() else None
+
+    # ── RAPTOR Tree Indexing ─────────────────────────────────────────────
+
+    def build_raptor_clusters(self, min_cluster_size: int = 5, max_clusters: int = 20):
+        """
+        RAPTOR hierarchical indexing: cluster leaf memories by topic similarity
+        using K-means on embeddings, generate a summary for each cluster,
+        and store the summary as a new memory with raptor_level=1.
+
+        Called by engine.py when memory count crosses thresholds (50, 200, 1000).
+        """
+        from sklearn.cluster import KMeans
+
+        # Get all leaf memories (raptor_level=0) with embeddings
+        all_memories = self.metadata.get_all_memories(limit=5000)
+        leaf_memories = [m for m in all_memories if m.raptor_level == 0]
+
+        if len(leaf_memories) < min_cluster_size * 2:
+            print(f"  ℹ RAPTOR: not enough leaf memories ({len(leaf_memories)}), skipping")
+            return
+
+        # Collect embeddings
+        mem_ids = []
+        embeddings = []
+        for mem in leaf_memories:
+            if mem.id in self.vectors.vectors:
+                mem_ids.append(mem.id)
+                embeddings.append(self.vectors.vectors[mem.id])
+
+        if len(embeddings) < min_cluster_size * 2:
+            return
+
+        X = np.array(embeddings, dtype=np.float32)
+
+        # Determine number of clusters
+        n_clusters = min(max_clusters, max(2, len(embeddings) // min_cluster_size))
+
+        try:
+            kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
+            labels = kmeans.fit_predict(X)
+        except Exception as e:
+            print(f"  ⚠ RAPTOR clustering failed: {e}")
+            return
+
+        # Build clusters
+        clusters: Dict[int, List[int]] = {}
+        for idx, label in enumerate(labels):
+            clusters.setdefault(label, []).append(idx)
+
+        created = 0
+        for cluster_id, member_indices in clusters.items():
+            if len(member_indices) < min_cluster_size:
+                continue
+
+            # Collect child memory texts for summarization
+            child_ids = [mem_ids[i] for i in member_indices]
+            child_texts = []
+            for mid in child_ids[:10]:  # Cap at 10 for LLM context
+                mem = self.metadata.get_memory(mid)
+                if mem:
+                    child_texts.append(mem.content[:200])
+
+            if not child_texts:
+                continue
+
+            # Generate summary via LLM
+            combined = "\n".join(f"- {t}" for t in child_texts)
+            if self.llm.model is not None:
+                prompt = PromptBuilder.raptor_summary(combined)
+                # Use higher token budget so the model can finish <think> + produce summary
+                summary_text = self.llm.generate(prompt, max_tokens=400, temperature=0.2)
+            else:
+                summary_text = f"Cluster of {len(child_ids)} related memories about: {', '.join(child_texts[0].split()[:10])}"
+
+            # ── Clean LLM output: strip <think> blocks, artifacts ──
+            if summary_text:
+                import re as _re
+                # Strip <think>...</think> blocks (DeepSeek-R1 reasoning traces)
+                summary_text = _re.sub(
+                    r'<think>.*?</think>', '', summary_text, flags=_re.DOTALL
+                ).strip()
+                # If model only produced <think> without closing tag, discard entirely
+                if '<think>' in summary_text:
+                    summary_text = summary_text[:summary_text.index('<think>')].strip()
+                # Remove other model artifacts
+                for token in ['<|im_end|>', '<|im_start|>', '<|endoftext|>',
+                              '<|im_sep|>', '<｜end▁of▁sentence｜>']:
+                    summary_text = summary_text.replace(token, '')
+                summary_text = summary_text.strip()
+
+            if not summary_text or len(summary_text.strip()) < 20:
+                continue
+
+            # Create RAPTOR summary memory
+            summary_memory = CausalMemoryObject(
+                content=summary_text.strip(),
+                memory_type=MemoryType.SEMANTIC,
+                raptor_level=1,
+                raptor_children=child_ids,
+                source="raptor",
+                timestamp=datetime.now(),
+                topics=self._extract_topics(summary_text),
+                importance=0.8,
+            )
+
+            # Embed and store the summary
+            summary_embedding = self.embeddings.embed_passage(summary_text)
+            summary_memory.embedding = summary_embedding.tolist()
+            self.vectors.add(summary_memory.id, summary_embedding, summary_memory.timestamp)
+            self.metadata.store_memory(summary_memory)
+            created += 1
+
+        if created > 0:
+            print(f"  🌳 RAPTOR: created {created} cluster summaries from {len(leaf_memories)} memories")

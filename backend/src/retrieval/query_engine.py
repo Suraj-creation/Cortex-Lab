@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Tuple
 from src.models import MemoryQuery, QueryIntent, RoutingStrategy
 from src.models.embeddings import EmbeddingModel
 from src.llm import LocalLLM
+from src.prompts import PromptBuilder, sanitize
 
 
 class QueryAnalyzer:
@@ -186,19 +187,25 @@ class QueryAnalyzer:
                 scores[intent] = score + priority.get(intent, 0)
 
         if scores:
+            # If PROCEDURAL and FACTUAL both match, PROCEDURAL wins via priority
             return max(scores, key=scores.get)
         return QueryIntent.EXPLORATORY
 
     def _score_complexity(self, query: str, intent: QueryIntent = None) -> float:
-        """Score query complexity 0.0-1.0."""
+        """Score query complexity 0.0-1.0.
+        Intent-aware: reflective/comparative queries get a complexity boost."""
         score = 0.3  # baseline
 
-        # Word count
+        # Word count (higher thresholds for stronger boost)
         words = len(query.split())
+        if words > 10:
+            score += 0.05
         if words > 15:
-            score += 0.1
+            score += 0.10
         if words > 25:
-            score += 0.1
+            score += 0.10
+        if words > 40:
+            score += 0.05
 
         # Complexity indicators
         for booster in self.COMPLEXITY_BOOSTERS:
@@ -215,6 +222,8 @@ class QueryAnalyzer:
 
         # Intent-based complexity boost (reflective/comparative inherently complex)
         if intent in (QueryIntent.REFLECTIVE, QueryIntent.COMPARATIVE):
+            score += 0.15
+        elif intent == QueryIntent.CAUSAL:
             score += 0.10
 
         return min(score, 1.0)
@@ -229,7 +238,7 @@ class QueryAnalyzer:
             return RoutingStrategy.MULTI_STEP
 
     def _extract_temporal(self, query: str) -> Tuple[Optional[datetime], Optional[datetime]]:
-        """Extract time range from query."""
+        """Extract time range from query. Handles both relative and absolute dates."""
         now = datetime.now()
         start = None
         end = None
@@ -251,7 +260,7 @@ class QueryAnalyzer:
             start = now.replace(hour=0, minute=0, second=0)
             end = now
 
-        # Month name patterns
+        # Month name patterns (with optional day: "March 15", "March 15th")
         months = {
             "january": 1, "february": 2, "march": 3, "april": 4,
             "may": 5, "june": 6, "july": 7, "august": 8,
@@ -263,23 +272,71 @@ class QueryAnalyzer:
                 # If month is in the future, use last year
                 if month_num > now.month:
                     year -= 1
-                start = datetime(year, month_num, 1)
-                if month_num == 12:
-                    end = datetime(year + 1, 1, 1)
+
+                # Try to extract day number: "March 15", "March 15th"
+                day_match = re.search(
+                    rf'{month_name}\s+(\d{{1,2}})(?:st|nd|rd|th)?',
+                    query, re.IGNORECASE
+                )
+                if day_match:
+                    day = min(int(day_match.group(1)), 28)  # Safe cap
+                    start = datetime(year, month_num, day)
+                    end = start + timedelta(days=1)
                 else:
-                    end = datetime(year, month_num + 1, 1)
+                    start = datetime(year, month_num, 1)
+                    if month_num == 12:
+                        end = datetime(year + 1, 1, 1)
+                    else:
+                        end = datetime(year, month_num + 1, 1)
                 break
+
+        # Quarter patterns: "Q1 2024", "Q3 2025"
+        quarter_match = re.search(r'q([1-4])\s*(\d{4})', query, re.IGNORECASE)
+        if quarter_match:
+            q = int(quarter_match.group(1))
+            year = int(quarter_match.group(2))
+            start_month = (q - 1) * 3 + 1
+            start = datetime(year, start_month, 1)
+            end_month = start_month + 3
+            end_year = year
+            if end_month > 12:
+                end_month = 1
+                end_year = year + 1
+            end = datetime(end_year, end_month, 1)
+
+        # Bare year pattern: "in 2023", "2024", "during 2025"
+        if start is None:
+            year_match = re.search(r'\b(20\d{2})\b', query)
+            if year_match:
+                year = int(year_match.group(1))
+                if 2000 <= year <= now.year + 1:
+                    start = datetime(year, 1, 1)
+                    end = datetime(year + 1, 1, 1)
 
         return start, end
 
     def _extract_query_entities(self, query: str) -> List[str]:
-        """Extract potential entity references from query."""
+        """Extract potential entity references from query.
+        Handles possessives (TechCorp's → TechCorp) and multi-word entities."""
         entities = []
+
+        # Multi-word capitalized sequences (e.g. "Cortex Lab", "Deep Learning")
+        multi_word = re.findall(r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)', query)
+        for mw in multi_word:
+            clean_mw = re.sub(r"[''']s$", "", mw).strip()
+            if len(clean_mw) > 2:
+                entities.append(clean_mw)
+
+        # Single capitalized words
         words = query.split()
         for word in words:
+            # Strip possessives before cleaning
+            word = re.sub(r"[''']s$", "", word)
             clean = re.sub(r'[^\w]', '', word)
             if clean and clean[0].isupper() and len(clean) > 1:
-                entities.append(clean)
+                # Skip if already captured as part of multi-word entity
+                if not any(clean in mw for mw in entities):
+                    entities.append(clean)
         return entities
 
     def _extract_query_topics(self, query: str) -> List[str]:
@@ -425,17 +482,7 @@ class QueryTransformer:
             ]
 
         # ── Standard multi-query generation via LLM ─────────────────────
-        prompt = f"""<|im_start|>system
-Generate 3 different versions of the following question.
-Each version MUST ask about the same topic and preserve the original meaning.
-Only rephrase — do NOT change the subject or introduce new topics.
-Output one version per line, numbered 1-3.
-<|im_end|>
-<|im_start|>user
-{query}
-<|im_end|>
-<|im_start|>assistant
-1."""
+        prompt = PromptBuilder.multi_query_generation(query)
 
         result = self.llm.generate(prompt, max_tokens=150, temperature=0.3)
         lines = [l.strip() for l in result.split("\n") if l.strip()]
@@ -478,16 +525,7 @@ Output one version per line, numbered 1-3.
         if self.llm.model is None:
             return ""
 
-        prompt = f"""<|im_start|>system
-Write a brief hypothetical answer (2-3 sentences) to this question,
-as if answering from personal memories.
-<|im_end|>
-<|im_start|>user
-{query}
-<|im_end|>
-<|im_start|>assistant
-"""
-
+        prompt = PromptBuilder.hyde_generation(query)
         return self.llm.generate(prompt, max_tokens=100, temperature=0.4).strip()
 
     def _generate_step_back(self, query: str) -> str:
@@ -495,16 +533,7 @@ as if answering from personal memories.
         if self.llm.model is None:
             return ""
 
-        prompt = f"""<|im_start|>system
-Given this specific question, generate ONE more general question
-that would provide useful background context.
-<|im_end|>
-<|im_start|>user
-{query}
-<|im_end|>
-<|im_start|>assistant
-"""
-
+        prompt = PromptBuilder.step_back_generation(query)
         return self.llm.generate(prompt, max_tokens=50, temperature=0.3).strip()
 
     def _decompose_query(self, query: str) -> List[str]:
@@ -512,16 +541,7 @@ that would provide useful background context.
         if self.llm.model is None:
             return [query]
 
-        prompt = f"""<|im_start|>system
-Break this complex question into 2-3 simpler sub-questions
-that can each be answered independently.
-Output one sub-question per line, numbered 1-3.
-<|im_end|>
-<|im_start|>user
-{query}
-<|im_end|>
-<|im_start|>assistant
-1."""
+        prompt = PromptBuilder.query_decomposition(query)
 
         result = self.llm.generate(prompt, max_tokens=150, temperature=0.3)
         lines = [l.strip() for l in result.split("\n") if l.strip()]

@@ -230,6 +230,12 @@ class CortexRAGEngine:
         except Exception as e:
             print(f"  ⚠ Tier migration skipped: {e}")
 
+        # RAPTOR tree indexing — cluster memories at thresholds
+        try:
+            self._maybe_build_raptor()
+        except Exception as e:
+            print(f"  ⚠ RAPTOR clustering skipped: {e}")
+
         # Migrate junction tables for indexed topic/entity lookups (§4.1)
         try:
             if self.metadata_store:
@@ -330,6 +336,50 @@ class CortexRAGEngine:
 
         print(f"\n  ✓ Indexed {added} new vectors (total: {self.vector_store.count()})")
         self.vector_store.save()
+
+    # RAPTOR thresholds — build clusters when memory count crosses these
+    _RAPTOR_THRESHOLDS = [50, 200, 1000]
+    _raptor_last_built_at = 0
+
+    def _maybe_build_raptor(self):
+        """Trigger RAPTOR clustering when memory count crosses thresholds.
+        
+        Skips if RAPTOR summaries already exist for the current threshold
+        (avoids re-generating on every server restart).
+        Runs in a background thread to avoid blocking server startup.
+        """
+        mem_count = self.metadata_store.count_memories()
+
+        # Check if RAPTOR summaries already exist
+        all_memories = self.metadata_store.get_all_memories(limit=5000)
+        existing_raptor_count = sum(1 for m in all_memories if m.raptor_level > 0)
+
+        for threshold in self._RAPTOR_THRESHOLDS:
+            if mem_count >= threshold > self._raptor_last_built_at:
+                # Skip if we already have enough RAPTOR summaries for this tier
+                expected_min = max(2, threshold // 25)
+                if existing_raptor_count >= expected_min:
+                    print(f"\n  🌳 RAPTOR: {existing_raptor_count} summaries already exist, skipping rebuild")
+                    self._raptor_last_built_at = mem_count
+                    break
+
+                print(f"\n  🌳 RAPTOR threshold {threshold} reached ({mem_count} memories)")
+                print(f"  🌳 Building clusters in background thread...")
+
+                import threading
+                def _build():
+                    try:
+                        self.ingestion.build_raptor_clusters(
+                            min_cluster_size=max(3, threshold // 20),
+                            max_clusters=min(30, threshold // 5),
+                        )
+                    except Exception as e:
+                        print(f"  ⚠ RAPTOR background build failed: {e}")
+
+                t = threading.Thread(target=_build, daemon=True)
+                t.start()
+                self._raptor_last_built_at = mem_count
+                break
 
     @staticmethod
     def _is_meaningful_content(text: str) -> bool:

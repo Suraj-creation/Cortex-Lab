@@ -243,7 +243,7 @@ export interface ChatSettings {
 export const DEFAULT_SETTINGS: ChatSettings = {
   temperature: 0.6,
   topP: 0.95,
-  maxTokens: 2048,
+  maxTokens: 4096,
   stream: true,
   useRAG: true,
   llmProvider: "local",

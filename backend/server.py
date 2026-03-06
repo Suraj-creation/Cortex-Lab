@@ -48,6 +48,7 @@ from pydantic import BaseModel, Field
 # Add backend dir to path for src imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.engine import rag_engine
+from src.prompts import PromptBuilder
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -296,7 +297,7 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     temperature: float = Field(0.6, ge=0.0, le=2.0)
     top_p: float = Field(0.95, ge=0.0, le=1.0)
-    max_tokens: int = Field(2048, ge=1, le=32768)
+    max_tokens: int = Field(4096, ge=1, le=32768)
     stream: bool = False
     llm_provider: str = Field("local", description="'local' for fine-tuned DeepSeek or 'gemini' for Gemini API")
 
@@ -319,7 +320,7 @@ class RAGChatRequest(BaseModel):
     messages: list[ChatMessage]
     temperature: float = Field(0.6, ge=0.0, le=2.0)
     top_p: float = Field(0.95, ge=0.0, le=1.0)
-    max_tokens: int = Field(2048, ge=1, le=32768)
+    max_tokens: int = Field(4096, ge=1, le=32768)
     stream: bool = False
     use_rag: bool = True  # Enable/disable RAG enhancement
     session_id: str = ""
@@ -993,7 +994,7 @@ async def chat(req: ChatRequest):
     with torch.no_grad():
         out = model.generate(
             **inputs,
-            max_new_tokens=min(req.max_tokens, 2048),
+            max_new_tokens=min(req.max_tokens, 8192),
             temperature=max(req.temperature, 0.01),
             top_p=req.top_p,
             do_sample=req.temperature > 0,
@@ -1053,7 +1054,7 @@ async def _stream_generate(prompt: str, req: ChatRequest):
 
     gen_kwargs = {
         **inputs,
-        "max_new_tokens": min(req.max_tokens, 2048),
+        "max_new_tokens": min(req.max_tokens, 8192),
         "temperature": max(req.temperature, 0.01),
         "top_p": req.top_p,
         "do_sample": req.temperature > 0,
@@ -1348,66 +1349,12 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
             if has_pageindex_evidence:
                 # Document-aware prompt — when PageIndex evidence is present,
                 # the user is asking about their uploaded documents
-                rag_prompt = f"""<|im_start|>system
-You are Cortex Lab, an intelligent AI assistant with access to the user's uploaded documents and memories.
-The user is asking about content from their uploaded documents. The relevant document content is provided below.
-
-RULES:
-- Answer ONLY based on the document content provided below
-- Be thorough and detailed — include specific facts, names, and numbers from the documents
-- Organize your answer clearly with bullet points or sections if the content covers multiple topics
-- If the documents don't contain the answer, say "I couldn't find that in your uploaded documents"
-- NEVER make up information that isn't in the provided content
-- NEVER add citations like [1] [2] — just speak naturally
-- NEVER generate "Confidence:", "Evidence:", "Answer:" labels
-<|im_end|>
-<|im_start|>user
-{user_message}
-
-Here is the relevant content from your uploaded documents:
-{evidence_block}
-<|im_end|>
-<|im_start|>assistant
-"""
+                rag_prompt = PromptBuilder.pageindex_generation(user_message, evidence_block)
             else:
-                rag_prompt = f"""<|im_start|>system
-You are Cortex Lab, an intelligent personal AI assistant who knows the user well.
-You have access to the user's stored memories below. Use them to answer naturally.
-
-PERSONALITY:
-- Speak warmly and conversationally, like a knowledgeable friend
-- Give direct, confident answers — never say "Based on your stored memories" or "According to evidence"
-- For simple questions (name, email, location), answer in ONE short sentence
-- For broader questions (skills, projects, background), write a flowing natural paragraph — NOT bullet lists
-- Always use "you/your" when referring to the user, NEVER "I/my" (those are the USER's facts, not yours)
-- NEVER add citations like [1] [2] — just speak naturally
-- NEVER generate "Confidence:", "Evidence:", "Answer:" labels
-- NEVER say "belief evolution", "emotion timeline", "key insight", "clarity of scope", or similar generic phrases
-
-If the evidence doesn't answer the question, simply say "I don't have that information yet — feel free to tell me and I'll remember it!"
-<|im_end|>
-<|im_start|>user
-{user_message}
-
-Here is what I know about you:
-{evidence_block}
-<|im_end|>
-<|im_start|>assistant
-"""
+                rag_prompt = PromptBuilder.streaming_rag_generation(user_message, evidence_block)
         else:
             # Greeting / casual conversation — no evidence needed
-            rag_prompt = f"""<|im_start|>system
-You are Cortex Lab, a friendly and warm personal AI assistant.
-The user is greeting you or making casual conversation. Respond naturally and briefly.
-Be cheerful, helpful, and personable. Keep it to 1-2 sentences.
-Do NOT reference memories, evidence, or past conversations.
-Do NOT generate philosophical content, analysis, or "key insights".
-<|im_end|>
-<|im_start|>user
-{user_message}
-<|im_end|>
-<|im_start|>assistant
-"""
+            rag_prompt = PromptBuilder.greeting_response(user_message)
 
         # ── Gemini streaming path — bypass local model entirely ──────────
         if _is_gemini_active():
@@ -1436,7 +1383,7 @@ Do NOT generate philosophical content, analysis, or "key insights".
 
         gen_kwargs = {
             **inputs,
-            "max_new_tokens": min(req.max_tokens, 2048),
+            "max_new_tokens": min(req.max_tokens, 8192),
             "temperature": max(req.temperature, 0.01),
             "top_p": req.top_p,
             "do_sample": req.temperature > 0,
