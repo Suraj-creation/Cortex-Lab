@@ -7,6 +7,7 @@ Hash fallback if no model available.
 """
 
 import numpy as np
+import os
 from typing import List, Optional, Tuple
 from collections import OrderedDict
 import hashlib
@@ -15,7 +16,7 @@ import hashlib
 class EmbeddingModel:
     """
     Sentence embedding model with priority-based loading.
-    BGE-large-en-v1.5 (1024d) → MiniLM-L6-v2 (384d) → hash fallback.
+    BGE-large-en-v1.5 (1024d) → MiniLM-L6-v2 (384d) → Gemini text-embedding-004 (3072d) → hash fallback.
     Supports separate query/passage embedding for asymmetric retrieval.
     """
 
@@ -30,6 +31,7 @@ class EmbeddingModel:
         self.model = None
         self.dimension = 1024
         self._is_bge = False
+        self._gemini_client = None  # Gemini embedding client (fallback)
         # LRU embedding cache for deduplication (§3.6)
         self._embed_cache: OrderedDict[str, np.ndarray] = OrderedDict()
         self._embed_cache_max = 4096
@@ -38,14 +40,12 @@ class EmbeddingModel:
         self._load_model()
 
     def _load_model(self):
-        """Try loading models in priority order."""
+        """Try loading models in priority order: local → Gemini API → hash."""
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError:
-            print("  ⚠ sentence-transformers not installed, using hash embeddings")
-            self.model = None
-            self.dimension = 384
-            self.model_name = "hash-fallback"
+            print("  ⚠ sentence-transformers not installed, trying Gemini embeddings")
+            self._try_gemini_embeddings()
             return
 
         if self.model_name:
@@ -69,10 +69,41 @@ class EmbeddingModel:
             except Exception as e:
                 print(f"  ⚠ {mname} unavailable: {e}")
 
-        print("  ⚠ All embedding models failed, using hash embeddings (384d)")
-        self.model = None
-        self.dimension = 384
-        self.model_name = "hash-fallback"
+        print("  ⚠ All local embedding models failed, trying Gemini embeddings")
+        self._try_gemini_embeddings()
+
+    def _try_gemini_embeddings(self):
+        """Try to use Gemini text-embedding-004 API as embedding fallback."""
+        try:
+            from dotenv import load_dotenv
+            load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "..", "..", ".env"))
+        except ImportError:
+            pass
+        api_key = os.environ.get("GOOGLE_API_KEY", "")
+        if not api_key:
+            print("  ⚠ No GOOGLE_API_KEY — falling back to hash embeddings (384d)")
+            self.model = None
+            self.dimension = 384
+            self.model_name = "hash-fallback"
+            return
+        try:
+            from google import genai
+            self._gemini_client = genai.Client(api_key=api_key)
+            # Verify with a test call
+            result = self._gemini_client.models.embed_content(
+                model="gemini-embedding-001",
+                contents="test",
+            )
+            self.dimension = len(result.embeddings[0].values)
+            self.model_name = "gemini-embedding-001"
+            print(f"  ✓ Gemini embedding API active: gemini-embedding-001 ({self.dimension}d)")
+        except Exception as e:
+            print(f"  ⚠ Gemini embedding init failed: {e}")
+            self._gemini_client = None
+            self.model = None
+            self.dimension = 384
+            self.model_name = "hash-fallback"
 
     def embed(self, text: str) -> np.ndarray:
         """Embed a single text with LRU cache (§3.6)."""
@@ -91,6 +122,8 @@ class EmbeddingModel:
                 text_input = text
             emb = self.model.encode(text_input, normalize_embeddings=True, show_progress_bar=False)
             result = np.array(emb, dtype=np.float32)
+        elif self._gemini_client is not None:
+            result = self._gemini_embed(text)
         else:
             result = self._fallback_embed(text)
 
@@ -108,6 +141,8 @@ class EmbeddingModel:
                 text = f"Represent this sentence for retrieval: {text}"
             emb = self.model.encode(text, normalize_embeddings=True, show_progress_bar=False)
             return np.array(emb, dtype=np.float32)
+        if self._gemini_client is not None:
+            return self._gemini_embed(text)
         return self._fallback_embed(text)
 
     def embed_passage(self, text: str) -> np.ndarray:
@@ -115,6 +150,8 @@ class EmbeddingModel:
         if self.model is not None:
             emb = self.model.encode(text, normalize_embeddings=True, show_progress_bar=False)
             return np.array(emb, dtype=np.float32)
+        if self._gemini_client is not None:
+            return self._gemini_embed(text)
         return self._fallback_embed(text)
 
     def embed_batch(self, texts: List[str], batch_size: int = 32) -> np.ndarray:
@@ -125,7 +162,47 @@ class EmbeddingModel:
             embs = self.model.encode(texts, normalize_embeddings=True,
                                      batch_size=batch_size, show_progress_bar=False)
             return np.array(embs, dtype=np.float32)
+        if self._gemini_client is not None:
+            return self._gemini_embed_batch(texts)
         return np.array([self._fallback_embed(t) for t in texts], dtype=np.float32)
+
+    def _gemini_embed(self, text: str) -> np.ndarray:
+        """Embed a single text via Gemini text-embedding-004 API."""
+        try:
+            result = self._gemini_client.models.embed_content(
+                model="gemini-embedding-001",
+                contents=text,
+            )
+            arr = np.array(result.embeddings[0].values, dtype=np.float32)
+            norm = np.linalg.norm(arr)
+            if norm > 0:
+                arr /= norm
+            return arr
+        except Exception as e:
+            print(f"  ⚠ Gemini embed failed: {e}")
+            return self._fallback_embed(text)
+
+    def _gemini_embed_batch(self, texts: List[str]) -> np.ndarray:
+        """Embed a batch of texts via Gemini API (up to 100 per call)."""
+        all_embs = []
+        for i in range(0, len(texts), 100):
+            batch = texts[i:i+100]
+            try:
+                result = self._gemini_client.models.embed_content(
+                    model="gemini-embedding-001",
+                    contents=batch,
+                )
+                for emb in result.embeddings:
+                    arr = np.array(emb.values, dtype=np.float32)
+                    norm = np.linalg.norm(arr)
+                    if norm > 0:
+                        arr /= norm
+                    all_embs.append(arr)
+            except Exception as e:
+                print(f"  ⚠ Gemini batch embed failed: {e}")
+                for t in batch:
+                    all_embs.append(self._fallback_embed(t))
+        return np.array(all_embs, dtype=np.float32)
 
     def _fallback_embed(self, text: str) -> np.ndarray:
         """Deterministic hash-based embedding fallback."""

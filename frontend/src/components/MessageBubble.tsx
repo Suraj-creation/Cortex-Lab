@@ -361,9 +361,13 @@ export const MessageBubble = memo(function MessageBubble({ message }: Props) {
     </div>
   );
 }, (prev, next) => {
-  // Custom comparator: only re-render if the message actually changed
+  // Custom comparator: re-render when message content OR observability data changes
   return prev.message.id === next.message.id
     && prev.message.content === next.message.content
     && prev.message.isStreaming === next.message.isStreaming
-    && prev.message.thinking === next.message.thinking;
+    && prev.message.thinking === next.message.thinking
+    && prev.message.pipelineTrace === next.message.pipelineTrace
+    && prev.message.evidence === next.message.evidence
+    && prev.message.confidence === next.message.confidence
+    && prev.message.agentsUsed === next.message.agentsUsed;
 });

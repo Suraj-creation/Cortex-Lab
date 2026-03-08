@@ -232,13 +232,17 @@ Output JSON:
 {{"isrel": <1-10>, "issup": <1-10>, "isuse": <1-10>, "verdict": "ACCEPT or REVISE", "reasoning": "brief explanation"}}"""
 
         result = self.extract_json(prompt, max_tokens=200)
-        # Ensure required keys with defaults
+        # Normalize to UPPERCASE keys to match LocalLLM interface contract
+        isrel = min(max(result.get("ISREL", result.get("isrel", 7)), 1), 10)
+        issup = min(max(result.get("ISSUP", result.get("issup", 7)), 1), 10)
+        isuse = min(max(result.get("ISUSE", result.get("isuse", 7)), 1), 10)
         return {
-            "isrel": result.get("isrel", 7),
-            "issup": result.get("issup", 7),
-            "isuse": result.get("isuse", 7),
-            "verdict": result.get("verdict", "ACCEPT"),
-            "reasoning": result.get("reasoning", ""),
+            "ISREL": isrel,
+            "ISSUP": issup,
+            "ISUSE": isuse,
+            "avg_score": (isrel + issup + isuse) / 3.0,
+            "verdict": "ACCEPT" if (isrel + issup + isuse) / 3.0 >= 6.0 else "REVISE",
+            "justification": result.get("reasoning", result.get("justification", "")),
         }
 
     def causal_reason(self, query: str, memories: List[str]) -> str:
@@ -265,11 +269,13 @@ Earlier memory: {old_text[:300]}
 Later memory: {new_text[:300]}
 
 Output JSON:
-{{"change_type": "CONTRADICTION|REFINEMENT|EXPANSION|REINFORCEMENT|NONE", "confidence": 0.0-1.0, "explanation": "brief description of the change"}}"""
+{{"change_type": "CONTRADICTION|REFINEMENT|EXPANSION|REINFORCEMENT|NONE", "old_stance": "brief old stance", "new_stance": "brief new stance", "confidence": 0.0-1.0, "explanation": "brief description of the change"}}"""
 
         result = self.extract_json(prompt, max_tokens=200)
         return {
             "change_type": result.get("change_type", "NONE"),
+            "old_stance": result.get("old_stance", ""),
+            "new_stance": result.get("new_stance", ""),
             "confidence": result.get("confidence", 0.5),
             "explanation": result.get("explanation", ""),
         }

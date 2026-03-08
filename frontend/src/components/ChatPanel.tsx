@@ -3,11 +3,12 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { Send, Square, Settings2, Sparkles, Brain, Zap } from "lucide-react";
 import { ChatMessage as ChatMessageType, ModelStatus, ChatSettings, DEFAULT_SETTINGS, VoiceQueryResult } from "@/lib/types";
-import { sendMessage, streamMessage, ragChat, streamRAGMessage, RAGStreamMeta } from "@/lib/api";
+import { sendMessage, streamMessage, ragChat, streamRAGMessage, RAGStreamMeta, getLLMProvider } from "@/lib/api";
 import { MessageBubble } from "./MessageBubble";
 import { SettingsPanel } from "./SettingsPanel";
 import { EmptyState } from "./EmptyState";
 import { VoiceQueryButton } from "./VoiceQueryButton";
+import { LivePipelineVisualizer } from "./LivePipelineVisualizer";
 
 interface Props {
   modelStatus: ModelStatus;
@@ -29,10 +30,23 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState<ChatSettings>(DEFAULT_SETTINGS);
   const [error, setError] = useState<string | null>(null);
+  const [localModelAvailable, setLocalModelAvailable] = useState(true);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef(false);
+
+  // Auto-detect available LLM providers on mount
+  useEffect(() => {
+    getLLMProvider()
+      .then((info) => {
+        setLocalModelAvailable(info.local_model_loaded);
+        if (!info.local_model_loaded && info.gemini_configured) {
+          setSettings((prev) => ({ ...prev, llmProvider: "gemini" }));
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   // ── Batched streaming buffer (§10.1) ──
   // Accumulate tokens in a ref and flush to state every 50ms to reduce re-renders
@@ -366,6 +380,14 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
               <MessageBubble key={msg.id} message={msg} />
             ))
           )}
+
+          {/* Live Pipeline Visualizer — shows real-time step progress during RAG processing */}
+          {isGenerating && settings.useRAG && (
+            <div className="mt-3 mx-auto max-w-md">
+              <LivePipelineVisualizer isActive={isGenerating && settings.useRAG} />
+            </div>
+          )}
+
           <div ref={messagesEndRef} />
         </div>
       </div>
@@ -464,15 +486,19 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
                   <span>{settings.llmProvider === "gemini" ? "Gemini 2.5 Flash" : "DeepSeek-R1-7B Fine-Tuned"}</span>
                 </div>
                 <button
-                  onClick={() => setSettings((prev) => ({
-                    ...prev,
-                    llmProvider: prev.llmProvider === "local" ? "gemini" : "local",
-                  }))}
+                  onClick={() => {
+                    if (!localModelAvailable && settings.llmProvider === "gemini") return;
+                    setSettings((prev) => ({
+                      ...prev,
+                      llmProvider: prev.llmProvider === "local" ? "gemini" : "local",
+                    }));
+                  }}
+                  title={!localModelAvailable ? "Local model not loaded — Gemini only" : "Toggle LLM provider"}
                   className={`flex items-center gap-1 px-2 py-0.5 rounded-md transition-all text-[10px] font-medium ${
                     settings.llmProvider === "gemini"
                       ? "bg-blue-50 text-blue-600 border border-blue-200"
                       : "bg-violet-50 text-violet-600 border border-violet-200"
-                  }`}
+                  } ${!localModelAvailable ? "opacity-60 cursor-not-allowed" : ""}`}
                 >
                   <Zap size={10} />
                   {settings.llmProvider === "gemini" ? "GEMINI" : "LOCAL"}

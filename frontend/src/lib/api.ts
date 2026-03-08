@@ -1,4 +1,4 @@
-import { ChatSettings, DEFAULT_SETTINGS, MemoryObject, GraphData, RAGStats, EvidenceCard, AmbientState, AmbientConfig, ConversationRecord, VoiceQueryResult, ConversationTurn, PipelineTrace, TracesResponse } from "./types";
+import { ChatSettings, DEFAULT_SETTINGS, MemoryObject, GraphData, RAGStats, EvidenceCard, AmbientState, AmbientConfig, ConversationRecord, VoiceQueryResult, ConversationTurn, PipelineTrace, TracesResponse, VoiceProviders, VoiceProviderType, LivePipelineEvent } from "./types";
 
 const API_BASE = "/api";
 
@@ -516,6 +516,40 @@ export async function voiceQuery(audioBase64: string): Promise<VoiceQueryResult>
   return res.json();
 }
 
+// ── Voice Provider Management ───────────────────────────────────
+
+export async function getVoiceProviders(): Promise<VoiceProviders> {
+  const res = await fetch(`${API_BASE}/ambient/voice-providers`);
+  if (!res.ok) throw new Error(`Failed to fetch voice providers: ${res.status}`);
+  return res.json();
+}
+
+export async function setSTTProvider(provider: VoiceProviderType): Promise<{ success: boolean; stt_provider: string }> {
+  const res = await fetch(`${API_BASE}/ambient/stt-provider`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Unknown error" }));
+    throw new Error(err.detail || `Failed to set STT provider: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function setTTSProvider(provider: VoiceProviderType): Promise<{ success: boolean; tts_provider: string }> {
+  const res = await fetch(`${API_BASE}/ambient/tts-provider`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Unknown error" }));
+    throw new Error(err.detail || `Failed to set TTS provider: ${res.status}`);
+  }
+  return res.json();
+}
+
 // ── Pipeline Observability ──────────────────────────────────────
 
 export async function getPipelineTraces(limit = 20): Promise<TracesResponse> {
@@ -527,6 +561,66 @@ export async function getPipelineTraces(limit = 20): Promise<TracesResponse> {
 export async function getPipelineTraceById(traceId: string): Promise<PipelineTrace> {
   const res = await fetch(`${API_BASE}/rag/traces/${traceId}`);
   if (!res.ok) throw new Error(`Failed to fetch trace: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Subscribe to real-time pipeline events via SSE.
+ * Returns an AbortController — call .abort() to stop.
+ */
+export function subscribePipelineEvents(
+  onEvent: (event: LivePipelineEvent) => void,
+  onError?: (err: Error) => void,
+): AbortController {
+  const controller = new AbortController();
+
+  (async () => {
+    try {
+      const res = await fetch(`${BACKEND_DIRECT}/rag/pipeline-events`, {
+        signal: controller.signal,
+        headers: { Accept: "text/event-stream" },
+      });
+      if (!res.ok || !res.body) {
+        onError?.(new Error(`SSE connect failed: ${res.status}`));
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const payload = JSON.parse(line.slice(6));
+              onEvent(payload as LivePipelineEvent);
+            } catch { /* skip malformed */ }
+          }
+        }
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      onError?.(err instanceof Error ? err : new Error(String(err)));
+    }
+  })();
+
+  return controller;
+}
+
+/**
+ * Fetch aggregate observability metrics.
+ */
+export async function getObservabilityMetrics(): Promise<Record<string, unknown>> {
+  const res = await fetch(`${BACKEND_DIRECT}/rag/observability/metrics`);
+  if (!res.ok) throw new Error(`Failed to fetch metrics: ${res.status}`);
   return res.json();
 }
 

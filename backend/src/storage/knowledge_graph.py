@@ -37,6 +37,10 @@ class KnowledgeGraph:
         self._name_index: Dict[str, str] = {}   # lowercase_name -> entity_id
         self._alias_index: Dict[str, str] = {}  # lowercase_alias -> entity_id
 
+        # Auto-save: save after every N mutations to prevent data loss on crash
+        self._mutation_count = 0
+        self._auto_save_interval = 20  # Save every 20 mutations
+
         if HAS_NX:
             self.graph = nx.DiGraph()
             print("  ✓ Knowledge graph initialized (NetworkX)")
@@ -73,6 +77,7 @@ class KnowledgeGraph:
         self._name_index[entity.canonical_name.lower()] = entity.id
         for alias in entity.aliases:
             self._alias_index[alias.lower()] = entity.id
+        self._maybe_auto_save()
 
     def add_edge(self, edge: GraphEdge):
         """Add or update a relationship edge."""
@@ -100,6 +105,7 @@ class KnowledgeGraph:
                 "weight": edge.weight,
                 "memory_ids": edge.memory_ids,
             })
+        self._maybe_auto_save()
 
     def get_neighbors(self, entity_id: str, max_hops: int = 2) -> List[Dict]:
         """Get all entities within max_hops of the given entity."""
@@ -329,6 +335,16 @@ class KnowledgeGraph:
                 "density": round(nx.density(self.graph), 4) if self.graph.number_of_nodes() > 0 else 0,
             }
         return {"nodes": len(self._nodes), "edges": len(self._edges)}
+
+    def _maybe_auto_save(self):
+        """Auto-save after every N mutations to prevent data loss on crash."""
+        self._mutation_count += 1
+        if self._mutation_count >= self._auto_save_interval:
+            self._mutation_count = 0
+            try:
+                self.save()
+            except Exception as e:
+                print(f"  ⚠ KG auto-save failed: {e}")
 
     def save(self):
         if self.graph is not None:

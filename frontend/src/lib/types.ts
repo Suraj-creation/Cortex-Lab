@@ -41,6 +41,17 @@ export interface QueryAnalysis {
 
 // ── Pipeline Observability Types ────────────────────────────────
 
+export interface LivePipelineEvent {
+  event_type: "pipeline_start" | "step_start" | "step_complete" | "step_skip" | "pipeline_complete" | "metric";
+  step_name: string;
+  step_type: string;
+  status: "running" | "completed" | "skipped" | "error";
+  duration_ms: number;
+  details: Record<string, unknown>;
+  timestamp: number;
+  trace_id: string;
+}
+
 export interface PipelineStep {
   step_name: string;
   step_type: string;
@@ -260,6 +271,19 @@ export type AmbientStatusType =
   | "paused"
   | "error";
 
+export type VoiceProviderType = "traditional" | "gemini";
+
+export interface VoiceProviders {
+  stt_provider: VoiceProviderType;
+  tts_provider: VoiceProviderType;
+  gemini_available: boolean;
+  traditional_stt_available: boolean;
+  traditional_tts_available: boolean;
+  gemini_stt_available: boolean;
+  gemini_tts_available: boolean;
+  gemini_tts_voices: string[];
+}
+
 export interface AmbientState {
   status: AmbientStatusType;
   uptime_seconds: number;
@@ -269,6 +293,9 @@ export interface AmbientState {
   audio_level: number;
   speech_segments: number;
   transcriptions: number;
+  stt_provider: VoiceProviderType;
+  tts_provider: VoiceProviderType;
+  gemini_available: boolean;
   vad?: {
     threshold: number;
     speech_active: boolean;
@@ -306,6 +333,8 @@ export interface AmbientConfig {
   auto_ingest: boolean;
   silence_timeout_s: number;
   min_speech_ms: number;
+  stt_provider: VoiceProviderType;
+  tts_provider: VoiceProviderType;
   tts_enabled: boolean;
   tts_voice: string;
   tts_speed: number;
@@ -313,6 +342,7 @@ export interface AmbientConfig {
   whisper_device: string;
   whisper_language: string | null;
   record_raw_audio: boolean;
+  gemini_tts_voice: string;
 }
 
 export interface ConversationTurn {
@@ -341,6 +371,8 @@ export interface VoiceQueryResult {
   audio_base64: string | null;
   language: string;
   stt_confidence: number;
+  stt_provider?: VoiceProviderType;
+  tts_provider?: VoiceProviderType;
 }
 
 // ── Observability Analytics Types ───────────────────────────────

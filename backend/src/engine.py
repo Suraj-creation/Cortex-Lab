@@ -286,12 +286,17 @@ class CortexRAGEngine:
 
         # Initialize Ambient Voice Service (lazy — models load on first start)
         try:
+            import os
+            gemini_key_for_voice = os.environ.get("GOOGLE_API_KEY", "") or None
             from src.ambient import AmbientService
             self.ambient_service = AmbientService(
                 ingestion_pipeline=self.ingestion,
                 data_dir=self.data_dir,
+                gemini_api_key=gemini_key_for_voice,
             )
             print("  🎙️  Ambient voice service initialized (idle, ready to start)")
+            if gemini_key_for_voice:
+                print("     Gemini STT/TTS available as alternative provider")
         except Exception as e:
             print(f"  ⚠ Ambient service init skipped: {e}")
             self.ambient_service = None
@@ -565,7 +570,7 @@ class CortexRAGEngine:
             "evidence": [
                 {
                     # PageIndex evidence gets more space (document answers are longer)
-                    "content": e.memory.content[:2000] if e.memory.source == "pageindex" else e.memory.content[:300],
+                    "content": e.memory.content[:2000] if e.memory.source == "pageindex" else e.memory.content[:600],
                     "score": round(e.score, 3),
                     "channel": e.channel,
                     "timestamp": e.memory.timestamp.isoformat(),
@@ -573,7 +578,7 @@ class CortexRAGEngine:
                     "emotion": e.memory.emotion.value,
                     "entities": e.memory.entities[:5],
                 }
-                for e in response.evidence[:5]
+                for e in response.evidence[:10]
             ],
             "agents_used": response.agents_used,
             "confidence": round(response.confidence, 3),
@@ -671,7 +676,7 @@ class CortexRAGEngine:
             "evidence": [
                 {
                     # PageIndex evidence gets more space (document answers are longer)
-                    "content": e.memory.content[:2000] if e.memory.source == "pageindex" else e.memory.content[:300],
+                    "content": e.memory.content[:2000] if e.memory.source == "pageindex" else e.memory.content[:600],
                     "score": round(e.score, 3),
                     "channel": e.channel,
                     "timestamp": e.memory.timestamp.isoformat(),
