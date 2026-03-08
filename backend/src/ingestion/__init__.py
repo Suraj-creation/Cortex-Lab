@@ -22,7 +22,7 @@ from src.models import (
     CausalMemoryObject, MemoryType, EmotionLabel, EntityNode, GraphEdge
 )
 from src.models.embeddings import EmbeddingModel
-from src.llm import LocalLLM
+from src.llm import LocalLLM, LLMProvider
 from src.storage.vector_store import VectorStore
 from src.storage.metadata_store import MetadataStore
 from src.storage.knowledge_graph import KnowledgeGraph
@@ -47,7 +47,7 @@ class MemoryIngestionPipeline:
     11. Belief evolution detection (Stage 5 fine-tuning)
     """
 
-    def __init__(self, llm: LocalLLM, embedding_model: EmbeddingModel,
+    def __init__(self, llm: 'LLMProvider', embedding_model: EmbeddingModel,
                  vector_store: VectorStore, metadata_store: MetadataStore,
                  knowledge_graph: KnowledgeGraph):
         self.llm = llm

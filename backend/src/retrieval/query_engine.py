@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Tuple
 
 from src.models import MemoryQuery, QueryIntent, RoutingStrategy
 from src.models.embeddings import EmbeddingModel
-from src.llm import LocalLLM
+from src.llm import LocalLLM, LLMProvider
 from src.prompts import PromptBuilder, sanitize
 
 
@@ -373,7 +373,7 @@ class QueryTransformer:
     - Query Decomposition
     """
 
-    def __init__(self, llm: LocalLLM, embedding_model: EmbeddingModel):
+    def __init__(self, llm: 'LLMProvider', embedding_model: EmbeddingModel):
         self.llm = llm
         self.embeddings = embedding_model
 

@@ -1121,6 +1121,15 @@ class LLMProvider:
     def has_gemini(self) -> bool:
         return self.gemini_llm is not None
 
+    @property
+    def has_active_model(self) -> bool:
+        """True if the active LLM backend has a usable model.
+        For LocalLLM: checks model is not None (i.e. actually loaded).
+        For GeminiLLM: checks model sentinel is set (always True if initialized).
+        """
+        active = self.active_llm
+        return active is not None and getattr(active, 'model', None) is not None
+
     def set_provider(self, name: str):
         if name in ("local", "gemini"):
             self.provider = name
