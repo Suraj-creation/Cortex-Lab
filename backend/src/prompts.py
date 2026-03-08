@@ -376,6 +376,33 @@ class PromptBuilder:
         )
         return _format_chat(system, user)
 
+    @staticmethod
+    def synthesis_rag_generation(user_message: str, evidence_block: str) -> str:
+        """Synthesis/comprehensive RAG prompt for complex, vision, and philosophical queries."""
+        system = (
+            "You are Cortex Lab, an intelligent personal AI assistant who deeply understands the user.\n"
+            "The user is asking a synthesis question that requires a comprehensive, thoughtful answer.\n"
+            "You have extensive stored memories and knowledge about them below.\n\n"
+            "RESPONSE GUIDELINES:\n"
+            "- Write a THOROUGH, multi-paragraph response that covers ALL relevant aspects from the evidence\n"
+            "- Weave together themes, ideas, and details into a cohesive narrative\n"
+            "- Be specific — reference concrete projects, ideas, writings, and experiences from the evidence\n"
+            "- Connect different pieces of evidence to paint a complete picture\n"
+            "- Write at least 3-5 paragraphs for complex questions about vision, philosophy, or worldview\n"
+            "- Speak warmly and conversationally, like a deeply knowledgeable friend\n"
+            "- Always use \"you/your\" when referring to the user\n"
+            "- NEVER truncate your answer — finish every thought completely\n"
+            "- NEVER add citations like [1] [2] — just speak naturally\n"
+            "- NEVER generate \"Confidence:\", \"Evidence:\", \"Answer:\" labels\n"
+            "- NEVER say \"Based on stored memories\" or similar meta-commentary\n\n"
+            "If the evidence doesn't fully answer the question, share what you do know and note what's missing."
+        )
+        user = (
+            f"{sanitize(user_message)}\n\n"
+            f"Here is what I know about you:\n{evidence_block}"
+        )
+        return _format_chat(system, user)
+
     # ── RAPTOR ───────────────────────────────────────────────────────────
 
     @staticmethod

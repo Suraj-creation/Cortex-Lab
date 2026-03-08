@@ -116,11 +116,15 @@ class MultiLevelCache:
 
     def get_stats(self) -> Dict:
         total = sum(self._hits.values())
+        exact_hits = self._hits["exact"]
+        semantic_hits = self._hits["semantic"]
         return {
             "exact_cache_size": len(self._exact_cache),
             "semantic_cache_size": len(self._semantic_cache),
             "hits": dict(self._hits),
+            "total_hits": exact_hits + semantic_hits,
+            "total_queries": total,
             "hit_rate": round(
-                (self._hits["exact"] + self._hits["semantic"]) / max(total, 1), 3
+                (exact_hits + semantic_hits) / max(total, 1), 3
             ),
         }

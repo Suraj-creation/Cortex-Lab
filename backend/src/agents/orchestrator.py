@@ -28,6 +28,8 @@ from src.retrieval.hybrid_retriever import HybridRetriever
 from src.agents.specialized import (
     TimelineAgent, CausalAgent, ReflectionAgent, PlanningAgent, ArbitrationAgent
 )
+from src.observability import pipeline_events
+from src.compression import ContextCompressor
 
 
 # ─── Tool Registry for Function Calling (Stage 13) ──────────────────────────
@@ -87,6 +89,9 @@ class AgentOrchestrator:
         self.analyzer = analyzer
         self.transformer = transformer
 
+        # Context compression for evidence (Gap 2.3: LLMLingua-style)
+        self.compressor = ContextCompressor(target_ratio=0.5, min_sentences=2)
+
         # Initialize specialized agents
         self.agents = {
             "timeline": TimelineAgent(llm, retriever),
@@ -115,16 +120,25 @@ class AgentOrchestrator:
         """
         t0 = time.time()
         trace = PipelineTrace(query=raw_query)
+        trace_id = trace.trace_id  # Alias for event emissions
 
         print(f"\n{'='*60}")
         print(f"  🧠 Orchestrator: Processing query")
         print(f"  📝 Query: {raw_query[:80]}...")
         print(f"{'='*60}")
 
+        # Emit pipeline start event for real-time visualization
+        await pipeline_events.emit_pipeline_start(trace_id, raw_query)
+
         # 1. Analyze query (keyword heuristics — fast, no LLM call)
+        await pipeline_events.emit_step_start(trace_id, "Query Analysis", "query_analysis")
         t_step = time.time()
         query = self.analyzer.analyze(raw_query)
         analysis_ms = (time.time() - t_step) * 1000
+        await pipeline_events.emit_step_complete(trace_id, "Query Analysis", "query_analysis", analysis_ms, {
+            "intent": query.intent.value, "complexity": round(query.complexity, 2), "routing": query.routing.value,
+            "entities_found": len(query.entities),
+        })
 
         trace.query_analysis = {
             "intent": query.intent.value,
@@ -153,10 +167,14 @@ class AgentOrchestrator:
         # Skip LLM routing for clear-cut queries to save 2-4s
         llm_routed = False
         if 0.35 < query.complexity < 0.65 and self.llm.model is not None:
+            await pipeline_events.emit_step_start(trace_id, "LLM Routing", "routing")
             t_step = time.time()
             query = await self._llm_route_query(query, session_context)
             llm_route_ms = (time.time() - t_step) * 1000
             llm_routed = True
+            await pipeline_events.emit_step_complete(trace_id, "LLM Routing", "routing", llm_route_ms, {
+                "refined_intent": query.intent.value, "refined_complexity": round(query.complexity, 2),
+            })
             trace.add_step(PipelineStep(
                 step_name="LLM Routing",
                 step_type="routing",
@@ -169,6 +187,7 @@ class AgentOrchestrator:
                 }
             ))
         else:
+            await pipeline_events.emit_step_skip(trace_id, "LLM Routing", "routing", "keyword_confident")
             trace.add_step(PipelineStep(
                 step_name="LLM Routing",
                 step_type="routing",
@@ -178,9 +197,17 @@ class AgentOrchestrator:
             ))
 
         # 2. Transform query (add multi-query, HyDE, etc.)
+        await pipeline_events.emit_step_start(trace_id, "Query Transformation", "query_transform")
         t_step = time.time()
         query = self.transformer.transform(query)
         transform_ms = (time.time() - t_step) * 1000
+
+        total_variants = len(query.multi_queries) + (1 if query.hyde_answer else 0) + (1 if query.step_back_query else 0) + len(query.sub_queries)
+        await pipeline_events.emit_step_complete(trace_id, "Query Transformation", "query_transform", transform_ms, {
+            "total_variants": total_variants,
+            "multi_queries": len(query.multi_queries),
+            "hyde_generated": bool(query.hyde_answer),
+        })
 
         trace.query_transform = QueryTransformTrace(
             original_query=raw_query,
@@ -188,7 +215,7 @@ class AgentOrchestrator:
             hyde_answer=query.hyde_answer,
             step_back_query=query.step_back_query,
             sub_queries=query.sub_queries,
-            total_variants=len(query.multi_queries) + (1 if query.hyde_answer else 0) + (1 if query.step_back_query else 0) + len(query.sub_queries),
+            total_variants=total_variants,
             duration_ms=transform_ms,
         )
         trace.add_step(PipelineStep(
@@ -231,6 +258,7 @@ class AgentOrchestrator:
                 ))
 
         # 3. Route based on complexity (skip if function calling handled it)
+        await pipeline_events.emit_step_start(trace_id, "Agent Execution", "agent_execution")
         t_step = time.time()
         if tool_response:
             response = tool_response
@@ -245,6 +273,50 @@ class AgentOrchestrator:
             response = await self._handle_multi_step(query)
             route_label = "MULTI_STEP"
         route_ms = (time.time() - t_step) * 1000
+        await pipeline_events.emit_step_complete(trace_id, f"Agent Execution ({route_label})", "agent_execution", route_ms, {
+            "routing": route_label,
+            "agents": response.agents_used,
+            "evidence_count": len(response.evidence),
+            "initial_confidence": round(response.confidence, 3),
+        })
+
+        # 3b. Context Compression — reduce evidence noise before LLM generation
+        compression_metrics = None
+        if response.evidence and len(response.evidence) > 2:
+            await pipeline_events.emit_step_start(trace_id, "Context Compression", "compression")
+            t_comp = time.time()
+            evidence_texts = [r.memory.content for r in response.evidence]
+            compressed_texts, compression_metrics = self.compressor.compress_evidence(
+                query.raw_query, evidence_texts,
+                entities=query.entities,
+                max_total_chars=4000 if query.complexity >= 0.6 else 2500,
+            )
+            # Update evidence with compressed content
+            for i, r in enumerate(response.evidence):
+                if i < len(compressed_texts):
+                    r.evidence_text = compressed_texts[i]
+            comp_ms = (time.time() - t_comp) * 1000
+            await pipeline_events.emit_step_complete(trace_id, "Context Compression", "compression", comp_ms, compression_metrics or {})
+            await pipeline_events.emit_metric(trace_id, "compression_invocations", 1)
+
+            trace.add_step(PipelineStep(
+                step_name="Context Compression",
+                step_type="compression",
+                status="completed",
+                duration_ms=comp_ms,
+                details=compression_metrics or {},
+            ))
+
+        # 3c. Memory Importance Boost — boost retrieval scores by importance
+        if response.evidence:
+            for r in response.evidence:
+                importance = getattr(r.memory, 'importance', 0.5)
+                if importance > 0.6:
+                    boost = 0.05 * (importance - 0.5)
+                    r.score = min(r.score + boost, 1.0)
+            # Re-sort by boosted score
+            response.evidence.sort(key=lambda r: r.score, reverse=True)
+            await pipeline_events.emit_metric(trace_id, "importance_boosts_applied", 1)
 
         # Collect retrieval channel traces
         if hasattr(self.retriever, '_last_channel_traces'):
@@ -276,47 +348,61 @@ class AgentOrchestrator:
             }
         ))
 
+        # Attach trace BEFORE CRAG/Self-RAG/FLARE so they can write their evaluations
+        response.pipeline_trace = trace
+
         # 4. CRAG quality evaluation (fast — no LLM call, just scoring)
+        await pipeline_events.emit_step_start(trace_id, "CRAG Quality Evaluation", "crag")
         t_step = time.time()
         pre_crag_confidence = response.confidence
         response = await self._crag_evaluate(query, response)
         crag_ms = (time.time() - t_step) * 1000
 
+        crag_eval = trace.crag_evaluation
+        crag_details = {
+            "verdict": crag_eval.verdict if crag_eval else "no_evidence",
+            "quality_score": round(crag_eval.quality_score, 3) if crag_eval else 0,
+            "avg_score": round(crag_eval.avg_evidence_score, 3) if crag_eval else 0,
+            "max_score": round(crag_eval.max_evidence_score, 3) if crag_eval else 0,
+            "entity_coverage": round(crag_eval.entity_coverage, 3) if crag_eval else 0,
+            "evidence_count": crag_eval.evidence_count if crag_eval else 0,
+            "confidence_delta": round(response.confidence - pre_crag_confidence, 3),
+        }
         trace.add_step(PipelineStep(
             step_name="CRAG Quality Evaluation",
             step_type="crag",
             status="completed",
             duration_ms=crag_ms,
-            details={
-                "verdict": trace.crag_evaluation.verdict if trace.crag_evaluation else "no_evidence",
-                "quality_score": trace.crag_evaluation.quality_score if trace.crag_evaluation else 0,
-                "confidence_delta": round(response.confidence - pre_crag_confidence, 3),
-            }
+            details=crag_details,
         ))
+        await pipeline_events.emit_step_complete(trace_id, "CRAG Quality Evaluation", "crag", crag_ms, crag_details)
 
-        # 5. Self-RAG reflection — ONLY if evidence quality is poor
-        # Skip entirely if confidence is already good (saves 3-6s)
-        if (response.evidence and response.confidence < 0.55
+        # 5. Self-RAG reflection — trigger for moderate confidence answers
+        # Threshold 0.80: most single-agent responses land at 0.70-0.85
+        if (response.evidence and response.confidence < 0.80
                 and len(response.answer.strip()) > 20):
+            await pipeline_events.emit_step_start(trace_id, "Self-RAG Critique", "self_rag")
             t_step = time.time()
             pre_selfrag_confidence = response.confidence
             response = await self._self_rag_critique(query, response)
             selfrag_ms = (time.time() - t_step) * 1000
 
+            selfrag_details = {
+                "verdict": trace.self_rag_critique.verdict if trace.self_rag_critique else "unknown",
+                "confidence_delta": round(response.confidence - pre_selfrag_confidence, 3),
+                "revision_applied": trace.self_rag_critique.revision_applied if trace.self_rag_critique else False,
+            }
             trace.add_step(PipelineStep(
                 step_name="Self-RAG Critique",
                 step_type="self_rag",
                 status="completed",
                 duration_ms=selfrag_ms,
-                details={
-                    "verdict": trace.self_rag_critique.verdict if trace.self_rag_critique else "unknown",
-                    "confidence_delta": round(response.confidence - pre_selfrag_confidence, 3),
-                    "revision_applied": trace.self_rag_critique.revision_applied if trace.self_rag_critique else False,
-                }
+                details=selfrag_details,
             ))
+            await pipeline_events.emit_step_complete(trace_id, "Self-RAG Critique", "self_rag", selfrag_ms, selfrag_details)
         else:
             skip_reason = "no_evidence" if not response.evidence else (
-                "confidence_sufficient" if response.confidence >= 0.55 else "answer_too_short"
+                "confidence_sufficient" if response.confidence >= 0.80 else "answer_too_short"
             )
             trace.add_step(PipelineStep(
                 step_name="Self-RAG Critique",
@@ -325,29 +411,33 @@ class AgentOrchestrator:
                 duration_ms=0,
                 details={"reason": skip_reason, "confidence": round(response.confidence, 3)}
             ))
+            await pipeline_events.emit_step_skip(trace_id, "Self-RAG Critique", "self_rag", skip_reason)
 
-        # 6. FLARE — ONLY for very low confidence answers
-        # This is the most expensive step; skip unless truly needed
-        if (response.confidence < 0.4 and response.evidence
+        # 6. FLARE — for low confidence answers after Self-RAG
+        # Triggers when confidence remains below 0.55 after Self-RAG
+        if (response.confidence < 0.55 and response.evidence
                 and len(response.answer.strip()) > 20):
+            await pipeline_events.emit_step_start(trace_id, "FLARE Active Retrieval", "flare")
             t_step = time.time()
             pre_flare_confidence = response.confidence
             response = await self._flare_active_retrieval(query, response)
             flare_ms = (time.time() - t_step) * 1000
 
+            flare_details = {
+                "new_evidence": trace.flare_trace.new_evidence_count if trace.flare_trace else 0,
+                "answer_revised": trace.flare_trace.answer_revised if trace.flare_trace else False,
+                "confidence_delta": round(response.confidence - pre_flare_confidence, 3),
+            }
             trace.add_step(PipelineStep(
                 step_name="FLARE Active Retrieval",
                 step_type="flare",
                 status="completed",
                 duration_ms=flare_ms,
-                details={
-                    "new_evidence": trace.flare_trace.new_evidence_count if trace.flare_trace else 0,
-                    "answer_revised": trace.flare_trace.answer_revised if trace.flare_trace else False,
-                    "confidence_delta": round(response.confidence - pre_flare_confidence, 3),
-                }
+                details=flare_details,
             ))
+            await pipeline_events.emit_step_complete(trace_id, "FLARE Active Retrieval", "flare", flare_ms, flare_details)
         else:
-            skip_reason = "confidence_sufficient" if response.confidence >= 0.4 else (
+            skip_reason = "confidence_sufficient" if response.confidence >= 0.55 else (
                 "no_evidence" if not response.evidence else "answer_too_short"
             )
             trace.add_step(PipelineStep(
@@ -357,6 +447,7 @@ class AgentOrchestrator:
                 duration_ms=0,
                 details={"reason": skip_reason}
             ))
+            await pipeline_events.emit_step_skip(trace_id, "FLARE Active Retrieval", "flare", skip_reason)
 
         response.query_analysis = query
         response.processing_time_ms = (time.time() - t0) * 1000
@@ -376,6 +467,14 @@ class AgentOrchestrator:
         trace.cache_status = {"hit": False, "level": None}
         response.pipeline_trace = trace
 
+        # Emit pipeline complete event
+        await pipeline_events.emit_pipeline_complete(trace_id, response.processing_time_ms, {
+            "confidence": round(response.confidence, 3),
+            "evidence_count": len(response.evidence),
+            "agents_used": response.agents_used,
+            "steps_total": len(trace.steps),
+        })
+
         print(f"\n  ✅ Response ready: confidence={response.confidence:.2f}, "
               f"agents={response.agents_used}, time={response.processing_time_ms:.0f}ms\n")
 
@@ -390,24 +489,29 @@ class AgentOrchestrator:
         """
         t0 = time.time()
         trace = PipelineTrace(query=raw_query)
+        trace_id = raw_query  # Use query as trace identifier for events
 
         print(f"\n{'='*60}")
         print(f"  🔍 Orchestrator: Retrieve-only mode")
         print(f"  📝 Query: {raw_query[:80]}...")
         print(f"{'='*60}")
 
+        await pipeline_events.emit_pipeline_start(trace_id, raw_query)
+
         # 1. Analyze query
+        await pipeline_events.emit_step_start(trace_id, "Query Analysis", "query_analysis")
         t_step = time.time()
         query = self.analyzer.analyze(raw_query)
         analysis_ms = (time.time() - t_step) * 1000
 
-        trace.query_analysis = {
+        analysis_details = {
             "intent": query.intent.value,
             "complexity": round(query.complexity, 2),
             "routing": query.routing.value,
             "entities": query.entities,
             "topics": query.topics,
         }
+        trace.query_analysis = analysis_details
         trace.add_step(PipelineStep(
             step_name="Query Analysis",
             step_type="query_analysis",
@@ -415,20 +519,26 @@ class AgentOrchestrator:
             duration_ms=analysis_ms,
             details={"intent": query.intent.value, "complexity": round(query.complexity, 2), "routing": query.routing.value}
         ))
+        await pipeline_events.emit_step_complete(trace_id, "Query Analysis", "query_analysis", analysis_ms, analysis_details)
 
         # 1b. LLM routing only for ambiguous queries
         if 0.35 < query.complexity < 0.65 and self.llm.model is not None:
+            await pipeline_events.emit_step_start(trace_id, "LLM Routing", "routing")
             t_step = time.time()
             query = await self._llm_route_query(query, session_context)
+            routing_ms = (time.time() - t_step) * 1000
             trace.add_step(PipelineStep(
                 step_name="LLM Routing", step_type="routing", status="completed",
-                duration_ms=(time.time() - t_step) * 1000,
+                duration_ms=routing_ms,
                 details={"refined_intent": query.intent.value}
             ))
+            await pipeline_events.emit_step_complete(trace_id, "LLM Routing", "routing", routing_ms, {"refined_intent": query.intent.value})
         else:
             trace.add_step(PipelineStep(step_name="LLM Routing", step_type="routing", status="skipped"))
+            await pipeline_events.emit_step_skip(trace_id, "LLM Routing", "routing", "complexity_outside_range")
 
         # 2. Transform query
+        await pipeline_events.emit_step_start(trace_id, "Query Transformation", "query_transform")
         t_step = time.time()
         query = self.transformer.transform(query)
         transform_ms = (time.time() - t_step) * 1000
@@ -447,10 +557,12 @@ class AgentOrchestrator:
             duration_ms=transform_ms,
             details={"total_variants": trace.query_transform.total_variants}
         ))
+        await pipeline_events.emit_step_complete(trace_id, "Query Transformation", "query_transform", transform_ms, {"total_variants": trace.query_transform.total_variants})
 
         trace.routing_decision = query.routing.value
 
         # 3. Retrieve evidence (no LLM generation)
+        await pipeline_events.emit_step_start(trace_id, "Evidence Retrieval", "agent_execution")
         t_step = time.time()
         if query.routing == RoutingStrategy.NO_RETRIEVAL:
             response = OrchestratorResponse(
@@ -523,28 +635,58 @@ class AgentOrchestrator:
                 "duration_ms": retrieval_trace.get("rerank_ms", 0),
             }
 
+        retrieval_details = {"evidence_count": len(response.evidence), "mode": "retrieve_only"}
         trace.add_step(PipelineStep(
             step_name="Evidence Retrieval", step_type="agent_execution", status="completed",
             duration_ms=retrieve_ms,
-            details={"evidence_count": len(response.evidence), "mode": "retrieve_only"}
+            details=retrieval_details,
         ))
+        await pipeline_events.emit_step_complete(trace_id, "Evidence Retrieval", "agent_execution", retrieve_ms, retrieval_details)
+
+        # 3b. Context Compression (retrieve-only mode)
+        if response.evidence:
+            await pipeline_events.emit_step_start(trace_id, "Context Compression", "compression")
+            t_comp = time.time()
+            evidence_texts = [r.memory.content for r in response.evidence]
+            entities = query.entities if hasattr(query, 'entities') else []
+            compressed_texts, comp_metrics = self.compressor.compress_evidence(
+                query.raw_query, evidence_texts, entities
+            )
+            for i, r in enumerate(response.evidence):
+                if i < len(compressed_texts):
+                    r.memory.content = compressed_texts[i]
+            comp_ms = (time.time() - t_comp) * 1000
+            trace.add_step(PipelineStep(
+                step_name="Context Compression", step_type="compression", status="completed",
+                duration_ms=comp_ms,
+                details=comp_metrics,
+            ))
+            await pipeline_events.emit_step_complete(trace_id, "Context Compression", "compression", comp_ms, comp_metrics)
+            await pipeline_events.emit_metric(trace_id, "compression_ratio", comp_metrics.get("compression_ratio", 1.0))
+        else:
+            await pipeline_events.emit_step_skip(trace_id, "Context Compression", "compression", "no_evidence")
 
         # 4. CRAG quality evaluation (fast — no LLM call)
+        await pipeline_events.emit_step_start(trace_id, "CRAG Quality Evaluation", "crag")
         t_step = time.time()
         response = await self._crag_evaluate(query, response)
         crag_ms = (time.time() - t_step) * 1000
 
+        crag_details = {"verdict": trace.crag_evaluation.verdict if trace.crag_evaluation else "no_evidence"}
         trace.add_step(PipelineStep(
             step_name="CRAG Quality Evaluation", step_type="crag", status="completed",
             duration_ms=crag_ms,
-            details={"verdict": trace.crag_evaluation.verdict if trace.crag_evaluation else "no_evidence"}
+            details=crag_details,
         ))
+        await pipeline_events.emit_step_complete(trace_id, "CRAG Quality Evaluation", "crag", crag_ms, crag_details)
 
         # Self-RAG and FLARE are skipped in retrieve-only mode
         trace.add_step(PipelineStep(step_name="Self-RAG Critique", step_type="self_rag", status="skipped",
                                      details={"reason": "retrieve_only_mode"}))
+        await pipeline_events.emit_step_skip(trace_id, "Self-RAG Critique", "self_rag", "retrieve_only_mode")
         trace.add_step(PipelineStep(step_name="FLARE Active Retrieval", step_type="flare", status="skipped",
                                      details={"reason": "retrieve_only_mode"}))
+        await pipeline_events.emit_step_skip(trace_id, "FLARE Active Retrieval", "flare", "retrieve_only_mode")
 
         response.query_analysis = query
         response.processing_time_ms = (time.time() - t0) * 1000
@@ -555,6 +697,14 @@ class AgentOrchestrator:
         trace.evidence_count = len(response.evidence)
         trace.cache_status = {"hit": False, "level": None}
         response.pipeline_trace = trace
+
+        # Emit pipeline complete
+        await pipeline_events.emit_pipeline_complete(trace_id, response.processing_time_ms, {
+            "confidence": round(response.confidence, 3),
+            "evidence_count": len(response.evidence),
+            "mode": "retrieve_only",
+            "steps_total": len(trace.steps),
+        })
 
         print(f"\n  ✅ Retrieval ready: confidence={response.confidence:.2f}, "
               f"evidence={len(response.evidence)}, time={response.processing_time_ms:.0f}ms\n")
@@ -611,17 +761,14 @@ class AgentOrchestrator:
         print("  ⚡ Routing: NO_RETRIEVAL (simple query)")
 
         answer = self.llm.generate(
-            f"""<|im_start|>system
-You are Cortex Lab, a personal AI memory and reasoning assistant.
+            f"""You are Cortex Lab, a personal AI memory and reasoning assistant.
 If this is a personal question about the user and you don't have stored memories
 about it, honestly say you don't have that information yet.
 Never fabricate personal details.
-<|im_end|>
-<|im_start|>user
-{query.raw_query}
-<|im_end|>
-<|im_start|>assistant
-""",
+
+User: {query.raw_query}
+
+Assistant:""",
             max_tokens=1024, temperature=0.3
         )
 
@@ -711,18 +858,15 @@ Never fabricate personal details.
             )
         else:
             # Fallback synthesis
-            synthesis_prompt = f"""<|im_start|>system
-You are Cortex Lab, synthesizing multi-agent analysis of the user's memories.
+            synthesis_prompt = f"""You are Cortex Lab, synthesizing multi-agent analysis of the user's memories.
 Be concise but thorough. If no relevant memories exist, say so honestly.
-<|im_end|>
-<|im_start|>user
-{query.raw_query}
+
+User: {query.raw_query}
 
 Agent Analyses:
 {chr(10).join(combined_answers)}
-<|im_end|>
-<|im_start|>assistant
-"""
+
+Synthesized answer:"""
             final_answer = self.llm.generate(synthesis_prompt, max_tokens=1024, temperature=0.3)
 
         avg_confidence = sum(r.confidence for r in agent_responses) / len(agent_responses)
@@ -879,18 +1023,13 @@ Agent Analyses:
                 )
                 critique_trace.revision_focus = weak
 
-                revision_prompt = f"""<|im_start|>system
-Revise this answer to improve {weak}. Be grounded in the evidence. Provide a comprehensive answer.
-<|im_end|>
-<|im_start|>user
+                revision_prompt = f"""Revise this answer to improve {weak}. Be grounded in the evidence. Provide a comprehensive answer.
+
 Question: {query.raw_query}
 Original answer: {response.answer[:800]}
 Evidence: {chr(10).join(f"[{i+1}] {e}" for i, e in enumerate(evidence_texts[:5]))}
 
-Improved answer (focus on {weak}):
-<|im_end|>
-<|im_start|>assistant
-"""
+Improved answer (focus on {weak}):"""
                 revised = self.llm.generate(revision_prompt, max_tokens=1024, temperature=0.3)
                 if len(revised.strip()) > 20:
                     response.answer = revised.strip()

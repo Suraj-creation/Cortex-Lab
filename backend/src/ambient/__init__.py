@@ -4,14 +4,17 @@ AmbientService — Orchestrates all voice tiers into a single start/stop pipelin
 Tier 0: AudioCapture (Microphone + Ring Buffer)
 Tier 1: VoiceActivityDetector (Silero VAD v5)
 Tier 2: SpeakerIdentifier (ECAPA-TDNN)
-Tier 3: Transcriber (faster-whisper)
-Tier 4: TextToSpeech (Piper TTS)
-  +     ConversationSegmenter → MemoryIngestionPipeline (existing RAG bridge)
+Tier 3: Transcriber — dual provider:
+        - Traditional: faster-whisper (CTranslate2), local GPU/CPU
+        - Gemini: Google Gemini API multimodal audio transcription
+Tier 4: TextToSpeech — dual provider:
+        - Traditional: Piper TTS (ONNX), local CPU
+        - Gemini: Google Gemini API audio output generation
 
 Flow:
-  Mic → VAD → [speech segment] → SpeakerID + Whisper → ConversationSegmenter → RAG Ingest
+  Mic → VAD → [speech segment] → SpeakerID + STT → ConversationSegmenter → RAG Ingest
 
-All models run locally. Zero cloud. Zero API keys.
+Provider selection configured via stt_provider / tts_provider in AmbientConfig.
 """
 
 import asyncio
@@ -37,11 +40,14 @@ class AmbientService:
     """
     Top-level orchestrator for ambient voice listening.
     Provides a single start/stop interface for the entire voice pipeline.
+    Supports dual STT/TTS providers: traditional (local) and Gemini (cloud).
     """
 
-    def __init__(self, ingestion_pipeline=None, data_dir: str = "data"):
+    def __init__(self, ingestion_pipeline=None, data_dir: str = "data",
+                 gemini_api_key: str = None):
         self.data_dir = data_dir
         self.config = load_config(data_dir)
+        self._gemini_api_key = gemini_api_key
 
         # Status
         self._status = AmbientStatus.IDLE
@@ -52,10 +58,17 @@ class AmbientService:
         self.audio_capture = None
         self.vad = None
         self.speaker_id = None
-        self.transcriber = None
-        self.tts = None
         self.conversation = None
         self.enrollment = None
+        self.wake_word = None          # Phase 4: Wake word detector
+
+        # Dual STT providers
+        self._traditional_stt = None   # faster-whisper Transcriber
+        self._gemini_stt = None        # GeminiSTT
+
+        # Dual TTS providers
+        self._traditional_tts = None   # Piper TextToSpeech
+        self._gemini_tts = None        # GeminiTTS
 
         # Store pipeline reference for deferred init
         self._ingestion_pipeline = ingestion_pipeline
@@ -79,6 +92,76 @@ class AmbientService:
         # Stats
         self._speech_segments_processed = 0
         self._transcriptions_completed = 0
+
+        # Tracks whether _init_components completed fully
+        self._components_initialized = False
+
+    # ── Provider Properties ──────────────────────────────────────────────
+
+    @property
+    def transcriber(self):
+        """Active STT provider based on config."""
+        if self.config.stt_provider == "gemini" and self._gemini_stt:
+            return self._gemini_stt
+        return self._traditional_stt
+
+    @property
+    def tts(self):
+        """Active TTS provider based on config."""
+        if self.config.tts_provider == "gemini" and self._gemini_tts:
+            return self._gemini_tts
+        return self._traditional_tts
+
+    def get_stt_provider(self) -> str:
+        """Return current active STT provider name."""
+        return self.config.stt_provider
+
+    def get_tts_provider(self) -> str:
+        """Return current active TTS provider name."""
+        return self.config.tts_provider
+
+    def set_stt_provider(self, provider: str) -> Dict[str, Any]:
+        """Switch STT provider. Returns status."""
+        if provider not in ("traditional", "gemini"):
+            return {"success": False, "error": f"Unknown STT provider: {provider}"}
+        if provider == "gemini" and not self._gemini_api_key:
+            return {"success": False, "error": "Gemini API key not configured"}
+        if provider == "gemini" and not self._gemini_stt:
+            self._init_gemini_stt()
+        self.config.stt_provider = provider
+        save_config(self.config, self.data_dir)
+        return {"success": True, "stt_provider": provider}
+
+    def set_tts_provider(self, provider: str) -> Dict[str, Any]:
+        """Switch TTS provider. Returns status."""
+        if provider not in ("traditional", "gemini"):
+            return {"success": False, "error": f"Unknown TTS provider: {provider}"}
+        if provider == "gemini" and not self._gemini_api_key:
+            return {"success": False, "error": "Gemini API key not configured"}
+        if provider == "gemini" and not self._gemini_tts:
+            self._init_gemini_tts()
+        self.config.tts_provider = provider
+        save_config(self.config, self.data_dir)
+        return {"success": True, "tts_provider": provider}
+
+    def _init_gemini_stt(self):
+        """Initialize Gemini STT if not already done."""
+        if self._gemini_stt or not self._gemini_api_key:
+            return
+        from .gemini_voice import GeminiSTT
+        self._gemini_stt = GeminiSTT(api_key=self._gemini_api_key)
+        print("  ✅ Gemini STT initialized")
+
+    def _init_gemini_tts(self):
+        """Initialize Gemini TTS if not already done."""
+        if self._gemini_tts or not self._gemini_api_key:
+            return
+        from .gemini_voice import GeminiTTS
+        self._gemini_tts = GeminiTTS(
+            api_key=self._gemini_api_key,
+            voice=self.config.gemini_tts_voice,
+        )
+        print("  ✅ Gemini TTS initialized")
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -171,7 +254,7 @@ class AmbientService:
 
     async def _init_components(self):
         """Lazy-initialize all voice components."""
-        if self.audio_capture is not None:
+        if self._components_initialized:
             return  # Already initialized
 
         print("\n  🔧 Initializing ambient voice components...")
@@ -185,39 +268,94 @@ class AmbientService:
         from .vad import VoiceActivityDetector
         self.vad = VoiceActivityDetector(threshold=self.config.vad_threshold)
 
-        # Tier 2: Speaker ID
-        from .speaker_id import SpeakerIdentifier
-        self.speaker_id = SpeakerIdentifier(data_dir=self.data_dir)
+        # Tier 2: Speaker ID (optional — may fail on some Python versions)
+        try:
+            from .speaker_id import SpeakerIdentifier
+            self.speaker_id = SpeakerIdentifier(data_dir=self.data_dir)
+        except Exception as e:
+            print(f"  ⚠ Speaker ID init failed (non-critical): {e}")
+            print("  ↳ Continuing without speaker identification — all speakers labelled UNKNOWN")
+            self.speaker_id = None
 
-        # Tier 3: Transcriber
-        from .transcription import Transcriber
-        self.transcriber = Transcriber(
-            model_size=self.config.whisper_model_size,
-            device=self.config.whisper_device,
-            vram_guard=self.vram_guard,
-        )
+        # Tier 3: STT — initialize based on selected provider
+        if self.config.stt_provider == "gemini" and self._gemini_api_key:
+            self._init_gemini_stt()
+        else:
+            # Traditional: faster-whisper
+            try:
+                from .transcription import Transcriber
+                self._traditional_stt = Transcriber(
+                    model_size=self.config.whisper_model_size,
+                    device=self.config.whisper_device,
+                    vram_guard=self.vram_guard,
+                )
+            except Exception as e:
+                print(f"  ⚠ Traditional STT (faster-whisper) init failed: {e}")
+                # Fall back to Gemini if available
+                if self._gemini_api_key:
+                    print("  ↳ Falling back to Gemini STT")
+                    self._init_gemini_stt()
+                    self.config.stt_provider = "gemini"
 
-        # Tier 4: TTS
-        from .tts import TextToSpeech
-        self.tts = TextToSpeech(
-            voice=self.config.tts_voice,
-            data_dir=self.data_dir,
-        )
+        # Also init Gemini STT if API key is present (for easy switching)
+        if self._gemini_api_key and not self._gemini_stt:
+            self._init_gemini_stt()
 
-        # Conversation Segmenter
+        # Tier 4: TTS — initialize based on selected provider
+        if self.config.tts_provider == "gemini" and self._gemini_api_key:
+            self._init_gemini_tts()
+        else:
+            # Traditional: Piper TTS
+            try:
+                from .tts import TextToSpeech
+                self._traditional_tts = TextToSpeech(
+                    voice=self.config.tts_voice,
+                    data_dir=self.data_dir,
+                )
+            except Exception as e:
+                print(f"  ⚠ Traditional TTS (Piper) init failed: {e}")
+                if self._gemini_api_key:
+                    print("  ↳ Falling back to Gemini TTS")
+                    self._init_gemini_tts()
+                    self.config.tts_provider = "gemini"
+
+        # Also init Gemini TTS if API key is present
+        if self._gemini_api_key and not self._gemini_tts:
+            self._init_gemini_tts()
+
+        # Conversation Segmenter (Phase 2 + 5 + 6: Gemini summarizer + topic seg + dual storage)
         from .conversation import ConversationSegmenter
         self.conversation = ConversationSegmenter(
             ingestion_pipeline=self._ingestion_pipeline,
             auto_ingest=self.config.auto_ingest,
             data_dir=self.data_dir,
+            gemini_api_key=self._gemini_api_key,
         )
 
         # Voice Enrollment
         from .enrollment import VoiceEnrollment
         self.enrollment = VoiceEnrollment(self.audio_capture, self.speaker_id)
 
+        # Phase 4: Wake Word Detection
+        if self.config.wake_word_enabled:
+            try:
+                from .wake_word import WakeWordDetector
+                self.wake_word = WakeWordDetector(
+                    wake_word=self.config.wake_word_model,
+                    threshold=self.config.wake_word_threshold,
+                )
+            except Exception as e:
+                print(f"  ⚠ Wake word init failed (non-critical): {e}")
+                self.wake_word = None
+
+        self._components_initialized = True
+
         elapsed = time.time() - t0
-        print(f"  ✅ All ambient components initialized in {elapsed:.1f}s\n")
+        stt_name = self.config.stt_provider
+        tts_name = self.config.tts_provider
+        spk = "yes" if self.speaker_id else "disabled"
+        print(f"  ✅ All ambient components initialized in {elapsed:.1f}s")
+        print(f"     STT: {stt_name} | TTS: {tts_name} | SpeakerID: {spk}\n")
 
     # ── Speech Processing Pipeline ───────────────────────────────────────
 
@@ -250,9 +388,13 @@ class AmbientService:
         try:
             self._status = AmbientStatus.TRANSCRIBING
 
-            # 1. Speaker ID (runs on CPU, fast)
-            speaker_label, speaker_confidence = self.speaker_id.identify(audio)
-            speaker_name = self.speaker_id.get_display_name(speaker_label)
+            # 1. Speaker ID (runs on CPU, fast) — optional
+            if self.speaker_id:
+                speaker_label, speaker_confidence = self.speaker_id.identify(audio)
+                speaker_name = self.speaker_id.get_display_name(speaker_label)
+            else:
+                speaker_label, speaker_confidence = "UNKNOWN", 0.0
+                speaker_name = "Speaker"
 
             # 2. Transcription (may wait for VRAM guard)
             result = await self.transcriber.transcribe(
@@ -265,6 +407,15 @@ class AmbientService:
             if not text:
                 self._status = AmbientStatus.LISTENING
                 return
+
+            # 2.5 Phase 1: Speech cleanup — remove fillers, disfluencies, low-conf junk
+            from .speech_cleanup import clean_transcript, get_word_confidences_from_segments
+            word_confs = get_word_confidences_from_segments(result.get("segments", []))
+            cleaned_text = clean_transcript(text, stt_confidence, word_confs)
+            if not cleaned_text:
+                self._status = AmbientStatus.LISTENING
+                return
+            text = cleaned_text
 
             self._transcriptions_completed += 1
 
@@ -336,6 +487,31 @@ class AmbientService:
         if self.vad and "vad_threshold" in updates:
             self.vad.set_threshold(updates["vad_threshold"])
 
+        # Handle provider switching
+        if "stt_provider" in updates:
+            self.set_stt_provider(updates["stt_provider"])
+        if "tts_provider" in updates:
+            self.set_tts_provider(updates["tts_provider"])
+        if "gemini_tts_voice" in updates and self._gemini_tts:
+            self._gemini_tts.set_voice(updates["gemini_tts_voice"])
+        if "wake_word_enabled" in updates:
+            if updates["wake_word_enabled"] and not self.wake_word:
+                try:
+                    from .wake_word import WakeWordDetector
+                    self.wake_word = WakeWordDetector(
+                        wake_word=self.config.wake_word_model,
+                        threshold=self.config.wake_word_threshold,
+                    )
+                except Exception:
+                    pass
+            if self.wake_word:
+                if updates["wake_word_enabled"]:
+                    self.wake_word.start()
+                else:
+                    self.wake_word.stop()
+        if "wake_word_threshold" in updates and self.wake_word:
+            self.wake_word.set_threshold(updates["wake_word_threshold"])
+
         save_config(self.config, self.data_dir)
         return self.config
 
@@ -357,6 +533,11 @@ class AmbientService:
             "audio_level": self.audio_capture.get_audio_level() if self.audio_capture else 0,
             "speech_segments": self._speech_segments_processed,
             "transcriptions": self._transcriptions_completed,
+            "stt_provider": self.config.stt_provider,
+            "tts_provider": self.config.tts_provider,
+            "gemini_available": self._gemini_api_key is not None,
+            "wake_word_enabled": self.config.wake_word_enabled,
+            "wake_word_active": self.wake_word.is_running if self.wake_word else False,
         }
 
         # Component stats
@@ -371,6 +552,8 @@ class AmbientService:
                 status["conversation"] = self.conversation.get_stats()
             if self.tts:
                 status["tts"] = self.tts.get_stats()
+            if self.wake_word:
+                status["wake_word"] = self.wake_word.get_stats()
             status["vram_guard"] = self.vram_guard.get_stats()
 
         return status

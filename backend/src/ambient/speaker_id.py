@@ -1,15 +1,16 @@
 """
-Tier 2: Speaker Identification — ECAPA-TDNN (SpeechBrain)
-Extracts 192-dimensional speaker embeddings and verifies against enrolled voiceprint.
-Cost: ~50 ms per segment, CPU only, ~25 MB model.
+Tier 2: Speaker Identification — Resemblyzer (GE2E)
+Extracts 256-dimensional speaker embeddings and verifies against enrolled voiceprint.
+Cost: ~30 ms per segment, CPU only, ~10 MB model.
+
+Replaces SpeechBrain ECAPA-TDNN which is incompatible with Python 3.14.
 
 Speaker labels:
-  - "USER" if cosine similarity ≥ 0.70 against enrolled voiceprint
+  - "USER" if cosine similarity >= 0.70 against enrolled voiceprint
   - "SPEAKER_A", "SPEAKER_B", etc. for unknown speakers (online clustering)
 """
 
 import numpy as np
-import torch
 import json
 import time
 from pathlib import Path
@@ -25,45 +26,27 @@ class SpeakerIdentifier:
         self.VOICEPRINT_DIR = f"{data_dir}/voiceprints"
         Path(self.VOICEPRINT_DIR).mkdir(parents=True, exist_ok=True)
 
-        # Monkey-patch torchaudio for speechbrain compatibility
-        import torchaudio
-        if not hasattr(torchaudio, 'list_audio_backends'):
-            torchaudio.list_audio_backends = lambda: ['default']
+        # Shim webrtcvad if missing (Python 3.14 — C extension won't compile).
+        # Resemblyzer uses it only in trim_long_silences(); we already have Silero VAD
+        # upstream so the silence-trimming can safely become a no-op.
+        import importlib
+        if importlib.util.find_spec("webrtcvad") is None:
+            import types
+            _stub = types.ModuleType("webrtcvad")
+            class _FakeVad:
+                def __init__(self, mode=3): pass
+                def is_speech(self, buf, sample_rate): return True
+            _stub.Vad = _FakeVad
+            import sys
+            sys.modules["webrtcvad"] = _stub
 
-        # Monkey-patch huggingface_hub for speechbrain compatibility
-        # Newer huggingface_hub removed `use_auth_token` in favour of `token`
-        # Also, some SpeechBrain repos no longer have `custom.py` — convert
-        # HF 404 errors to ValueError so SpeechBrain treats it as optional.
-        try:
-            import huggingface_hub.utils._validators as _hf_validators
-            _original_inner = getattr(_hf_validators, '_inner_fn', None)
-        except Exception:
-            pass
-        import huggingface_hub
-        _orig_download = huggingface_hub.hf_hub_download
-        def _patched_download(*args, **kwargs):
-            kwargs.pop("use_auth_token", None)
-            try:
-                return _orig_download(*args, **kwargs)
-            except Exception as e:
-                # Convert HF 404 errors to ValueError so SpeechBrain
-                # from_hparams() gracefully skips missing custom.py
-                if '404' in str(e) or 'EntryNotFound' in type(e).__name__:
-                    raise ValueError(f'File not found on HF Hub: {e}')
-                raise
-        huggingface_hub.hf_hub_download = _patched_download
+        from resemblyzer import VoiceEncoder
 
-        from speechbrain.inference.speaker import EncoderClassifier
-
-        print("  👤 Loading ECAPA-TDNN speaker encoder...")
+        print("  👤 Loading Resemblyzer GE2E speaker encoder...")
         t0 = time.time()
-        self.model = EncoderClassifier.from_hparams(
-            source="speechbrain/spkrec-ecapa-voxceleb",
-            run_opts={"device": "cpu"},
-            savedir=f"{data_dir}/models/ecapa_tdnn",
-        )
+        self.encoder = VoiceEncoder("cpu")
         elapsed = time.time() - t0
-        print(f"  ✅ ECAPA-TDNN loaded in {elapsed:.1f}s (192-dim embeddings)")
+        print(f"  ✅ Resemblyzer loaded in {elapsed:.1f}s (256-dim embeddings)")
 
         # User voiceprint
         self.user_voiceprint: Optional[np.ndarray] = None
@@ -81,17 +64,19 @@ class SpeakerIdentifier:
 
     def extract_embedding(self, audio: np.ndarray) -> np.ndarray:
         """
-        Extract a 192-dimensional speaker embedding from audio (int16, 16 kHz).
-        Returns: np.ndarray of shape (192,)
+        Extract a 256-dimensional speaker embedding from audio (int16, 16 kHz).
+        Returns: np.ndarray of shape (256,)
         """
-        # Convert int16 → float32 tensor
+        from resemblyzer import preprocess_wav
+
+        # Convert int16 → float32 normalized [-1, 1]
         audio_f32 = audio.astype(np.float32) / 32768.0
-        audio_tensor = torch.from_numpy(audio_f32).unsqueeze(0)  # (1, samples)
 
-        with torch.no_grad():
-            embedding = self.model.encode_batch(audio_tensor)
+        # Resemblyzer expects float32 at 16kHz
+        wav = preprocess_wav(audio_f32, source_sr=16000)
 
-        return embedding.squeeze().numpy()  # (192,)
+        embedding = self.encoder.embed_utterance(wav)
+        return embedding  # (256,)
 
     # ── Identification ───────────────────────────────────────────────────
 
@@ -231,8 +216,15 @@ class SpeakerIdentifier:
     def _load_voiceprint(self):
         path = Path(self.VOICEPRINT_DIR) / "user.npy"
         if path.exists():
-            self.user_voiceprint = np.load(str(path))
-            print(f"  ✅ Voiceprint loaded ({self.user_voiceprint.shape[0]}-dim)")
+            vp = np.load(str(path))
+            # Handle dimension mismatch (old ECAPA 192-dim vs new Resemblyzer 256-dim)
+            if vp.shape[0] == 256:
+                self.user_voiceprint = vp
+                print(f"  ✅ Voiceprint loaded ({vp.shape[0]}-dim)")
+            else:
+                print(f"  ⚠ Voiceprint dimension mismatch ({vp.shape[0]}-dim, expected 256) "
+                      f"— re-enrollment required")
+                self.user_voiceprint = None
         else:
             print("  ⚠ No voiceprint found — enrollment required")
 

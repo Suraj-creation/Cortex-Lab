@@ -22,7 +22,7 @@ from src.models import (
     CausalMemoryObject, MemoryType, EmotionLabel, EntityNode, GraphEdge
 )
 from src.models.embeddings import EmbeddingModel
-from src.llm import LocalLLM
+from src.llm import LocalLLM, LLMProvider
 from src.storage.vector_store import VectorStore
 from src.storage.metadata_store import MetadataStore
 from src.storage.knowledge_graph import KnowledgeGraph
@@ -47,7 +47,7 @@ class MemoryIngestionPipeline:
     11. Belief evolution detection (Stage 5 fine-tuning)
     """
 
-    def __init__(self, llm: LocalLLM, embedding_model: EmbeddingModel,
+    def __init__(self, llm: 'LLMProvider', embedding_model: EmbeddingModel,
                  vector_store: VectorStore, metadata_store: MetadataStore,
                  knowledge_graph: KnowledgeGraph):
         self.llm = llm
@@ -576,7 +576,8 @@ class MemoryIngestionPipeline:
         return None
 
     def _update_graph(self, memory: CausalMemoryObject):
-        """Update knowledge graph with extracted entities and relationships."""
+        """Update knowledge graph with extracted entities and relationships.
+        Also syncs entity/edge records to DuckDB metadata store for dashboard stats."""
         for entity_name in memory.entities:
             # Check if entity already exists
             existing_id = self.graph.find_entity_by_name(entity_name)
@@ -590,6 +591,20 @@ class MemoryIngestionPipeline:
                     if memory.id not in existing_mids:
                         existing_mids.append(memory.id)
                         nx.set_node_attributes(self.graph.graph, {existing_id: {"memory_ids": existing_mids}})
+                    # Sync updated entity to DuckDB
+                    try:
+                        node_data = self.graph.graph.nodes[existing_id]
+                        entity = EntityNode(
+                            id=existing_id,
+                            canonical_name=node_data.get("canonical_name", entity_name),
+                            entity_type=node_data.get("entity_type", "unknown"),
+                            first_seen=datetime.fromisoformat(node_data["first_seen"]) if isinstance(node_data.get("first_seen"), str) else memory.timestamp,
+                            last_seen=memory.timestamp,
+                            memory_ids=existing_mids,
+                        )
+                        self.metadata.store_entity(entity)
+                    except Exception:
+                        pass
             else:
                 # Create new entity
                 entity = EntityNode(
@@ -600,6 +615,11 @@ class MemoryIngestionPipeline:
                     memory_ids=[memory.id],
                 )
                 self.graph.add_entity(entity)
+                # Sync new entity to DuckDB
+                try:
+                    self.metadata.store_entity(entity)
+                except Exception:
+                    pass
 
         # Create edges between co-occurring entities
         for i, ent1 in enumerate(memory.entities):
@@ -616,6 +636,11 @@ class MemoryIngestionPipeline:
                         timestamp=memory.timestamp,
                     )
                     self.graph.add_edge(edge)
+                    # Sync edge to DuckDB
+                    try:
+                        self.metadata.store_edge(edge)
+                    except Exception:
+                        pass
 
         # Detect and store belief evolution
         self._detect_belief_evolution(memory)

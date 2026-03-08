@@ -16,6 +16,8 @@ import {
   Radio,
   Save,
   RotateCcw,
+  Cloud,
+  Cpu,
 } from "lucide-react";
 import {
   startAmbient,
@@ -26,8 +28,11 @@ import {
   getConversations,
   getAmbientConfig,
   updateAmbientConfig,
+  getVoiceProviders,
+  setSTTProvider,
+  setTTSProvider,
 } from "@/lib/api";
-import { AmbientState, AmbientStatusType, AmbientConfig, ConversationRecord } from "@/lib/types";
+import { AmbientState, AmbientStatusType, AmbientConfig, ConversationRecord, VoiceProviders, VoiceProviderType } from "@/lib/types";
 import { LiveTranscript } from "./LiveTranscript";
 import { ConversationHistory } from "./ConversationHistory";
 import { VoiceEnrollment } from "./VoiceEnrollment";
@@ -245,6 +250,20 @@ export function AmbientPanel({ onBack }: Props) {
                 Uptime: {formatUptime(status.uptime_seconds)}
               </span>
             )}
+            {status.stt_provider && (
+              <span className={`text-[10px] font-medium ${
+                status.stt_provider === "gemini" ? "text-violet-500" : "text-indigo-500"
+              }`}>
+                STT: {status.stt_provider === "gemini" ? "Gemini" : "Whisper"}
+              </span>
+            )}
+            {status.tts_provider && (
+              <span className={`text-[10px] font-medium ${
+                status.tts_provider === "gemini" ? "text-violet-500" : "text-indigo-500"
+              }`}>
+                TTS: {status.tts_provider === "gemini" ? "Gemini" : "Piper"}
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -297,6 +316,8 @@ const DEFAULT_CONFIG: AmbientConfig = {
   auto_ingest: true,
   silence_timeout_s: 120,
   min_speech_ms: 500,
+  stt_provider: "traditional",
+  tts_provider: "traditional",
   tts_enabled: true,
   tts_voice: "en_US-lessac-medium",
   tts_speed: 1.0,
@@ -304,6 +325,7 @@ const DEFAULT_CONFIG: AmbientConfig = {
   whisper_device: "auto",
   whisper_language: null,
   record_raw_audio: false,
+  gemini_tts_voice: "Kore",
 };
 
 function AmbientSettings({ status }: { status: AmbientState | null }) {
@@ -311,6 +333,8 @@ function AmbientSettings({ status }: { status: AmbientState | null }) {
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  const [providers, setProviders] = useState<VoiceProviders | null>(null);
+  const [switching, setSwitching] = useState(false);
 
   // Load config on mount
   useEffect(() => {
@@ -322,6 +346,9 @@ function AmbientSettings({ status }: { status: AmbientState | null }) {
       .catch(() => {
         // Use defaults if ambient not initialized yet
       });
+    getVoiceProviders()
+      .then(setProviders)
+      .catch(() => {});
   }, []);
 
   const updateField = <K extends keyof AmbientConfig>(
@@ -354,6 +381,34 @@ function AmbientSettings({ status }: { status: AmbientState | null }) {
     setSaveMsg(null);
   };
 
+  const handleSwitchSTT = async (provider: VoiceProviderType) => {
+    setSwitching(true);
+    try {
+      const res = await setSTTProvider(provider);
+      if (res.success) {
+        setConfig((prev) => ({ ...prev, stt_provider: provider }));
+        setProviders((prev) => prev ? { ...prev, stt_provider: provider } : prev);
+      }
+    } catch {
+      setSaveMsg("Failed to switch STT provider");
+    }
+    setSwitching(false);
+  };
+
+  const handleSwitchTTS = async (provider: VoiceProviderType) => {
+    setSwitching(true);
+    try {
+      const res = await setTTSProvider(provider);
+      if (res.success) {
+        setConfig((prev) => ({ ...prev, tts_provider: provider }));
+        setProviders((prev) => prev ? { ...prev, tts_provider: provider } : prev);
+      }
+    } catch {
+      setSaveMsg("Failed to switch TTS provider");
+    }
+    setSwitching(false);
+  };
+
   return (
     <div className="p-6 max-w-2xl mx-auto space-y-6">
       {/* Save bar */}
@@ -381,6 +436,153 @@ function AmbientSettings({ status }: { status: AmbientState | null }) {
           </div>
         </div>
       )}
+
+      {/* Voice Providers */}
+      <div>
+        <h3 className="text-sm font-semibold text-slate-700 mb-3">
+          Voice Providers
+        </h3>
+        <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-4">
+          {/* STT Provider */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <div>
+                <span className="text-xs text-slate-600 font-medium">Speech-to-Text Engine</span>
+                <p className="text-[10px] text-slate-400 mt-0.5">
+                  {config.stt_provider === "gemini"
+                    ? "Gemini AI — cloud-based, multilingual, high accuracy"
+                    : "Whisper (local) — on-device, private, configurable model size"}
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-1.5">
+              <button
+                onClick={() => handleSwitchSTT("traditional")}
+                disabled={switching || !providers?.traditional_stt_available}
+                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-all ${
+                  config.stt_provider === "traditional"
+                    ? "bg-indigo-100 text-indigo-700 border border-indigo-200"
+                    : "bg-slate-50 text-slate-500 border border-slate-200 hover:bg-slate-100"
+                } disabled:opacity-40 disabled:cursor-not-allowed`}
+              >
+                <Cpu size={12} />
+                Local (Whisper)
+              </button>
+              <button
+                onClick={() => handleSwitchSTT("gemini")}
+                disabled={switching || !providers?.gemini_available}
+                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-all ${
+                  config.stt_provider === "gemini"
+                    ? "bg-violet-100 text-violet-700 border border-violet-200"
+                    : "bg-slate-50 text-slate-500 border border-slate-200 hover:bg-slate-100"
+                } disabled:opacity-40 disabled:cursor-not-allowed`}
+              >
+                <Cloud size={12} />
+                Gemini AI
+              </button>
+            </div>
+            {!providers?.gemini_available && (
+              <p className="text-[9px] text-amber-500 mt-1">
+                Gemini requires GOOGLE_API_KEY in backend/.env
+              </p>
+            )}
+          </div>
+
+          {/* TTS Provider */}
+          <div className="border-t border-slate-100 pt-4">
+            <div className="flex items-center justify-between mb-2">
+              <div>
+                <span className="text-xs text-slate-600 font-medium">Text-to-Speech Engine</span>
+                <p className="text-[10px] text-slate-400 mt-0.5">
+                  {config.tts_provider === "gemini"
+                    ? "Gemini AI — natural voices, cloud-based, multiple voice options"
+                    : "Piper (local) — on-device ONNX, fast, private"}
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-1.5">
+              <button
+                onClick={() => handleSwitchTTS("traditional")}
+                disabled={switching || !providers?.traditional_tts_available}
+                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-all ${
+                  config.tts_provider === "traditional"
+                    ? "bg-indigo-100 text-indigo-700 border border-indigo-200"
+                    : "bg-slate-50 text-slate-500 border border-slate-200 hover:bg-slate-100"
+                } disabled:opacity-40 disabled:cursor-not-allowed`}
+              >
+                <Cpu size={12} />
+                Local (Piper)
+              </button>
+              <button
+                onClick={() => handleSwitchTTS("gemini")}
+                disabled={switching || !providers?.gemini_available}
+                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-all ${
+                  config.tts_provider === "gemini"
+                    ? "bg-violet-100 text-violet-700 border border-violet-200"
+                    : "bg-slate-50 text-slate-500 border border-slate-200 hover:bg-slate-100"
+                } disabled:opacity-40 disabled:cursor-not-allowed`}
+              >
+                <Cloud size={12} />
+                Gemini AI
+              </button>
+            </div>
+          </div>
+
+          {/* Gemini TTS Voice Selector */}
+          {config.tts_provider === "gemini" && providers?.gemini_tts_voices && (
+            <div className="border-t border-slate-100 pt-4">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs text-slate-600 font-medium">Gemini Voice</span>
+                <span className="text-[10px] text-violet-500 font-medium">{config.gemini_tts_voice}</span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {providers.gemini_tts_voices.map((voice) => (
+                  <button
+                    key={voice}
+                    onClick={() => updateField("gemini_tts_voice", voice)}
+                    className={`rounded-lg px-2.5 py-1 text-[11px] font-medium transition-all ${
+                      config.gemini_tts_voice === voice
+                        ? "bg-violet-100 text-violet-700 border border-violet-200"
+                        : "bg-slate-50 text-slate-500 border border-slate-200 hover:bg-slate-100"
+                    }`}
+                  >
+                    {voice}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[9px] text-slate-400 mt-1.5">
+                Select a Gemini TTS voice. Changes apply immediately after saving.
+              </p>
+            </div>
+          )}
+
+          {/* Provider status badges */}
+          <div className="border-t border-slate-100 pt-3 flex flex-wrap gap-2">
+            <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+              config.stt_provider === "gemini"
+                ? "bg-violet-50 text-violet-600 border border-violet-200"
+                : "bg-indigo-50 text-indigo-600 border border-indigo-200"
+            }`}>
+              <Mic size={9} />
+              STT: {config.stt_provider === "gemini" ? "Gemini" : "Whisper"}
+            </span>
+            <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+              config.tts_provider === "gemini"
+                ? "bg-violet-50 text-violet-600 border border-violet-200"
+                : "bg-indigo-50 text-indigo-600 border border-indigo-200"
+            }`}>
+              <Volume2 size={9} />
+              TTS: {config.tts_provider === "gemini" ? "Gemini" : "Piper"}
+            </span>
+            {providers?.gemini_available && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 text-emerald-600 border border-emerald-200 px-2 py-0.5 text-[10px] font-medium">
+                <Cloud size={9} />
+                Gemini Ready
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
 
       {/* VAD Settings */}
       <div>
@@ -482,9 +684,21 @@ function AmbientSettings({ status }: { status: AmbientState | null }) {
       {/* Transcription Settings */}
       <div>
         <h3 className="text-sm font-semibold text-slate-700 mb-3">
-          Transcription (Whisper)
+          Transcription {config.stt_provider === "gemini" ? "(Gemini AI)" : "(Whisper)"}
         </h3>
         <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-4">
+          {config.stt_provider === "gemini" ? (
+            <div className="text-center py-4">
+              <Cloud size={24} className="mx-auto text-violet-400 mb-2" />
+              <p className="text-xs text-slate-500">
+                Gemini AI handles transcription in the cloud.
+              </p>
+              <p className="text-[10px] text-slate-400 mt-1">
+                No local model configuration needed. Supports multilingual transcription automatically.
+              </p>
+            </div>
+          ) : (
+          <>
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <span className="text-xs text-slate-500">Model Size</span>
@@ -587,13 +801,15 @@ function AmbientSettings({ status }: { status: AmbientState | null }) {
               </span>
             </div>
           </div>
+          </>
+          )}
         </div>
       </div>
 
       {/* TTS Settings */}
       <div>
         <h3 className="text-sm font-semibold text-slate-700 mb-3">
-          Text-to-Speech (Piper)
+          Text-to-Speech {config.tts_provider === "gemini" ? "(Gemini AI)" : "(Piper)"}
         </h3>
         <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-4">
           <div className="flex items-center justify-between">
@@ -611,6 +827,7 @@ function AmbientSettings({ status }: { status: AmbientState | null }) {
               />
             </button>
           </div>
+          {config.tts_provider === "traditional" && (
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <span className="text-xs text-slate-500">TTS Speed</span>
@@ -635,6 +852,14 @@ function AmbientSettings({ status }: { status: AmbientState | null }) {
               <span>Fast (2.0x)</span>
             </div>
           </div>
+          )}
+          {config.tts_provider === "gemini" && (
+            <div className="text-center py-2">
+              <p className="text-[10px] text-slate-400">
+                Voice: <span className="font-medium text-violet-500">{config.gemini_tts_voice}</span> · Change in Voice Providers above
+              </p>
+            </div>
+          )}
           {/* Live TTS stats */}
           <div className="border-t border-slate-100 pt-3 space-y-2">
             <div className="flex items-center justify-between">

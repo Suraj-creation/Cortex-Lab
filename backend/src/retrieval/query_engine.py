@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Tuple
 
 from src.models import MemoryQuery, QueryIntent, RoutingStrategy
 from src.models.embeddings import EmbeddingModel
-from src.llm import LocalLLM
+from src.llm import LocalLLM, LLMProvider
 from src.prompts import PromptBuilder, sanitize
 
 
@@ -46,6 +46,10 @@ class QueryAnalyzer:
             "how did my", "changed", "evolved", "pattern", "realized",
             "over time", "growth", "progress", "trend", "shift in",
             "belief", "opinion changed",
+            "vision", "dream", "philosophy", "paradigm", "worldview",
+            "aspiration", "ideology", "core belief", "values",
+            "reimagining", "redefining", "rethinking", "transforming",
+            "perspective on", "approach to education",
         ],
         QueryIntent.PROCEDURAL: [
             "how do", "how to", "steps", "process", "method",
@@ -73,6 +77,10 @@ class QueryAnalyzer:
         "led to", "caused", "history of", "trace",
         "everything about", "all about", "tell me about", "what do you know about",
         "summarize", "comprehensive", "in detail", "elaborate",
+        "vision", "dream", "philosophy", "paradigm", "worldview",
+        "aspiration", "core belief", "core vision", "ideology",
+        "reimagining", "redefining", "rethinking", "transforming",
+        "fundamental", "deeply", "perspective",
     ]
 
     def analyze(self, query: str) -> MemoryQuery:
@@ -222,7 +230,7 @@ class QueryAnalyzer:
 
         # Intent-based complexity boost (reflective/comparative inherently complex)
         if intent in (QueryIntent.REFLECTIVE, QueryIntent.COMPARATIVE):
-            score += 0.15
+            score += 0.20
         elif intent == QueryIntent.CAUSAL:
             score += 0.10
 
@@ -365,7 +373,7 @@ class QueryTransformer:
     - Query Decomposition
     """
 
-    def __init__(self, llm: LocalLLM, embedding_model: EmbeddingModel):
+    def __init__(self, llm: 'LLMProvider', embedding_model: EmbeddingModel):
         self.llm = llm
         self.embeddings = embedding_model
 

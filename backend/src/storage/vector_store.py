@@ -369,11 +369,33 @@ class VectorStore:
             print(f"  ✓ Vector store loaded ({len(ids)} vectors)")
 
     def get_stats(self) -> Dict:
+        # When FAISS is available, use actual tier lists.
+        # Otherwise classify vectors by timestamp for accurate stats.
+        if self._use_faiss:
+            hot = len(self.hot_ids)
+            warm = len(self.warm_ids)
+            cold = len(self.cold_ids)
+        else:
+            now = datetime.now()
+            hot_cutoff = now - timedelta(days=30)
+            warm_cutoff = now - timedelta(days=365)
+            hot = warm = cold = 0
+            for mid in self.vectors:
+                ts = self.timestamps.get(mid)
+                if not ts:
+                    hot += 1  # No timestamp → treat as recent
+                elif ts >= hot_cutoff:
+                    hot += 1
+                elif ts >= warm_cutoff:
+                    warm += 1
+                else:
+                    cold += 1
+
         return {
             "total_vectors": self.count(),
-            "hot_count": len(self.hot_ids),
-            "warm_count": len(self.warm_ids),
-            "cold_count": len(self.cold_ids),
+            "hot_count": hot,
+            "warm_count": warm,
+            "cold_count": cold,
             "using_faiss": self._use_faiss,
             "dimension": self.dimension,
         }

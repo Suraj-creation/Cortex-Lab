@@ -99,15 +99,11 @@ class TimelineAgent(BaseAgent):
             )
         else:
             answer = self.llm.generate(
-                f"""<|im_start|>system
-You are Cortex Lab, an AI memory assistant. The user asked about a timeline
-but no relevant memories were found. Say so honestly.
-<|im_end|>
-<|im_start|>user
-{query.raw_query}
-<|im_end|>
-<|im_start|>assistant
-""",
+                f"""You are Cortex Lab, an AI memory assistant. The user asked about a timeline but no relevant memories were found. Say so honestly.
+
+User: {query.raw_query}
+
+Answer:""",
                 max_tokens=200, temperature=0.3
             )
 

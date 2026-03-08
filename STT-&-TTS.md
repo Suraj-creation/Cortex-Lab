@@ -4,7 +4,7 @@
 ---
 
 ## 📋 Table of Contents
-
+S
 1. [Why We're Building This](#1-why-were-building-this)
 2. [Current System State — What Already Exists](#2-current-system-state)
 3. [Hardware Budget — What We Have to Work With](#3-hardware-budget)
