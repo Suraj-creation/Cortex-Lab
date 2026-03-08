@@ -27,15 +27,30 @@ class AmbientConfig:
     # Speaker ID
     similarity_threshold: float = 0.70
 
-    # Whisper
+    # STT provider: "traditional" (faster-whisper) or "gemini"
+    stt_provider: str = "traditional"
+
+    # Whisper (traditional STT)
     whisper_model_size: str = "small"
     whisper_device: str = "auto"       # auto, cuda, cpu
     whisper_language: Optional[str] = None  # None = auto-detect
 
+    # TTS provider: "traditional" (Piper) or "gemini"
+    tts_provider: str = "traditional"
+
     # TTS
     tts_enabled: bool = True
-    tts_voice: str = "en_US-lessac-medium"
+    tts_voice: str = "en_US-lessac-medium"  # Piper voice
     tts_speed: float = 1.0
+
+    # Gemini voice settings
+    gemini_tts_voice: str = "Kore"     # Gemini voice: Aoede, Charon, Fenrir, Kore, Puck, etc.
+
+    # Wake word detection (Phase 4)
+    wake_word_enabled: bool = False    # Enable wake word detection
+    wake_word_model: str = "hey_jarvis"  # openwakeword model name
+    wake_word_threshold: float = 0.5   # Detection confidence threshold (0-1)
+    wake_word_mode: str = "manual"     # "always_on", "manual", "hybrid"
 
     # Audio capture
     audio_device: Optional[int] = None  # None = system default
