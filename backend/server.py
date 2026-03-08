@@ -1927,9 +1927,22 @@ async def rag_health():
 _trace_history: List[dict] = []
 _TRACE_MAX_HISTORY = 100
 
+def _sanitize_floats(obj):
+    """Recursively replace NaN/Inf floats with 0 so JSON serialization won't fail."""
+    import math
+    if isinstance(obj, float):
+        return 0.0 if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_floats(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_floats(v) for v in obj]
+    return obj
+
 def _store_trace(trace_dict: dict):
     """Store a pipeline trace in the history ring buffer (deduplicated)."""
     if trace_dict:
+        # Sanitize any NaN/Inf values that would break JSON serialization
+        trace_dict = _sanitize_floats(trace_dict)
         # Deduplicate: don't store if trace_id already exists
         trace_id = trace_dict.get("trace_id", "")
         if trace_id and any(t.get("trace_id") == trace_id for t in _trace_history):
