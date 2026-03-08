@@ -54,39 +54,39 @@ export function RAGDashboard({ onBack }: { onBack: () => void }) {
     sub?: string;
     color: string;
   }) => (
-    <div className="rounded-2xl border border-slate-200 bg-white p-4 card-hover">
+    <div className="rounded-2xl border border-slate-300 bg-white p-4 card-hover">
       <div className="flex items-center gap-2 mb-3">
         <div className={`p-1.5 rounded-xl ${color}`}>
           <Icon size={14} />
         </div>
-        <span className="text-xs text-slate-500">{label}</span>
+        <span className="text-xs text-slate-600">{label}</span>
       </div>
-      <p className="text-2xl font-bold text-slate-800">{value}</p>
-      {sub && <p className="text-[10px] text-slate-400 mt-1">{sub}</p>}
+      <p className="text-2xl font-bold text-slate-900">{value}</p>
+      {sub && <p className="text-[11px] text-slate-500 mt-1">{sub}</p>}
     </div>
   );
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden bg-white">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3.5">
+      <div className="flex items-center justify-between border-b border-slate-300 px-5 py-3.5">
         <div className="flex items-center gap-3">
           <button
             onClick={onBack}
-            className="rounded-lg p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-all duration-200"
+            className="rounded-lg p-1.5 text-slate-500 hover:text-slate-700 hover:bg-slate-100 transition-all duration-200"
           >
             <ArrowLeft size={18} />
           </button>
           <div className="flex items-center gap-2.5">
             <BarChart3 size={18} className="text-indigo-500" />
-            <h2 className="text-sm font-semibold text-slate-700">
+            <h2 className="text-sm font-semibold text-slate-800">
               RAG Dashboard
             </h2>
           </div>
         </div>
         <button
           onClick={load}
-          className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-200 text-slate-500 text-xs hover:bg-slate-100 hover:text-slate-700 transition-all duration-200"
+          className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-300 text-slate-600 text-xs hover:bg-slate-100 hover:text-slate-800 transition-all duration-200"
         >
           <RefreshCw size={12} />
           Refresh
@@ -106,14 +106,14 @@ export function RAGDashboard({ onBack }: { onBack: () => void }) {
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
           {/* Health Status */}
           {health && (
-            <div className="rounded-2xl border border-slate-200 bg-white p-4">
+            <div className="rounded-2xl border border-slate-300 bg-white p-4">
               <div className="flex items-center gap-2 mb-3">
                 {health.rag_initialized ? (
                   <CheckCircle2 size={16} className="text-emerald-500" />
                 ) : (
                   <XCircle size={16} className="text-red-500" />
                 )}
-                <h3 className="text-sm font-medium text-slate-700">
+                <h3 className="text-sm font-medium text-slate-800">
                   System Health
                 </h3>
                 <span
@@ -149,7 +149,7 @@ export function RAGDashboard({ onBack }: { onBack: () => void }) {
                         <div className="absolute inset-0 w-2 h-2 rounded-full bg-emerald-400 animate-ping opacity-30" />
                       )}
                     </div>
-                    <span className="text-[10px] text-slate-500">
+                    <span className="text-[11px] text-slate-600">
                       {comp.name}
                     </span>
                   </div>
@@ -169,13 +169,13 @@ export function RAGDashboard({ onBack }: { onBack: () => void }) {
             <StatCard
               icon={Network}
               label="Entities"
-              value={stats.memories?.entities ?? 0}
+              value={(stats.memories?.entities ?? 0) || (stats.graph?.nodes ?? 0)}
               color="bg-purple-50 text-purple-600"
             />
             <StatCard
               icon={Database}
               label="Graph Edges"
-              value={stats.memories?.edges ?? 0}
+              value={(stats.memories?.edges ?? 0) || (stats.graph?.edges ?? 0)}
               color="bg-blue-50 text-blue-600"
             />
             <StatCard
@@ -188,34 +188,34 @@ export function RAGDashboard({ onBack }: { onBack: () => void }) {
 
           {/* Vectors */}
           {stats.vectors && (
-            <div className="rounded-2xl border border-slate-200 bg-white p-4">
-              <h3 className="text-xs font-medium text-slate-500 mb-3 uppercase tracking-wider">
+            <div className="rounded-2xl border border-slate-300 bg-white p-4">
+              <h3 className="text-xs font-semibold text-slate-600 mb-3 uppercase tracking-wider">
                 Vector Store
               </h3>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div>
-                  <p className="text-lg font-bold text-slate-800">
+                  <p className="text-lg font-bold text-slate-900">
                     {stats.vectors.total_vectors ?? 0}
                   </p>
-                  <p className="text-[10px] text-slate-400">Total Vectors</p>
+                  <p className="text-[11px] text-slate-500">Total Vectors</p>
                 </div>
                 <div>
-                  <p className="text-lg font-bold text-slate-800">
+                  <p className="text-lg font-bold text-slate-900">
                     {stats.vectors.dimension ?? 0}
                   </p>
-                  <p className="text-[10px] text-slate-400">Dimensions</p>
+                  <p className="text-[11px] text-slate-500">Dimensions</p>
                 </div>
                 <div>
-                  <p className="text-lg font-bold text-slate-800">
+                  <p className="text-lg font-bold text-slate-900">
                     {stats.vectors.hot_count ?? 0}
                   </p>
-                  <p className="text-[10px] text-slate-400">Hot Vectors</p>
+                  <p className="text-[11px] text-slate-500">Hot Vectors</p>
                 </div>
                 <div>
-                  <p className="text-lg font-bold text-slate-800">
+                  <p className="text-lg font-bold text-slate-900">
                     {stats.vectors.cold_count ?? 0}
                   </p>
-                  <p className="text-[10px] text-slate-400">Cold Vectors</p>
+                  <p className="text-[11px] text-slate-500">Cold Vectors</p>
                 </div>
               </div>
             </div>
@@ -223,22 +223,22 @@ export function RAGDashboard({ onBack }: { onBack: () => void }) {
 
           {/* Graph Stats */}
           {stats.graph && (
-            <div className="rounded-2xl border border-slate-200 bg-white p-4">
-              <h3 className="text-xs font-medium text-slate-500 mb-3 uppercase tracking-wider">
+            <div className="rounded-2xl border border-slate-300 bg-white p-4">
+              <h3 className="text-xs font-semibold text-slate-600 mb-3 uppercase tracking-wider">
                 Knowledge Graph
               </h3>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <p className="text-lg font-bold text-slate-800">
+                  <p className="text-lg font-bold text-slate-900">
                     {stats.graph.nodes ?? 0}
                   </p>
-                  <p className="text-[10px] text-slate-400">Nodes</p>
+                  <p className="text-[11px] text-slate-500">Nodes</p>
                 </div>
                 <div>
-                  <p className="text-lg font-bold text-slate-800">
+                  <p className="text-lg font-bold text-slate-900">
                     {stats.graph.edges ?? 0}
                   </p>
-                  <p className="text-[10px] text-slate-400">Edges</p>
+                  <p className="text-[11px] text-slate-500">Edges</p>
                 </div>
               </div>
             </div>
@@ -246,34 +246,34 @@ export function RAGDashboard({ onBack }: { onBack: () => void }) {
 
           {/* Cache */}
           {stats.cache && (
-            <div className="rounded-2xl border border-slate-200 bg-white p-4">
-              <h3 className="text-xs font-medium text-slate-500 mb-3 uppercase tracking-wider">
+            <div className="rounded-2xl border border-slate-300 bg-white p-4">
+              <h3 className="text-xs font-semibold text-slate-600 mb-3 uppercase tracking-wider">
                 Cache Performance
               </h3>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div>
-                  <p className="text-lg font-bold text-emerald-600">
+                  <p className={`text-lg font-bold ${(stats.cache.hit_rate ?? 0) > 0 ? 'text-emerald-600' : 'text-amber-600'}`}>
                     {((stats.cache.hit_rate ?? 0) * 100).toFixed(1)}%
                   </p>
-                  <p className="text-[10px] text-slate-400">Hit Rate</p>
+                  <p className="text-[11px] text-slate-500">Hit Rate</p>
                 </div>
                 <div>
-                  <p className="text-lg font-bold text-slate-800">
+                  <p className="text-lg font-bold text-slate-900">
                     {stats.cache.total_hits ?? 0}
                   </p>
-                  <p className="text-[10px] text-slate-400">Hits</p>
+                  <p className="text-[11px] text-slate-500">Hits</p>
                 </div>
                 <div>
-                  <p className="text-lg font-bold text-slate-800">
+                  <p className="text-lg font-bold text-slate-900">
                     {stats.cache.total_queries ?? 0}
                   </p>
-                  <p className="text-[10px] text-slate-400">Total Queries</p>
+                  <p className="text-[11px] text-slate-500">Total Queries</p>
                 </div>
                 <div>
-                  <p className="text-lg font-bold text-slate-800">
+                  <p className="text-lg font-bold text-slate-900">
                     {(stats.cache.exact_cache_size ?? 0) + (stats.cache.semantic_cache_size ?? 0)}
                   </p>
-                  <p className="text-[10px] text-slate-400">Cached Entries</p>
+                  <p className="text-[11px] text-slate-500">Cached Entries</p>
                 </div>
               </div>
             </div>
@@ -281,28 +281,28 @@ export function RAGDashboard({ onBack }: { onBack: () => void }) {
 
           {/* LLM Stats */}
           {stats.llm && (
-            <div className="rounded-2xl border border-slate-200 bg-white p-4">
-              <h3 className="text-xs font-medium text-slate-500 mb-3 uppercase tracking-wider">
+            <div className="rounded-2xl border border-slate-300 bg-white p-4">
+              <h3 className="text-xs font-semibold text-slate-600 mb-3 uppercase tracking-wider">
                 LLM Usage
               </h3>
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                 <div>
-                  <p className="text-lg font-bold text-slate-800">
+                  <p className="text-lg font-bold text-slate-900">
                     {stats.llm.call_count ?? 0}
                   </p>
-                  <p className="text-[10px] text-slate-400">Total Calls</p>
+                  <p className="text-[11px] text-slate-500">Total Calls</p>
                 </div>
                 <div>
-                  <p className="text-lg font-bold text-slate-800">
+                  <p className="text-lg font-bold text-slate-900">
                     {stats.llm.total_tokens ?? 0}
                   </p>
-                  <p className="text-[10px] text-slate-400">Total Tokens</p>
+                  <p className="text-[11px] text-slate-500">Total Tokens</p>
                 </div>
                 <div>
-                  <p className="text-lg font-bold text-slate-800">
+                  <p className="text-lg font-bold text-slate-900">
                     {stats.llm.model_loaded ? "✓ Loaded" : "✗ Not loaded"}
                   </p>
-                  <p className="text-[10px] text-slate-400">Model Status</p>
+                  <p className="text-[11px] text-slate-500">Model Status</p>
                 </div>
               </div>
             </div>
