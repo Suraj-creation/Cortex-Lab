@@ -124,15 +124,15 @@ async def lifespan(app: FastAPI):
         model_loaded = False
         model_info = {
             "name": "Gemini-Only Mode (no local model)",
-            "parameters": "N/A",
-            "quantization": "N/A",
+            "parameters": "",
+            "quantization": "",
             "device": "API",
-            "gpu_memory": "N/A",
-            "max_context": 8192,
+            "gpu_memory": "",
+            "max_context": 1048576,
             "load_time_seconds": 0,
             "fine_tuned": False,
             "training_stages_completed": 0,
-            "model_path": "N/A",
+            "model_path": "",
             "base_model": "gemini-2.5-flash",
         }
 
@@ -575,6 +575,25 @@ def _try_extract_factual(query: str, evidence_texts: list) -> str:
             q = q[len(prefix):].strip()
             break
 
+    # ── Guard: Skip extraction for complex synthesis/philosophical queries ──
+    # These need a comprehensive LLM-generated answer, not a regex snippet.
+    _synthesis_indicators = [
+        "vision", "philosophy", "paradigm", "ideology", "worldview",
+        "core belief", "fundamental", "reimagining", "redefining",
+        "changing", "transforming", "revolutionizing", "rethinking",
+        "system", "framework", "approach to", "perspective on",
+        "dream about", "aspiration", "what drives",
+        "how do you see", "what do you think about",
+        "comprehensive", "in detail", "elaborate", "tell me everything",
+        "all about", "deep dive", "summarize everything",
+    ]
+    if any(ind in q for ind in _synthesis_indicators):
+        # Exception: allow simple factual queries that happen to contain these words
+        # e.g., "what is my email" should still extract even if query has "system" elsewhere
+        _simple_factual = ["my name", "who am i", "email", "phone", "number", "university", "college"]
+        if not any(sf in q for sf in _simple_factual):
+            return ""  # Skip extraction — let LLM handle synthesis queries
+
     # ── Detect pure greetings (no factual question after prefix removal) ──
     q_clean = q.rstrip("?!.,")
     greeting_only = q_clean in ["", "how are you", "how are you doing",
@@ -592,35 +611,78 @@ def _try_extract_factual(query: str, evidence_texts: list) -> str:
     if not all_ev:
         return ""
 
-    # ── Name ──
-    if any(w in q for w in ["my name", "who am i", "full name", "what's my name"]):
-        # Try bold pattern first
+    # ── Combined personal info extraction ──
+    # Detect which facts the user is asking for, extract all, and combine.
+    wants_name = any(w in q for w in ["my name", "who am i", "full name", "what's my name", "whats my name"])
+    wants_email = any(w in q for w in ["email", "e-mail", "mail address", "gmail"])
+    wants_phone = any(w in q for w in ["phone", "number", "contact number", "mobile"])
+
+    extracted_parts = []
+
+    # ── Name extraction ──
+    if wants_name:
+        name = None
+        # Try bold pattern
         m = re.search(r'\*\*([A-Z][a-z]+ [A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\*\*', all_ev)
         if m:
-            return f"Your name is **{m.group(1)}**!"
-        # Try "My name is X Y" pattern
-        m = re.search(r'[Mm]y name is ([A-Z][a-z]+ [A-Z][a-z]+)', all_ev)
-        if m:
-            return f"Your name is **{m.group(1)}**!"
-        # Try "Name: X Y" pattern
-        m = re.search(r'[Nn]ame[:\s]+([A-Z][a-z]+ [A-Z][a-z]+)', all_ev)
-        if m:
-            return f"Your name is **{m.group(1)}**!"
-        # Fallback: first two capitalized words at start of text
-        m = re.search(r'^([A-Z][a-z]+ [A-Z][a-z]+)', all_ev)
-        if m:
-            return f"Your name is **{m.group(1)}**!"
+            name = m.group(1)
+        if not name:
+            m = re.search(r'[Mm]y name is ([A-Z][a-z]+ [A-Z][a-z]+)', all_ev)
+            if m:
+                name = m.group(1)
+        if not name:
+            m = re.search(r'[Nn]ame[:\s]+([A-Z][a-z]+ [A-Z][a-z]+)', all_ev)
+            if m:
+                name = m.group(1)
+        if not name:
+            # Source doc pattern: [Source: ...] Name Name
+            m = re.search(r'\[Source:[^\]]*\]\s*([A-Z][a-z]+ [A-Z][a-z]+)', all_ev)
+            if m:
+                name = m.group(1)
+        if not name:
+            m = re.search(r'^([A-Z][a-z]+ [A-Z][a-z]+)', all_ev)
+            if m:
+                name = m.group(1)
+        if name:
+            extracted_parts.append(f"Your name is **{name}**")
 
-    # ── Email ──
-    if any(w in q for w in ["email", "e-mail", "mail address", "gmail"]):
+    # ── Email extraction ──
+    if wants_email:
         m = re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', all_ev)
         if m:
             email = m.group(0).rstrip('.')
-            return f"Your email address is **{email}**."
+            extracted_parts.append(f"your email is **{email}**")
+
+    # ── Phone extraction (for combined queries) ──
+    if wants_phone:
+        # Prefer +country-code format, then 10+ digit sequences
+        m = re.search(r'\+\d{1,3}[\s-]?\d[\d\s-]{8,14}\d', all_ev)
+        if not m:
+            # Fallback: 10+ consecutive digits possibly with spaces/hyphens
+            m = re.search(r'(?<!\d)\d{10,13}(?!\d)', all_ev.replace(' ', '').replace('-', ''))
+        if m:
+            extracted_parts.append(f"your phone number is **{m.group(0).strip()}**")
+
+    # If we extracted any facts, return combined answer
+    if extracted_parts:
+        if len(extracted_parts) == 1:
+            return extracted_parts[0] + "!"
+        # Capitalize first part, join with 'and'
+        first = extracted_parts[0]
+        rest = " and ".join(extracted_parts[1:])
+        return f"{first}, and {rest}."
+
+    # Single-intent fallback for name-only (in case no name found above)
+    if wants_name and not wants_email and not wants_phone:
+        return ""
+    if wants_email:
+        return ""
+    if wants_phone:
+        return ""
 
     # ── Phone ──
     if any(w in q for w in ["phone", "number", "contact number", "mobile"]):
-        m = re.search(r'\+?\d[\d\s-]{8,15}', all_ev)
+        m = re.search(r'\+\d{1,3}[\s-]?\d[\d\s-]{8,14}\d', all_ev)
         if m:
             return f"Your phone number is **{m.group(0).strip()}**."
 
@@ -630,8 +692,9 @@ def _try_extract_factual(query: str, evidence_texts: list) -> str:
                              "education", "my degree", "studying", "b.tech", "btech",
                              "education background"]):
         # Try to find degree + institution combo
+        # Note: "Master" alone matches "Master-Resume.md" so require "Master's" or "Masters"
         degree_match = re.search(
-            r'(B\.?Tech|M\.?Tech|B\.?Sc|M\.?Sc|MBA|Ph\.?D|Bachelor|Master)[^\n]{0,120}',
+            r'(B\.?Tech|M\.?Tech|Btech|B\.?Sc|M\.?Sc|MBA|Ph\.?D|Bachelor|Master(?:\'?s))[^\n]{0,120}',
             all_ev, re.IGNORECASE
         )
         uni_match = re.search(
@@ -819,13 +882,19 @@ def _split_thinking(text: str):
 # ── LLM Provider Helpers ─────────────────────────────────────────────────────
 
 def _set_request_provider(provider: str):
-    """Set the LLM provider for this request (called at the start of handlers).
-    If 'local' is requested but no local model is loaded, keep Gemini active."""
+    """Set the LLM provider for this request. Raises ValueError if the
+    requested provider is genuinely unavailable (no silent fallback)."""
     if rag_engine.initialized and hasattr(rag_engine.llm, "set_provider"):
-        # Don't switch to local if there's no local model
-        if provider == "local" and (rag_engine.llm.local_llm is None
-                                     or rag_engine.llm.local_llm.model is None):
-            provider = "gemini" if rag_engine.llm.has_gemini else "local"
+        local_available = (rag_engine.llm.local_llm is not None
+                           and rag_engine.llm.local_llm.model is not None)
+        gemini_available = rag_engine.llm.has_gemini
+
+        if provider == "local" and not local_available:
+            raise ValueError("local_unavailable")
+
+        if provider == "gemini" and not gemini_available:
+            raise ValueError("gemini_unavailable")
+
         rag_engine.llm.set_provider(provider)
 
 
@@ -863,7 +932,7 @@ async def _stream_gemini_generate(prompt: str, req):
 async def _stream_gemini_rag_generate(
     user_message: str, history: list, req, evidence_texts: list,
     has_meaningful_evidence: bool, has_pageindex_evidence: bool,
-    is_document_query: bool, msg_id: str
+    is_document_query: bool, msg_id: str, is_synthesis: bool = False
 ):
     """Stream Gemini API response with RAG evidence context."""
     gemini = rag_engine.llm.gemini_llm
@@ -878,6 +947,21 @@ async def _stream_gemini_rag_generate(
                 "NEVER make up information. NEVER add citations like [1] [2]."
             )
             context_label = "Relevant document content"
+        elif is_synthesis:
+            system = (
+                "You are Cortex Lab, an intelligent personal AI assistant who deeply understands the user. "
+                "The user is asking a synthesis question that requires a comprehensive, thoughtful answer. "
+                "Write a THOROUGH, multi-paragraph response that covers ALL relevant aspects from the evidence. "
+                "Weave together themes, ideas, and details into a cohesive narrative. "
+                "Be specific — reference concrete projects, ideas, writings, and experiences. "
+                "Connect different pieces of evidence to paint a complete picture. "
+                "Write at least 3-5 paragraphs for complex questions about vision, philosophy, or worldview. "
+                "Speak warmly and conversationally. Use 'you/your' when referring to the user. "
+                "NEVER truncate your answer — finish every thought completely. "
+                "NEVER say 'Based on stored memories' or cite evidence numbers. "
+                "NEVER generate labels like 'Confidence:', 'Evidence:', 'Answer:'."
+            )
+            context_label = "Here is what I know about you"
         else:
             system = (
                 "You are Cortex Lab, an intelligent personal AI assistant who knows the user well. "
@@ -973,37 +1057,58 @@ async def get_llm_provider():
         and hasattr(rag_engine.llm, "has_gemini")
         and rag_engine.llm.has_gemini
     )
+    local_available = (
+        rag_engine.initialized
+        and rag_engine.llm.local_llm is not None
+        and rag_engine.llm.local_llm.model is not None
+    )
     current = "local"
     if rag_engine.initialized and hasattr(rag_engine.llm, "provider"):
         current = rag_engine.llm.provider
+    available = []
+    if local_available:
+        available.append("local")
+    if has_gemini:
+        available.append("gemini")
     return {
         "provider": current,
-        "available": ["local", "gemini"] if has_gemini else ["local"],
+        "available": available,
         "gemini_configured": has_gemini,
-        "local_model_loaded": model_loaded,
+        "local_model_loaded": local_available,
     }
 
 
 @app.post("/api/llm/provider")
 async def set_llm_provider(body: dict):
-    """Switch the active LLM provider ('local' or 'gemini')."""
+    """Switch the active LLM provider ('local' or 'gemini'). Strict isolation."""
     provider = body.get("provider", "local")
     if provider not in ("local", "gemini"):
         raise HTTPException(400, "Provider must be 'local' or 'gemini'")
     if provider == "gemini":
         if not (rag_engine.initialized and rag_engine.llm.has_gemini):
             raise HTTPException(400, "Gemini is not configured. Set GOOGLE_API_KEY in backend/.env")
+    if provider == "local":
+        local_available = (rag_engine.initialized
+                           and rag_engine.llm.local_llm is not None
+                           and rag_engine.llm.local_llm.model is not None)
+        if not local_available:
+            raise HTTPException(400, "Local model is not loaded. Start with SKIP_LOCAL_MODEL=false or load the model first.")
     rag_engine.llm.set_provider(provider)
     return {"provider": provider, "status": "switched"}
 
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
-    if not model_loaded and req.llm_provider == "local":
-        raise HTTPException(503, "Model is still loading. Please wait.")
-
     # Apply per-request LLM provider switch
-    _set_request_provider(req.llm_provider)
+    try:
+        _set_request_provider(req.llm_provider)
+    except ValueError as e:
+        if "local_unavailable" in str(e):
+            raise HTTPException(
+                503,
+                "Local model is not loaded. Switch to Gemini in settings, or start the server with a local model."
+            )
+        raise HTTPException(503, f"LLM provider '{req.llm_provider}' is not available.")
 
     # ── Gemini path (no local model needed) ──────────────────────────────
     if _is_gemini_active():
@@ -1205,14 +1310,19 @@ async def _stream_generate(prompt: str, req: ChatRequest):
 async def rag_chat(req: RAGChatRequest):
     """RAG-enhanced chat: uses memory retrieval + multi-agent reasoning.
     Supports both streaming and non-streaming modes."""
-    # Gemini can work even without the local model loaded
-    if not model_loaded and req.llm_provider == "local":
-        raise HTTPException(503, "Model is still loading.")
     if not rag_engine.initialized:
         raise HTTPException(503, "RAG engine is still initializing.")
 
     # Apply per-request LLM provider switch
-    _set_request_provider(req.llm_provider)
+    try:
+        _set_request_provider(req.llm_provider)
+    except ValueError as e:
+        if "local_unavailable" in str(e):
+            raise HTTPException(
+                503,
+                "Local model is not loaded. Switch to Gemini in settings, or start the server with a local model."
+            )
+        raise HTTPException(503, f"LLM provider '{req.llm_provider}' is not available.")
 
     user_message = req.messages[-1].content if req.messages else ""
     if not user_message:
@@ -1305,11 +1415,85 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
         _store_trace(rag_result.get("pipeline_trace"))
 
         # Step 2: Build prompt with evidence context for streaming generation
+
+        # ── Supplement: Direct memory search for personal info queries ──
+        # The hybrid retriever's RRF fusion can miss high-quality results.
+        # For simple personal-info queries, do a direct vector search and
+        # inject any highly-relevant results into the evidence list.
+        _personal_triggers = [
+            "my name", "who am i", "my email", "e-mail", "my phone",
+            "my number", "contact", "my education", "where do i study",
+            "my university", "my college", "my skills", "my resume",
+            "my experience", "my projects", "what do i do",
+            "my location", "my hometown", "my address", "about me",
+            "my degree", "my profile", "my background",
+        ]
+        _q_for_supplement = user_message.lower()
+        if any(t in _q_for_supplement for t in _personal_triggers):
+            try:
+                # Use augmented search terms that match resume/personal data content
+                # rather than the raw question (which has low semantic similarity).
+                # All personal-info queries benefit from "resume contact summary"
+                # base terms since personal data lives in the resume memories.
+                _base = "resume contact information summary"
+                _search_augments = {
+                    "my name": f"{_base} name email phone B.Tech",
+                    "who am i": f"{_base} name email phone B.Tech",
+                    "my email": f"{_base} name email phone B.Tech",
+                    "e-mail": f"{_base} name email phone B.Tech",
+                    "my phone": f"{_base} name email phone B.Tech",
+                    "my number": f"{_base} name email phone B.Tech",
+                    "contact": f"{_base} name email phone B.Tech",
+                    "my education": f"{_base} education university degree B.Tech",
+                    "where do i study": f"{_base} education university degree B.Tech",
+                    "my university": f"{_base} education university degree B.Tech",
+                    "my college": f"{_base} education university degree B.Tech",
+                    "my skills": f"{_base} skills programming technical tools frameworks",
+                    "my resume": f"{_base} name email phone education skills B.Tech",
+                    "my experience": f"{_base} experience internship work projects",
+                    "my projects": f"{_base} projects portfolio built developed",
+                    "about me": f"{_base} name email phone education skills B.Tech",
+                    "my degree": f"{_base} education university degree B.Tech",
+                    "my profile": f"{_base} name email phone education skills B.Tech",
+                    "my background": f"{_base} education experience skills B.Tech",
+                }
+                # Pick the best augmented query based on which triggers matched
+                matched_aug = None
+                for trigger, aug in _search_augments.items():
+                    if trigger in _q_for_supplement:
+                        matched_aug = aug
+                        break
+                augmented_query = matched_aug or f"{_base} name email phone B.Tech"
+
+                supplement = rag_engine.search_memories(augmented_query, top_k=3)
+                existing_ids = {e.get("content", "")[:50] for e in evidence}
+                for mem in supplement:
+                    score = mem.get("score", 0)
+                    if score > 0.45:
+                        preview = mem.get("content", "")[:50]
+                        if preview not in existing_ids:
+                            evidence.insert(0, {
+                                "content": mem.get("content", "")[:600],
+                                "score": score,
+                                "channel": "direct_supplement",
+                                "memory_type": mem.get("memory_type", "semantic"),
+                            })
+            except Exception as exc:
+                pass  # Supplement is best-effort
+
         # PageIndex evidence gets priority — document content should always appear
         # when the user is asking about uploaded documents
         evidence_texts = []
         has_pageindex_evidence = False
         pageindex_evidence_count = 0
+
+        # ── Query-adaptive evidence limits ──
+        # Complex/synthesis queries need more context for comprehensive answers.
+        _query_complexity = query_analysis.get("complexity", 0.5) if isinstance(query_analysis, dict) else 0.5
+        _query_intent = query_analysis.get("intent", "") if isinstance(query_analysis, dict) else ""
+        _is_synthesis = _query_complexity >= 0.6 or _query_intent in ("reflective", "comparative", "causal")
+        _max_evidence_chars = 1500 if _is_synthesis else 500
+        _max_evidence_items = 12 if _is_synthesis else 7
 
         # First pass: collect PageIndex evidence (from uploaded documents)
         for e in evidence[:20]:
@@ -1324,7 +1508,7 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
                         break
 
         # Second pass: fill remaining slots with local memory evidence
-        for e in evidence[:12]:
+        for e in evidence[:16]:
             channel = e.get("channel", "")
             if "pageindex" in channel:
                 continue  # Already handled above
@@ -1348,8 +1532,8 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
             if re.match(r'^(tell me|what is|what are|who is|where is|how is|list|describe|explain)\b', lower):
                 if len(content) < 200 and "[source:" not in lower:
                     continue
-            evidence_texts.append(content[:250])
-            if len(evidence_texts) >= 5:
+            evidence_texts.append(content[:_max_evidence_chars])
+            if len(evidence_texts) >= _max_evidence_items:
                 break
         evidence_block = "\n".join(f"[{i+1}] {e}" for i, e in enumerate(evidence_texts))
 
@@ -1434,6 +1618,9 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
                 # Document-aware prompt — when PageIndex evidence is present,
                 # the user is asking about their uploaded documents
                 rag_prompt = PromptBuilder.pageindex_generation(user_message, evidence_block)
+            elif _is_synthesis:
+                # Complex synthesis/vision/philosophical query needs comprehensive prompt
+                rag_prompt = PromptBuilder.synthesis_rag_generation(user_message, evidence_block)
             else:
                 rag_prompt = PromptBuilder.streaming_rag_generation(user_message, evidence_block)
         else:
@@ -1445,7 +1632,7 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
             async for event in _stream_gemini_rag_generate(
                 user_message, history, req, evidence_texts,
                 has_meaningful_evidence, has_pageindex_evidence,
-                is_document_query, msg_id,
+                is_document_query, msg_id, _is_synthesis,
             ):
                 yield event
             return
@@ -1829,6 +2016,68 @@ async def get_pipeline_trace(trace_id: str):
     raise HTTPException(404, f"Trace {trace_id} not found")
 
 
+# ── Live Pipeline Events (Real-Time SSE) ────────────────────────────────────
+
+from src.observability import pipeline_events
+
+@app.get("/api/rag/pipeline-events")
+async def live_pipeline_events(request: Request):
+    """
+    SSE endpoint for real-time pipeline step events.
+    Frontend subscribes here before sending a chat request to see
+    each pipeline step light up in real-time as it executes.
+    Uses a global broadcast — events include trace_id so clients
+    can filter to their own request.
+    """
+    subscriber_id = f"sub-{uuid.uuid4().hex[:8]}"
+
+    async def event_generator():
+        queue = pipeline_events.subscribe_global(subscriber_id)
+        try:
+            while True:
+                # Check if client disconnected
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield event.to_sse()
+                except asyncio.TimeoutError:
+                    # Send keepalive
+                    yield f": keepalive\n\n"
+        finally:
+            pipeline_events.unsubscribe_global(subscriber_id)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+@app.get("/api/rag/observability/metrics")
+async def observability_metrics():
+    """Get aggregate observability metrics from the pipeline event bus."""
+    metrics = pipeline_events.get_metrics()
+
+    # Add compression stats if available
+    try:
+        from src.compression import ContextCompressor
+        comp = ContextCompressor()
+        metrics["compression"] = comp.get_stats()
+    except Exception:
+        metrics["compression"] = {}
+
+    # Add cache stats
+    if rag_engine.initialized and rag_engine.cache:
+        metrics["cache"] = rag_engine.cache.get_stats()
+
+    return metrics
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  AMBIENT VOICE SERVICE — STT / TTS / Speaker ID
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1845,6 +2094,12 @@ class AmbientConfigUpdate(BaseModel):
     whisper_device: Optional[str] = None
     whisper_language: Optional[str] = None
     record_raw_audio: Optional[bool] = None
+    stt_provider: Optional[str] = None       # "traditional" or "gemini"
+    tts_provider: Optional[str] = None       # "traditional" or "gemini"
+    gemini_tts_voice: Optional[str] = None   # Gemini voice name
+    wake_word_enabled: Optional[bool] = None  # Enable wake word detection
+    wake_word_threshold: Optional[float] = None  # Wake word confidence threshold
+    wake_word_mode: Optional[str] = None     # "always_on", "manual", "hybrid"
 
 class TTSSynthesizeRequest(BaseModel):
     text: str
@@ -1926,6 +2181,69 @@ async def update_ambient_config(req: AmbientConfigUpdate):
     return config.to_dict()
 
 
+# ── Voice Provider Management ────────────────────────────────────────────────
+
+class VoiceProviderRequest(BaseModel):
+    provider: str  # "traditional" or "gemini"
+
+@app.get("/api/ambient/voice-providers")
+async def get_voice_providers():
+    """Get available voice providers and current selection."""
+    ambient = _get_ambient()
+    return {
+        "stt_provider": ambient.get_stt_provider(),
+        "tts_provider": ambient.get_tts_provider(),
+        "gemini_available": ambient._gemini_api_key is not None,
+        "traditional_stt_available": ambient._traditional_stt is not None,
+        "traditional_tts_available": (ambient._traditional_tts is not None
+                                      and ambient._traditional_tts.is_available),
+        "gemini_stt_available": ambient._gemini_stt is not None,
+        "gemini_tts_available": ambient._gemini_tts is not None,
+        "gemini_tts_voices": ["Aoede", "Charon", "Fenrir", "Kore",
+                              "Puck", "Leda", "Orus", "Zephyr"],
+    }
+
+@app.post("/api/ambient/wake-word/enable")
+async def enable_wake_word():
+    """Enable wake word detection."""
+    ambient = _get_ambient()
+    ambient.update_config({"wake_word_enabled": True})
+    return {"success": True, "wake_word_enabled": True}
+
+@app.post("/api/ambient/wake-word/disable")
+async def disable_wake_word():
+    """Disable wake word detection."""
+    ambient = _get_ambient()
+    ambient.update_config({"wake_word_enabled": False})
+    return {"success": True, "wake_word_enabled": False}
+
+@app.get("/api/ambient/wake-word/status")
+async def get_wake_word_status():
+    """Get wake word detector status."""
+    ambient = _get_ambient()
+    if ambient.wake_word:
+        return ambient.wake_word.get_stats()
+    return {"available": False, "running": False, "wake_word": None}
+
+@app.post("/api/ambient/stt-provider")
+async def set_stt_provider(req: VoiceProviderRequest):
+    """Switch STT provider between traditional and Gemini."""
+    ambient = _get_ambient()
+    result = ambient.set_stt_provider(req.provider)
+    if not result["success"]:
+        raise HTTPException(400, result["error"])
+    return result
+
+@app.post("/api/ambient/tts-provider")
+async def set_tts_provider(req: VoiceProviderRequest):
+    """Switch TTS provider between traditional and Gemini."""
+    ambient = _get_ambient()
+    result = ambient.set_tts_provider(req.provider)
+    if not result["success"]:
+        raise HTTPException(400, result["error"])
+    return result
+
+
 # ── Voice Enrollment ─────────────────────────────────────────────────────────
 
 @app.post("/api/ambient/enroll")
@@ -1935,6 +2253,13 @@ async def start_enrollment(req: EnrollmentRequest):
     if ambient.enrollment is None:
         # Initialize components if not yet done
         await ambient._init_components()
+    if ambient.speaker_id is None:
+        raise HTTPException(
+            503,
+            "Speaker identification is unavailable on this system. "
+            "Voice enrollment requires SpeechBrain (ECAPA-TDNN). "
+            "Ambient listening still works without enrollment."
+        )
     result = await ambient.enrollment.start_enrollment(req.duration_seconds)
     return result
 
@@ -1946,9 +2271,7 @@ async def enrollment_status():
     enrolled = False
     if ambient.speaker_id:
         enrolled = ambient.speaker_id.is_enrolled()
-    elif ambient.enrollment:
-        enrolled = ambient.enrollment.is_enrolled()
-    return {"enrolled": enrolled}
+    return {"enrolled": enrolled, "speaker_id_available": ambient.speaker_id is not None}
 
 
 @app.post("/api/ambient/speaker-alias")
@@ -1999,15 +2322,24 @@ async def get_live_transcript():
 
 @app.post("/api/tts/synthesize")
 async def tts_synthesize(req: TTSSynthesizeRequest):
-    """Synthesize text to speech. Returns WAV audio."""
+    """Synthesize text to speech. Returns WAV audio.
+    Uses the currently configured TTS provider (traditional or Gemini)."""
     ambient = _get_ambient()
-    if not ambient.tts:
-        # Try to initialize TTS alone
-        await ambient._init_components()
-    if not ambient.tts or not ambient.tts.is_available:
-        raise HTTPException(503, "TTS not available. Voice model may not be downloaded.")
 
-    wav_bytes = ambient.tts.synthesize_to_wav(req.text)
+    # Ensure components are initialized
+    if not ambient.tts:
+        await ambient._init_components()
+
+    tts = ambient.tts
+    if not tts or not tts.is_available:
+        raise HTTPException(503, "TTS not available. Check provider config or model download.")
+
+    # Use async version if available (Gemini), otherwise sync
+    if hasattr(tts, 'synthesize_to_wav_async'):
+        wav_bytes = await tts.synthesize_to_wav_async(req.text)
+    else:
+        wav_bytes = tts.synthesize_to_wav(req.text)
+
     if not wav_bytes:
         raise HTTPException(500, "TTS synthesis failed.")
 
@@ -2080,10 +2412,13 @@ async def voice_query(req: VoiceQueryRequest):
     if not answer_text:
         answer_text = f"I heard: '{user_text}'. I don't have enough context to answer that yet."
 
-    # 4. TTS (optional)
+    # 4. TTS (optional) — uses active provider (traditional or Gemini)
     audio_base64_response = None
     if ambient.tts and ambient.tts.is_available and ambient.config.tts_enabled:
-        wav_bytes = ambient.tts.synthesize_to_wav(answer_text)
+        if hasattr(ambient.tts, 'synthesize_to_wav_async'):
+            wav_bytes = await ambient.tts.synthesize_to_wav_async(answer_text)
+        else:
+            wav_bytes = ambient.tts.synthesize_to_wav(answer_text)
         if wav_bytes:
             audio_base64_response = base64.b64encode(wav_bytes).decode("utf-8")
 
@@ -2094,6 +2429,8 @@ async def voice_query(req: VoiceQueryRequest):
         "audio_base64": audio_base64_response,
         "language": transcript.get("language", ""),
         "stt_confidence": transcript.get("confidence", 0),
+        "stt_provider": ambient.config.stt_provider,
+        "tts_provider": ambient.config.tts_provider,
     }
 
 
