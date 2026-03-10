@@ -58,3 +58,4 @@ tsconfig.tsbuildinfo
 .copilot/
 .windsurf/skills/
 .gemini/skills/
+.venv/

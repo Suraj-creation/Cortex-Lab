@@ -530,12 +530,13 @@ class CortexRAGEngine:
                 for m in recent
             )
 
-        # 1. Ingest user message as memory in background (§5.1) — don't block chat
-        memory = None
-        if self._is_meaningful_content(user_message) and self.ingestion:
-            asyncio.create_task(self._background_ingest(
-                user_message, session_id, session_context
-            ))
+        # NOTE: Chat queries are NOT ingested as memories (§5.1 revised).
+        # Memories should only be created through:
+        #   1. Manual "Add Memory" button in Memory Browser
+        #   2. Ambient STT pipeline (voice-captured knowledge)
+        #   3. /api/memories/ingest endpoint (programmatic)
+        # Ingesting every chat query pollutes the vector store with questions
+        # that later surface as low-quality evidence in retrieval.
 
         # 2. Check cache (provider-aware: Gemini vs Local have separate caches)
         _provider = getattr(self.llm, 'provider', 'local') if self.llm else 'local'
@@ -596,7 +597,12 @@ class CortexRAGEngine:
         # 5. Cache result (provider-aware)
         self.cache.set(user_message, result, provider=_provider)
 
-        # 6. Store assistant conversation turn (user turn stored in background ingestion)
+        # 6. Store conversation turns (lightweight — just for history, NOT as memories)
+        self.metadata_store.store_conversation_turn(
+            session_id=session_id,
+            role="user",
+            content=user_message,
+        )
         self.metadata_store.store_conversation_turn(
             session_id=session_id,
             role="assistant",
@@ -636,12 +642,9 @@ class CortexRAGEngine:
                 for m in recent
             )
 
-        # Ingest user message as memory in background (§5.1) — don't block retrieval
-        memory = None
-        if self._is_meaningful_content(user_message) and self.ingestion:
-            asyncio.create_task(self._background_ingest(
-                user_message, session_id, session_context
-            ))
+        # NOTE: Chat queries are NOT ingested as memories (§5.1 revised).
+        # Only manual/ambient/API ingestion creates memories.
+        # See rag_chat() comment for rationale.
 
         # Check cache (provider-aware)
         _provider = getattr(self.llm, 'provider', 'local') if self.llm else 'local'

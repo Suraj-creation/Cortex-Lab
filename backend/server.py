@@ -1835,22 +1835,31 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
         yield f"data: {json.dumps({'id': msg_id, 'delta': '', 'done': True})}\n\n"
         thread.join()
 
-        # Store assistant response in conversation history
+        # Store conversation turns (lightweight history — NOT as memories)
         # Clean accumulated text of any leftover special tokens
         clean_accumulated = accumulated
         for tok in ["<think>", "</think>", "<｜end▁of▁sentence｜>",
                      "<|im_end|>", "<|endoftext|>", "<｜User｜>", "<｜Assistant｜>"]:
             clean_accumulated = clean_accumulated.replace(tok, "")
         clean_accumulated = clean_accumulated.strip()
-        if clean_accumulated and rag_engine and rag_engine.initialized:
+        if rag_engine and rag_engine.initialized:
             try:
+                _sid = req.session_id or f"session-{int(time.time())}"
+                # Store user turn
                 rag_engine.metadata_store.store_conversation_turn(
-                    session_id=req.session_id or f"session-{int(time.time())}",
-                    role="assistant",
-                    content=clean_accumulated,
+                    session_id=_sid,
+                    role="user",
+                    content=user_message,
                 )
+                # Store assistant turn
+                if clean_accumulated:
+                    rag_engine.metadata_store.store_conversation_turn(
+                        session_id=_sid,
+                        role="assistant",
+                        content=clean_accumulated,
+                    )
             except Exception as store_err:
-                print(f"  ⚠️ Failed to store assistant turn: {store_err}")
+                print(f"  ⚠️ Failed to store conversation turn: {store_err}")
 
     except Exception as e:
         error_chunk = {"id": msg_id, "delta": f"\n\n⚠️ RAG streaming error: {str(e)}", "done": True}
@@ -1891,6 +1900,30 @@ async def search_memories(req: MemorySearchRequest):
         raise HTTPException(503, "RAG engine not ready.")
     results = rag_engine.search_memories(query=req.query, top_k=req.top_k)
     return {"results": results, "count": len(results)}
+
+
+@app.delete("/api/memories/purge/chat-queries")
+async def purge_chat_query_memories():
+    """Purge all memories that were auto-ingested from chat queries (source='chat').
+    These pollute the vector store with questions instead of actual knowledge.
+    Only memories added via manual/ambient/API ingestion should be kept."""
+    if not rag_engine.initialized:
+        raise HTTPException(503, "RAG engine not ready.")
+    try:
+        if rag_engine.metadata_store._use_duckdb:
+            # Get all chat-source memory IDs
+            rows = rag_engine.metadata_store.conn.execute(
+                "SELECT id FROM memories WHERE source = 'chat'"
+            ).fetchall()
+            chat_ids = [r[0] for r in rows]
+            deleted = 0
+            for mid in chat_ids:
+                rag_engine.delete_memory(mid)
+                deleted += 1
+            return {"status": "ok", "deleted": deleted, "message": f"Purged {deleted} chat-query memories"}
+        return {"status": "error", "message": "DuckDB not available"}
+    except Exception as e:
+        raise HTTPException(500, f"Purge failed: {str(e)}")
 
 
 @app.delete("/api/memories/{memory_id}")
