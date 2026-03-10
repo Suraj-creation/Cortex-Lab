@@ -19,6 +19,10 @@ import {
   Network,
   Shield,
   Timer,
+  Lightbulb,
+  Eye,
+  EyeOff,
+  CheckCircle,
 } from "lucide-react";
 import { TTSPlayback } from "./TTSPlayback";
 import { PipelineTracePanel } from "./PipelineTracePanel";
@@ -30,44 +34,70 @@ interface Props {
 // React.memo — only re-render when message content/streaming state actually changes (§10.1)
 export const MessageBubble = memo(function MessageBubble({ message }: Props) {
   const [showThinking, setShowThinking] = useState(false);
+  const [showEvidence, setShowEvidence] = useState(false);
   const [copied, setCopied] = useState(false);
   const thinkingEndRef = useRef<HTMLDivElement>(null);
+  const thinkingContainerRef = useRef<HTMLDivElement>(null);
 
   const isUser = message.role === "user";
 
-  // Parse thinking from streamed content
+  // Parse thinking from streamed content (supports <think> and <Thinking> variants)
   let displayContent = message.content;
   let streamedThinking: string | null = null;
   let isCurrentlyThinking = false;
 
-  if (!isUser && message.content.includes("<think>")) {
-    const thinkStart = message.content.indexOf("<think>") + 7;
-    const thinkEnd = message.content.indexOf("</think>");
-    if (thinkEnd > -1) {
-      streamedThinking = message.content.slice(thinkStart, thinkEnd).trim();
-      displayContent = message.content.slice(thinkEnd + 8).trim();
-    } else {
-      // Still thinking
-      streamedThinking = message.content.slice(thinkStart).trim();
-      displayContent = "";
-      isCurrentlyThinking = message.isStreaming || false;
+  if (!isUser) {
+    // Check for lowercase <think>...</think> (streaming injection)
+    if (message.content.includes("<think>")) {
+      const thinkStart = message.content.indexOf("<think>") + 7;
+      const thinkEnd = message.content.indexOf("</think>");
+      if (thinkEnd > -1) {
+        streamedThinking = message.content.slice(thinkStart, thinkEnd).trim();
+        displayContent = message.content.slice(thinkEnd + 8).trim();
+      } else {
+        // Still thinking — </think> hasn't arrived yet
+        streamedThinking = message.content.slice(thinkStart).trim();
+        displayContent = "";
+        isCurrentlyThinking = message.isStreaming || false;
+      }
+    }
+    // Also handle <Thinking>...</Thinking> (model's visible reasoning format)
+    if (displayContent.includes("<Thinking>")) {
+      const tStart = displayContent.indexOf("<Thinking>") + 10;
+      const tEnd = displayContent.indexOf("</Thinking>");
+      if (tEnd > -1) {
+        const visibleThinking = displayContent.slice(tStart, tEnd).trim();
+        streamedThinking = streamedThinking
+          ? streamedThinking + "\n\n---\n\n" + visibleThinking
+          : visibleThinking;
+        displayContent = displayContent.slice(tEnd + 12).trim();
+      }
     }
   }
 
-  const thinking = message.thinking || streamedThinking;
+  // Priority: LLM's deep reasoning (from <think> tags in stream) > orchestrator summary (from rag_meta)
+  // streamedThinking is the actual model reasoning; message.thinking may be either:
+  //   - The orchestrator's brief note (~11 words) — set by onMeta before streaming
+  //   - The full LLM reasoning — persisted by onDone after streaming completes
+  // Use whichever is longer to ensure we never lose the deep reasoning.
+  const thinking = (streamedThinking && message.thinking)
+    ? (streamedThinking.length >= (message.thinking?.length || 0) ? streamedThinking : message.thinking)
+    : (streamedThinking || message.thinking);
   const hasOutput = displayContent.trim().length > 0;
 
-  // Auto-expand thinking when streaming
+  // Auto-expand thinking when it first appears and keep expanded
   useEffect(() => {
-    if (isCurrentlyThinking && thinking) {
+    if (thinking && thinking.length > 0) {
       setShowThinking(true);
     }
-  }, [isCurrentlyThinking, thinking]);
+  }, [thinking]);
 
-  // Auto-scroll thinking panel
+  // Auto-scroll thinking panel content (NOT the page) while actively thinking
   useEffect(() => {
-    if (showThinking && isCurrentlyThinking) {
-      thinkingEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (showThinking && isCurrentlyThinking && thinkingContainerRef.current) {
+      // Scroll the thinking container to its bottom, not the page
+      const container = thinkingContainerRef.current;
+      container.scrollTop = container.scrollHeight;
     }
   }, [thinking, showThinking, isCurrentlyThinking]);
 
@@ -111,50 +141,78 @@ export const MessageBubble = memo(function MessageBubble({ message }: Props) {
             )}
           </div>
 
-          {/* Live Thinking Panel - Enhanced */}
+          {/* Live Thinking Panel — Modern Collapsible Reasoning Display */}
           {thinking && (
-            <div className={`rounded-2xl overflow-hidden border transition-all duration-300 ${
+            <div className={`rounded-2xl overflow-hidden transition-all duration-300 ${
               isCurrentlyThinking 
-                ? 'border-indigo-200 bg-indigo-50/50 shadow-lg shadow-indigo-100/30' 
-                : 'border-slate-200 bg-slate-50/50'
+                ? 'bg-gradient-to-br from-indigo-50/80 via-violet-50/40 to-purple-50/30 shadow-lg shadow-indigo-100/40 ring-1 ring-indigo-200/60 thinking-active' 
+                : 'bg-gradient-to-br from-slate-50/80 via-gray-50/40 to-slate-50/30 ring-1 ring-slate-200/60'
             }`}>
+              {/* Header */}
               <button
                 onClick={() => setShowThinking((p) => !p)}
-                className={`flex w-full items-center gap-2.5 px-4 py-3 text-sm font-medium transition-colors ${
+                className={`flex w-full items-center gap-2.5 px-4 py-3 text-sm font-medium transition-all duration-200 ${
                   isCurrentlyThinking
-                    ? 'text-indigo-600 hover:bg-indigo-50'
-                    : 'text-slate-500 hover:bg-slate-50'
+                    ? 'text-indigo-700 hover:bg-indigo-50/50'
+                    : 'text-slate-500 hover:bg-slate-50/50'
                 }`}
               >
-                {isCurrentlyThinking ? (
-                  <Brain size={14} className="text-indigo-500 animate-pulse" />
-                ) : (
-                  <Brain size={14} className="text-slate-400" />
-                )}
-                <span className="flex items-center gap-2">
+                {/* Brain icon with glow when active */}
+                <div className={`relative flex items-center justify-center w-7 h-7 rounded-lg ${
+                  isCurrentlyThinking
+                    ? 'bg-indigo-100 shadow-sm shadow-indigo-200/50'
+                    : 'bg-slate-100'
+                }`}>
                   {isCurrentlyThinking ? (
-                    <>
-                      <span className="relative flex h-2 w-2">
-                        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-indigo-400 opacity-75" />
-                        <span className="relative inline-flex h-2 w-2 rounded-full bg-indigo-400" />
-                      </span>
-                      <span>Thinking...</span>
-                    </>
+                    <Brain size={14} className="text-indigo-600 animate-pulse" />
                   ) : (
-                    <span>Reasoning Process</span>
+                    <Lightbulb size={14} className="text-slate-400" />
                   )}
-                </span>
-                {showThinking ? (
-                  <ChevronDown size={14} className="ml-auto" />
-                ) : (
-                  <ChevronRight size={14} className="ml-auto" />
-                )}
+                  {isCurrentlyThinking && (
+                    <span className="absolute -top-0.5 -right-0.5 flex h-2.5 w-2.5">
+                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-indigo-400 opacity-60" />
+                      <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-indigo-500" />
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex flex-col items-start gap-0.5">
+                  <span className="text-[13px] font-semibold">
+                    {isCurrentlyThinking ? "Qwen is thinking…" : "Reasoning Process"}
+                  </span>
+                  {!isCurrentlyThinking && thinking && (
+                    <span className="text-[10px] text-slate-400 font-normal">
+                      {thinking.split(/\s+/).length} words of reasoning
+                    </span>
+                  )}
+                </div>
+
+                <div className="ml-auto flex items-center gap-2">
+                  {isCurrentlyThinking && (
+                    <span className="flex items-center gap-1.5 text-[10px] text-indigo-500 bg-indigo-50 px-2 py-0.5 rounded-full">
+                      <span className="relative flex h-1.5 w-1.5">
+                        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-indigo-400 opacity-75" />
+                        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-indigo-500" />
+                      </span>
+                      Live
+                    </span>
+                  )}
+                  <div className={`flex items-center justify-center w-6 h-6 rounded-md transition-colors ${
+                    showThinking ? 'bg-indigo-100/80 text-indigo-600' : 'bg-slate-100/80 text-slate-400'
+                  }`}>
+                    {showThinking ? <EyeOff size={12} /> : <Eye size={12} />}
+                  </div>
+                </div>
               </button>
+
+              {/* Thinking content */}
               {showThinking && (
-                <div className={`border-t px-4 py-3.5 text-sm leading-relaxed max-h-96 overflow-y-auto ${
+                <div
+                  ref={thinkingContainerRef}
+                  className={`border-t px-4 py-4 text-sm leading-relaxed max-h-[40rem] overflow-y-auto scroll-smooth thinking-content-enter ${
                   isCurrentlyThinking 
-                    ? 'border-indigo-200 text-slate-600 bg-indigo-50/30' 
-                    : 'border-slate-100 text-slate-500'
+                    ? 'border-indigo-100/80 bg-white/40' 
+                    : 'border-slate-100/80 bg-white/30'
                 }`}>
                   <div className="space-y-2">
                     <ReactMarkdown
@@ -165,9 +223,20 @@ export const MessageBubble = memo(function MessageBubble({ message }: Props) {
                       {thinking}
                     </ReactMarkdown>
                     {isCurrentlyThinking && (
-                      <div className="flex items-center gap-2 pt-2 text-xs text-indigo-400">
+                      <div className="flex items-center gap-2 pt-3 text-xs text-indigo-400/80">
                         <Sparkles size={12} className="animate-pulse" />
-                        <span className="italic">Processing thoughts...</span>
+                        <span className="italic">Reasoning in progress…</span>
+                        <span className="flex gap-0.5">
+                          <span className="typing-dot h-1 w-1 rounded-full bg-indigo-300" />
+                          <span className="typing-dot h-1 w-1 rounded-full bg-indigo-300" />
+                          <span className="typing-dot h-1 w-1 rounded-full bg-indigo-300" />
+                        </span>
+                      </div>
+                    )}
+                    {!isCurrentlyThinking && !message.isStreaming && thinking && (
+                      <div className="flex items-center gap-2 pt-3 text-xs text-emerald-500/80">
+                        <CheckCircle size={12} />
+                        <span>Reasoning complete · {thinking.split(/\s+/).length} words</span>
                       </div>
                     )}
                   </div>
@@ -177,17 +246,17 @@ export const MessageBubble = memo(function MessageBubble({ message }: Props) {
             </div>
           )}
 
-          {/* Main Output - Clearly Separated */}
+          {/* Main Output — Separated from Thinking */}
           {hasOutput && (
             <>
               {thinking && (
-                <div className="flex items-center gap-2 pt-1 pb-1">
-                  <div className="h-px flex-1 bg-gradient-to-r from-transparent via-indigo-300 to-transparent" />
-                  <span className="text-[10px] uppercase tracking-wider text-indigo-400 flex items-center gap-1">
-                    <Zap size={10} />
-                    Response
+                <div className="flex items-center gap-3 pt-1.5 pb-1.5">
+                  <div className="h-px flex-1 bg-gradient-to-r from-transparent via-indigo-200 to-transparent" />
+                  <span className="text-[10px] uppercase tracking-widest text-indigo-400/80 flex items-center gap-1.5 font-medium">
+                    <Zap size={10} className="text-indigo-400" />
+                    Final Answer
                   </span>
-                  <div className="h-px flex-1 bg-gradient-to-r from-transparent via-indigo-300 to-transparent" />
+                  <div className="h-px flex-1 bg-gradient-to-r from-transparent via-indigo-200 to-transparent" />
                 </div>
               )}
               <div className="prose-chat text-slate-700">
@@ -239,10 +308,13 @@ export const MessageBubble = memo(function MessageBubble({ message }: Props) {
             </div>
           )}
 
-          {/* RAG Evidence Cards */}
+          {/* RAG Evidence Cards — collapsible to save space */}
           {!isUser && message.evidence && message.evidence.length > 0 && (
-            <div className="mt-3 space-y-2">
-              <div className="flex items-center gap-2">
+            <div className="mt-3">
+              <button
+                onClick={() => setShowEvidence((p) => !p)}
+                className="flex items-center gap-2 w-full text-left group/ev hover:bg-slate-50/50 rounded-lg px-2 py-1.5 -mx-2 transition-colors"
+              >
                 <FileText size={12} className="text-slate-400" />
                 <span className="text-[11px] font-medium text-slate-500">
                   Evidence ({message.evidence.length} memories)
@@ -258,47 +330,56 @@ export const MessageBubble = memo(function MessageBubble({ message }: Props) {
                     {Math.round(message.confidence * 100)}% confidence
                   </span>
                 )}
-              </div>
-              <div className="grid gap-2">
-                {message.evidence.slice(0, 3).map((ev, idx) => (
-                  <div
-                    key={idx}
-                    className="rounded-xl border border-slate-200 bg-slate-50/50 p-3 text-xs hover:border-slate-300 transition-colors"
-                  >
-                    <div className="flex items-center gap-2 mb-1.5">
-                      <span className="px-1.5 py-0.5 rounded-md bg-indigo-50 text-indigo-600 text-[9px] font-medium uppercase tracking-wider">
-                        {ev.memory_type}
-                      </span>
-                      <span className="text-slate-400 text-[9px]">
-                        {new Date(ev.timestamp).toLocaleDateString()}
-                      </span>
-                      <span className="text-slate-400 text-[9px]">
-                        Score: {ev.score}
-                      </span>
-                      {ev.channel && (
-                        <span className="text-slate-400 text-[9px]">
-                          via {ev.channel}
+                <div className="ml-auto">
+                  {showEvidence ? (
+                    <ChevronDown size={12} className="text-slate-400" />
+                  ) : (
+                    <ChevronRight size={12} className="text-slate-400" />
+                  )}
+                </div>
+              </button>
+              {showEvidence && (
+                <div className="grid gap-2 mt-2 max-h-[24rem] overflow-y-auto">
+                  {message.evidence.slice(0, 5).map((ev, idx) => (
+                    <div
+                      key={idx}
+                      className="rounded-xl border border-slate-200 bg-slate-50/50 p-3 text-xs hover:border-slate-300 transition-colors"
+                    >
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <span className="px-1.5 py-0.5 rounded-md bg-indigo-50 text-indigo-600 text-[9px] font-medium uppercase tracking-wider">
+                          {ev.memory_type}
                         </span>
+                        <span className="text-slate-400 text-[9px]">
+                          {new Date(ev.timestamp).toLocaleDateString()}
+                        </span>
+                        <span className="text-slate-400 text-[9px]">
+                          Score: {ev.score}
+                        </span>
+                        {ev.channel && (
+                          <span className="text-slate-400 text-[9px]">
+                            via {ev.channel}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-slate-600 leading-relaxed">
+                        {ev.content}
+                      </p>
+                      {ev.entities && ev.entities.length > 0 && (
+                        <div className="flex gap-1 mt-1.5">
+                          {ev.entities.map((entity, i) => (
+                            <span
+                              key={i}
+                              className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 text-[9px]"
+                            >
+                              {entity}
+                            </span>
+                          ))}
+                        </div>
                       )}
                     </div>
-                    <p className="text-slate-600 leading-relaxed">
-                      {ev.content}
-                    </p>
-                    {ev.entities && ev.entities.length > 0 && (
-                      <div className="flex gap-1 mt-1.5">
-                        {ev.entities.map((entity, i) => (
-                          <span
-                            key={i}
-                            className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 text-[9px]"
-                          >
-                            {entity}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -365,6 +446,7 @@ export const MessageBubble = memo(function MessageBubble({ message }: Props) {
   return prev.message.id === next.message.id
     && prev.message.content === next.message.content
     && prev.message.isStreaming === next.message.isStreaming
+    && prev.message.isRAG === next.message.isRAG
     && prev.message.thinking === next.message.thinking
     && prev.message.pipelineTrace === next.message.pipelineTrace
     && prev.message.evidence === next.message.evidence

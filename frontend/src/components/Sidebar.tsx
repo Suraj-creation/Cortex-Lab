@@ -172,10 +172,10 @@ export function Sidebar({
             <p className="text-[10px] font-medium text-slate-500 uppercase tracking-wider">Model</p>
           </div>
           <p className="text-xs text-slate-800 mt-1.5 font-medium">
-            DeepSeek-R1-7B
+            Qwen3.5-9B Opus
           </p>
           <p className="text-[10px] text-slate-500 mt-0.5">
-            Curriculum Fine-tuned · 15 Stages
+            Claude 4.6 Opus Reasoning Distilled
           </p>
         </div>
       </div>

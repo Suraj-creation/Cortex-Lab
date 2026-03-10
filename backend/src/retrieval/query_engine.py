@@ -426,30 +426,105 @@ class QueryTransformer:
         # (multi-queries alone are sufficient for good retrieval)
 
     def _transform_parallel_local(self, query: MemoryQuery):
-        """Parallel query transformation using ThreadPoolExecutor for local LLM."""
-        from concurrent.futures import ThreadPoolExecutor
-        futures = {}
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="qtransform") as pool:
-            futures["multi_queries"] = pool.submit(self._generate_multi_queries, query.raw_query)
-            if query.intent in (QueryIntent.FACTUAL, QueryIntent.EXPLORATORY, QueryIntent.PROCEDURAL):
-                futures["hyde"] = pool.submit(self._generate_hyde, query.raw_query)
-            if query.intent in (QueryIntent.CAUSAL, QueryIntent.REFLECTIVE) and query.complexity > 0.5:
-                futures["step_back"] = pool.submit(self._generate_step_back, query.raw_query)
-            if query.routing == RoutingStrategy.MULTI_STEP:
-                futures["decompose"] = pool.submit(self._decompose_query, query.raw_query)
-            for key, future in futures.items():
-                try:
-                    result = future.result(timeout=15)
-                    if key == "multi_queries":
-                        query.multi_queries = result
-                    elif key == "hyde":
-                        query.hyde_answer = result
-                    elif key == "step_back":
-                        query.step_back_query = result
-                    elif key == "decompose":
-                        query.sub_queries = result
-                except Exception as e:
-                    print(f"  ⚠ Query transform '{key}' failed: {e}")
+        """Fast query transformation for local LLM.
+        Local 9B models are too slow for LLM-based query transforms (10-30s each).
+        Use ONLY fast heuristic-based multi-queries + keyword expansion.
+        LLM-based hyde/step-back/decompose are reserved for the Gemini path.
+        """
+        # Multi-queries: fast entity-aware path avoids LLM entirely for
+        # broad queries.  For other queries, generate keyword-based variants.
+        try:
+            query.multi_queries = self._generate_multi_queries_fast(query)
+        except Exception as e:
+            print(f"  ⚠ Query transform 'multi_queries' failed: {e}")
+            query.multi_queries = [query.raw_query]
+
+    def _generate_multi_queries_fast(self, query: MemoryQuery) -> List[str]:
+        """Generate query variants using ONLY heuristics (no LLM).
+        Fast path for local model — completes in <10ms."""
+        raw = query.raw_query
+        raw_lower = raw.lower().strip()
+
+        # ── Entity-aware targeted sub-queries for broad queries ──────────
+        broad_patterns = [
+            r"(?:tell me (?:everything|all) about|what (?:do you )?know about|"
+            r"everything (?:about|on|regarding)|all about|summarize (?:everything about)?)"
+            r"\s+(.+)",
+        ]
+        entity_name = None
+        for pattern in broad_patterns:
+            match = re.search(pattern, raw_lower)
+            if match:
+                entity_name = match.group(1).strip().rstrip("?.!")
+                break
+        who_match = re.search(r"who is\s+(.+)", raw_lower)
+        if who_match:
+            entity_name = who_match.group(1).strip().rstrip("?.!")
+
+        if entity_name:
+            entity_cap = entity_name.title()
+            return [
+                f"What are {entity_cap}'s projects and technical work?",
+                f"What is {entity_cap}'s education and background?",
+                f"What are {entity_cap}'s skills and interests?",
+                f"What is {entity_cap}'s experience and achievements?",
+            ]
+
+        # ── Self-referential broad queries ──────────────────────────────
+        self_broad_patterns = [
+            r"(?:what|which|list|show)\s+(?:projects?|apps?|tools?|things?|work)"
+            r"\s+(?:have i|did i|i have|i'?ve)\s+(?:built|made|created|developed|worked on|done)",
+            r"(?:what|which|list|show)\s+(?:have i|did i|i have|i'?ve)\s+(?:built|made|created|developed|worked on|done)",
+            r"(?:what are|list|show)\s+my\s+(?:projects?|skills?|achievements?|experiences?|work)",
+        ]
+        for pattern in self_broad_patterns:
+            if re.search(pattern, raw_lower):
+                return [
+                    "What projects and applications have been built?",
+                    "What technical skills and technologies are used?",
+                    "What work experience and achievements exist?",
+                    "What is the educational background and learning?",
+                ]
+
+        # ── Intent-based keyword expansion (no LLM) ────────────────────
+        variants = [raw]  # Always include the original
+
+        # Extract content words for rephrasings
+        stop_words = {
+            "the", "and", "for", "are", "was", "were", "has", "have", "had",
+            "been", "what", "when", "where", "which", "who", "how", "does",
+            "did", "can", "could", "would", "should", "will", "you", "your",
+            "they", "them", "their", "some", "any", "all", "tell", "know",
+            "about", "with", "from", "into", "this", "that", "more", "very",
+            "just", "also", "than", "then", "now", "here", "there", "like",
+            "do", "me", "my", "i", "is", "it", "to", "of", "a", "an", "in",
+            "on", "at", "be", "or", "but",
+        }
+        content_words = [w for w in re.findall(r'\b[a-zA-Z]{3,}\b', raw_lower) if w not in stop_words]
+
+        if query.intent == QueryIntent.REFLECTIVE:
+            # Vision/philosophy queries — generate perspective variants
+            if content_words:
+                key = " ".join(content_words[:4])
+                variants.append(f"thoughts and beliefs about {key}")
+                variants.append(f"vision and perspective on {key}")
+                variants.append(f"philosophy regarding {key}")
+        elif query.intent == QueryIntent.CAUSAL:
+            if content_words:
+                key = " ".join(content_words[:4])
+                variants.append(f"what caused {key}")
+                variants.append(f"reasons and factors behind {key}")
+        elif query.intent in (QueryIntent.FACTUAL, QueryIntent.EXPLORATORY):
+            if content_words:
+                key = " ".join(content_words[:4])
+                variants.append(f"{key} details and information")
+                variants.append(f"background on {key}")
+        elif query.intent == QueryIntent.PROCEDURAL:
+            if content_words:
+                key = " ".join(content_words[:4])
+                variants.append(f"process and steps for {key}")
+
+        return variants[:4]
 
     def _generate_multi_queries(self, query: str) -> List[str]:
         """Generate query variants for RAG-Fusion.
@@ -488,6 +563,23 @@ class QueryTransformer:
                 f"What are {entity_cap}'s skills and interests?",
                 f"What is {entity_cap}'s experience and achievements?",
             ]
+
+        # ── Self-referential broad queries (no explicit entity) ──────────
+        # "What projects have I built?", "What have I worked on?", "List my skills"
+        self_broad_patterns = [
+            r"(?:what|which|list|show)\s+(?:projects?|apps?|tools?|things?|work)"
+            r"\s+(?:have i|did i|i have|i'?ve)\s+(?:built|made|created|developed|worked on|done)",
+            r"(?:what|which|list|show)\s+(?:have i|did i|i have|i'?ve)\s+(?:built|made|created|developed|worked on|done)",
+            r"(?:what are|list|show)\s+my\s+(?:projects?|skills?|achievements?|experiences?|work)",
+        ]
+        for pattern in self_broad_patterns:
+            if re.search(pattern, query_lower):
+                return [
+                    "What projects and applications have been built?",
+                    "What technical skills and technologies are used?",
+                    "What work experience and achievements exist?",
+                    "What is the educational background and learning?",
+                ]
 
         # ── Standard multi-query generation via LLM ─────────────────────
         prompt = PromptBuilder.multi_query_generation(query)

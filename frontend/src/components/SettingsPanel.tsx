@@ -18,6 +18,7 @@ export function SettingsPanel({ settings, onUpdate, onClose }: Props) {
       stream: true,
       useRAG: true,
       llmProvider: "local",
+      thinkingMode: true,
     });
   };
 
@@ -198,7 +199,7 @@ export function SettingsPanel({ settings, onUpdate, onClose }: Props) {
                 LLM Provider
               </label>
               <p className="text-[10px] text-slate-400 mt-0.5">
-                {settings.llmProvider === "gemini" ? "Using Google Gemini 2.5 Flash API" : "Using local DeepSeek-R1-7B fine-tuned model"}
+                {settings.llmProvider === "gemini" ? "Using Google Gemini 2.5 Flash API" : "Using local Qwen3.5-9B-Opus reasoning model"}
               </p>
             </div>
             <button

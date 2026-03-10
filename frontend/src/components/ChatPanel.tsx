@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Square, Settings2, Sparkles, Brain, Zap } from "lucide-react";
+import { Send, Square, Settings2, Sparkles, Brain, Zap, Lightbulb } from "lucide-react";
 import { ChatMessage as ChatMessageType, ModelStatus, ChatSettings, DEFAULT_SETTINGS, VoiceQueryResult } from "@/lib/types";
 import { sendMessage, streamMessage, ragChat, streamRAGMessage, RAGStreamMeta, getLLMProvider } from "@/lib/api";
 import { MessageBubble } from "./MessageBubble";
@@ -31,10 +31,19 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
   const [settings, setSettings] = useState<ChatSettings>(DEFAULT_SETTINGS);
   const [error, setError] = useState<string | null>(null);
   const [localModelAvailable, setLocalModelAvailable] = useState(true);
+  // Track whether the live pipeline visualizer should be visible.
+  // The SSE connection is kept alive whenever RAG is enabled (via pipelineConnected),
+  // but we only SHOW it when a request is in flight.
+  const [showLivePipeline, setShowLivePipeline] = useState(false);
+  // Keep SSE pre-connected when RAG is on so events are never missed
+  const [pipelineConnected, setPipelineConnected] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef(false);
+  // Track if user has manually scrolled up — if so, don't force auto-scroll
+  const userScrolledUpRef = useRef(false);
 
   // Auto-detect available LLM providers on mount
   useEffect(() => {
@@ -47,6 +56,12 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
       })
       .catch(() => {});
   }, []);
+
+  // Keep pipeline SSE pre-connected when RAG is enabled so we never miss events.
+  // The LivePipelineVisualizer internally subscribes when isActive=true.
+  useEffect(() => {
+    setPipelineConnected(settings.useRAG);
+  }, [settings.useRAG]);
 
   // ── Batched streaming buffer (§10.1) ──
   // Accumulate tokens in a ref and flush to state every 50ms to reduce re-renders
@@ -75,9 +90,12 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
     }
   }, [flushStreamBuffer]);
 
-  // Auto-scroll
+  // Smart auto-scroll — only scroll down if user is near the bottom.
+  // If user scrolled up to read thinking/pipeline, don't yank them down.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (!userScrolledUpRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [messages]);
 
   // Persist messages to localStorage (skip while streaming to avoid noise)
@@ -117,6 +135,8 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
     setIsGenerating(true);
+    // Reset scroll lock — user just sent a message, they want to see the response
+    userScrolledUpRef.current = false;
 
     // Reset textarea height
     if (inputRef.current) {
@@ -139,6 +159,9 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
 
     // ── RAG-Enhanced Mode ───────────────────────────────────────
     if (settings.useRAG) {
+      // Show live pipeline visualizer (SSE already pre-connected via pipelineConnected)
+      setShowLivePipeline(true);
+
       if (settings.stream) {
         // ── RAG + Streaming ─────────────────────────────────────
         const assistantMsg: ChatMessageType = {
@@ -147,6 +170,7 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
           content: "",
           timestamp: Date.now(),
           isStreaming: true,
+          isRAG: true,       // Flag to show live pipeline inside bubble
         };
         setMessages((prev) => [...prev, assistantMsg]);
 
@@ -185,26 +209,53 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
             const remaining = streamBufferRef.current[assistantId] || "";
             streamBufferRef.current = {};
             setMessages((prev) =>
-              prev.map((m) =>
-                m.id === assistantId ? { ...m, content: m.content + remaining, isStreaming: false } : m,
-              ),
+              prev.map((m) => {
+                if (m.id !== assistantId) return m;
+                const finalContent = m.content + remaining;
+                // Preserve the LLM's deep reasoning in message.thinking so it
+                // persists across re-renders and localStorage restore. Without this,
+                // message.thinking falls back to the orchestrator's brief note.
+                let persistedThinking = m.thinking;
+                if (finalContent.includes("<think>")) {
+                  const tStart = finalContent.indexOf("<think>") + 7;
+                  const tEnd = finalContent.indexOf("</think>");
+                  if (tEnd > tStart) {
+                    persistedThinking = finalContent.slice(tStart, tEnd).trim();
+                  }
+                }
+                return { ...m, content: finalContent, isStreaming: false, thinking: persistedThinking };
+              }),
             );
             setIsGenerating(false);
+            // Keep live pipeline visible briefly after completion so user sees final state
+            setTimeout(() => setShowLivePipeline(false), 2000);
           },
           (err) => {
             setError(err.message);
             setIsGenerating(false);
+            setShowLivePipeline(false);
             setMessages((prev) =>
               prev.filter((m) => m.id !== assistantId || m.content.length > 0),
             );
           },
           // onReplace — server detected hallucination and sends corrected text
+          // Preserve thinking content that was already streamed before the replacement
           (replacedText) => {
             streamBufferRef.current = {};
             setMessages((prev) =>
-              prev.map((m) =>
-                m.id === assistantId ? { ...m, content: replacedText } : m,
-              ),
+              prev.map((m) => {
+                if (m.id !== assistantId) return m;
+                // Extract thinking from existing content before replacing
+                let thinkingToKeep = m.thinking;
+                if (m.content.includes("<think>")) {
+                  const tStart = m.content.indexOf("<think>") + 7;
+                  const tEnd = m.content.indexOf("</think>");
+                  if (tEnd > tStart) {
+                    thinkingToKeep = m.content.slice(tStart, tEnd).trim();
+                  }
+                }
+                return { ...m, content: replacedText, thinking: thinkingToKeep };
+              }),
             );
           },
         );
@@ -218,6 +269,7 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
             content: res.content,
             thinking: res.thinking || undefined,
             timestamp: Date.now(),
+            isRAG: true,
             evidence: res.evidence,
             agentsUsed: res.agents_used,
             confidence: res.confidence,
@@ -232,6 +284,7 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
           setError(message);
         } finally {
           setIsGenerating(false);
+          setTimeout(() => setShowLivePipeline(false), 2000);
         }
       }
       return;
@@ -264,9 +317,20 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
           const remaining = streamBufferRef.current[assistantId] || "";
           streamBufferRef.current = {};
           setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantId ? { ...m, content: m.content + remaining, isStreaming: false } : m,
-            ),
+            prev.map((m) => {
+              if (m.id !== assistantId) return m;
+              const finalContent = m.content + remaining;
+              // Persist thinking from <think> tags so it survives re-renders
+              let persistedThinking = m.thinking;
+              if (finalContent.includes("<think>")) {
+                const tStart = finalContent.indexOf("<think>") + 7;
+                const tEnd = finalContent.indexOf("</think>");
+                if (tEnd > tStart) {
+                  persistedThinking = finalContent.slice(tStart, tEnd).trim();
+                }
+              }
+              return { ...m, content: finalContent, isStreaming: false, thinking: persistedThinking };
+            }),
           );
           setIsGenerating(false);
         },
@@ -365,7 +429,17 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
   return (
     <div className="flex flex-1 flex-col overflow-hidden relative">
       {/* Messages area */}
-      <div className="flex-1 overflow-y-auto px-4 py-6">
+      <div
+        ref={scrollContainerRef}
+        className="flex-1 overflow-y-auto px-4 py-6"
+        onScroll={() => {
+          const el = scrollContainerRef.current;
+          if (!el) return;
+          // User is "near bottom" if within 150px of the bottom
+          const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
+          userScrolledUpRef.current = !nearBottom;
+        }}
+      >
         <div className="mx-auto max-w-3xl space-y-1">
           {messages.length === 0 ? (
             <EmptyState
@@ -376,16 +450,23 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
               }}
             />
           ) : (
-            messages.map((msg) => (
-              <MessageBubble key={msg.id} message={msg} />
-            ))
-          )}
-
-          {/* Live Pipeline Visualizer — shows real-time step progress during RAG processing */}
-          {isGenerating && settings.useRAG && (
-            <div className="mt-3 mx-auto max-w-md">
-              <LivePipelineVisualizer isActive={isGenerating && settings.useRAG} />
-            </div>
+            <>
+              {messages.map((msg, idx) => (
+                <div key={msg.id}>
+                  <MessageBubble message={msg} />
+                  {/* Live Pipeline Visualizer — render right after the LAST message
+                      (the streaming assistant bubble) so it's near the thinking panel,
+                      not pushed below 20 evidence cards. SSE stays pre-connected. */}
+                  {idx === messages.length - 1 && msg.role === "assistant" && pipelineConnected && (
+                    <div className={`mt-2 mb-3 mx-auto max-w-2xl transition-all duration-500 ${
+                      showLivePipeline ? 'opacity-100 max-h-[600px]' : 'opacity-0 max-h-0 overflow-hidden pointer-events-none'
+                    }`}>
+                      <LivePipelineVisualizer isActive={pipelineConnected} />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </>
           )}
 
           <div ref={messagesEndRef} />
@@ -483,7 +564,7 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
               <div className="flex items-center gap-3">
                 <div className="flex items-center gap-1.5">
                   <Sparkles size={11} className={settings.llmProvider === "gemini" ? "text-blue-500/60" : "text-indigo-500/60"} />
-                  <span>{settings.llmProvider === "gemini" ? "Gemini 2.5 Flash" : "DeepSeek-R1-7B Fine-Tuned"}</span>
+                  <span>{settings.llmProvider === "gemini" ? "Gemini 2.5 Flash" : "Qwen3.5-9B Opus"}</span>
                 </div>
                 <button
                   onClick={() => {
@@ -513,6 +594,18 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
                 >
                   <Brain size={10} />
                   {settings.useRAG ? "RAG ON" : "RAG OFF"}
+                </button>
+                <button
+                  onClick={() => setSettings((prev) => ({ ...prev, thinkingMode: !prev.thinkingMode }))}
+                  title={settings.thinkingMode ? "Thinking mode ON — model shows reasoning" : "Thinking mode OFF — faster responses"}
+                  className={`flex items-center gap-1 px-2 py-0.5 rounded-md transition-all text-[10px] font-medium ${
+                    settings.thinkingMode
+                      ? "bg-amber-50 text-amber-600 border border-amber-200"
+                      : "bg-slate-50 text-slate-400 border border-slate-200"
+                  }`}
+                >
+                  <Lightbulb size={10} />
+                  {settings.thinkingMode ? "THINK" : "FAST"}
                 </button>
               </div>
               <span className="text-slate-400">

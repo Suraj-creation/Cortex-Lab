@@ -1,12 +1,9 @@
 """
-FastAPI Backend Server for Cortex Lab — Fine-Tuned DeepSeek-R1-7B
-Serves the 15-stage curriculum fine-tuned model via REST API + Server-Sent Events (streaming).
+FastAPI Backend Server for Cortex Lab — Qwen3.5-9B-Opus Reasoning
+Serves the Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled model via REST API + Server-Sent Events (streaming).
 Includes full Agentic RAG system with memory, retrieval, and multi-agent reasoning.
 
-Model: DeepSeek-R1-Distill-Qwen-7B fine-tuned across 15 stages:
-  Faithfulness → Agentic → Causal → Self-RAG → Belief → Summarization →
-  Dialogue → LongContext → DPO → UserStyle → ORPO → RAFT → FunctionCalling →
-  RFT → SPIN
+Model: Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled (local 4-bit)
 """
 
 import os
@@ -74,9 +71,19 @@ def _find_latest_merged_model():
     return None
 
 _fine_tuned_path = _find_latest_merged_model()
-MODEL_NAME = os.environ.get("MODEL_NAME",
-    _fine_tuned_path if _fine_tuned_path else "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
-)
+
+# ── Model Selection ──────────────────────────────────────────────────────
+# Primary: Qwen3.5-9B-Opus (local download)
+# Fallback: fine-tuned model from pipeline, then HuggingFace
+_QWEN_LOCAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models", "qwen35-9b-opus")
+if os.path.exists(os.path.join(_QWEN_LOCAL, "config.json")):
+    _default_model = _QWEN_LOCAL
+elif _fine_tuned_path:
+    _default_model = _fine_tuned_path
+else:
+    _default_model = "Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled"
+
+MODEL_NAME = os.environ.get("MODEL_NAME", _default_model)
 
 def _count_completed_stages():
     """Count how many training stages have completed."""
@@ -112,7 +119,7 @@ async def lifespan(app: FastAPI):
     global model, tokenizer, model_loaded, model_info
 
     print("\n" + "=" * 64)
-    print("  Cortex Lab  ·  Fine-Tuned DeepSeek-R1-7B  ·  FastAPI Backend")
+    print("  Cortex Lab  ·  Qwen3.5-9B-Opus Reasoning  ·  FastAPI Backend")
     print("=" * 64 + "\n")
 
     # Check if local model loading should be skipped (Gemini-only mode)
@@ -228,11 +235,14 @@ async def lifespan(app: FastAPI):
     gpu_mem  = f"{torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB" if torch.cuda.is_available() else "N/A"
 
     completed_stages = _count_completed_stages()
-    model_display_name = "DeepSeek-R1-7B (Fine-Tuned)" if _fine_tuned_path else "DeepSeek-R1-Distill-Qwen-7B"
+    _is_qwen = "qwen" in MODEL_NAME.lower() or "opus" in MODEL_NAME.lower()
+    model_display_name = "Qwen3.5-9B-Opus-Reasoning" if _is_qwen else (
+        "DeepSeek-R1-7B (Fine-Tuned)" if _fine_tuned_path else "DeepSeek-R1-Distill-Qwen-7B"
+    )
 
     model_info = {
         "name": model_display_name,
-        "parameters": "7B",
+        "parameters": "9B" if _is_qwen else "7B",
         "quantization": quant,
         "device": gpu_name,
         "gpu_memory": gpu_mem,
@@ -241,7 +251,7 @@ async def lifespan(app: FastAPI):
         "fine_tuned": _fine_tuned_path is not None,
         "training_stages_completed": completed_stages,
         "model_path": MODEL_NAME[:80],
-        "base_model": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+        "base_model": "Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled" if _is_qwen else "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
     }
 
     print(f"  ✓ Model loaded in {elapsed:.1f}s  ({quant} on {gpu_name})")
@@ -266,7 +276,7 @@ async def lifespan(app: FastAPI):
 # ── FastAPI app ──────────────────────────────────────────────────────────────
 
 app = FastAPI(
-    title="Cortex Lab — Fine-Tuned DeepSeek-R1-7B Agentic RAG API",
+    title="Cortex Lab — Qwen3.5-9B-Opus Agentic RAG API",
     version="2.0.0",
     lifespan=lifespan,
 )
@@ -351,6 +361,7 @@ class ChatRequest(BaseModel):
     max_tokens: int = Field(4096, ge=1, le=32768)
     stream: bool = False
     llm_provider: str = Field("local", description="'local' for fine-tuned DeepSeek or 'gemini' for Gemini API")
+    thinking_mode: bool = Field(True, description="When True, stream <think> reasoning blocks; when False, suppress for faster responses")
 
 class ChatResponse(BaseModel):
     id: str
@@ -376,6 +387,7 @@ class RAGChatRequest(BaseModel):
     use_rag: bool = True  # Enable/disable RAG enhancement
     session_id: str = ""
     llm_provider: str = Field("local", description="'local' for fine-tuned DeepSeek or 'gemini' for Gemini API")
+    thinking_mode: bool = Field(True, description="When True, stream <think> reasoning blocks; when False, suppress for faster responses")
 
 class MemoryIngestRequest(BaseModel):
     content: str
@@ -416,27 +428,13 @@ SYSTEM_PROMPT = (
 _STOP_PATTERNS = ["\nUser:", "\nuser:", "\nHuman:", "\nhuman:", "\nQ:", "\nA:", "\n\nUser "]
 
 # ── Streaming hallucination filters ─────────────────────────────────────────
-# These are known patterns the fine-tuned model generates instead of real answers.
-# Used to detect and suppress hallucination in the streaming path.
+# Only catch truly robotic/format-leak patterns that indicate the model is
+# dumping structured output instead of natural language.
+# NOTE: Generic phrases like "synthesizing", "lived experiences", "belief evolution"
+# were REMOVED — they caused false positives with Qwen3.5 which uses these
+# legitimately in thoughtful answers, causing truncation.
 _STREAMING_HALLUC_PHRASES = [
-    "belief evolution", "the key insight is", "clarity of scope",
-    "clarity requires constraints", "systems matter more than goals",
-    "the intersection of deep work", "personal growth and modern technology",
-    "deep work patterns", "sporadic bursts", "cumulative insight",
-    "emotional trajectory", "emotion timeline", "deliberate practice",
-    "the bottleneck has shifted", "the timeline for meaningful",
-    "tracing causal chains", "your thinking journey",
-    "comprehensive answer to your question",
-    "here's a comprehensive answer", "here's the revised answer",
-    "here's what your beliefs", "revised answer focused on",
-    "according to research on personal growth",
-    "reflecting on my relationship with my mentor",
-    "here's a decomposed analysis",
-    "you strongly believe that",
-    "the relationship is more complex than people say",
-    "lived experiences",
-    "synthesizing", "based on strong empirical evidence",
-    # Self-RAG format leaks
+    # Self-RAG format leaks (model outputting structured format instead of prose)
     "**answer:**", "**evidence:**", "**confidence:**",
     "**relevance:**", "**sources:**",
     "answer:\n", "evidence:\n", "confidence: high",
@@ -445,6 +443,10 @@ _STREAMING_HALLUC_PHRASES = [
     "based on your stored memories:",
     "according to the evidence provided:",
     "from your stored memories:",
+    # Meta-answers (model talking about itself instead of answering)
+    "here's the revised answer",
+    "revised answer focused on",
+    "comprehensive answer to your question",
 ]
 
 
@@ -810,7 +812,7 @@ def _build_prompt(messages: list[ChatMessage]) -> str:
     Build a prompt using the tokenizer's chat template when available.
     Falls back to a structured format with system prompt and stop boundaries.
     """
-    # Try to use the model's native chat template (best for DeepSeek-R1)
+    # Try to use the model's native chat template (best for Qwen/ChatML models)
     if tokenizer is not None:
         try:
             chat_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -851,7 +853,7 @@ def _split_thinking(text: str):
     """
     Separate <think>…</think> reasoning from visible answer.
     Works with both raw special-token output and clean text.
-    DeepSeek-R1 format: generation starts with <think>\n...reasoning...</think>answer
+    Qwen3.5/DeepSeek format: generation starts with <think>\n...reasoning...</think>answer
     """
     thinking = None
     content  = text
@@ -1252,27 +1254,57 @@ async def _stream_generate(prompt: str, req: ChatRequest):
 
     msg_id = f"msg-{uuid.uuid4().hex[:12]}"
     accumulated = ""  # Track full text to detect stop patterns mid-stream
-    in_think = False  # Track <think> block to suppress from stream
     thinking_text = ""  # Collect thinking for optional later use
+    suppress_thinking = not getattr(req, "thinking_mode", True)
+    sent_think_open = False  # Whether we already streamed <think> tag
+
+    # Qwen3.5-Opus: chat_template ends with <|im_start|>assistant\n<think>\n
+    # so generation starts INSIDE a think block — no <think> tag in output.
+    # Detect this: if prompt already contains the generation-prompt think tag.
+    _prompt_ends_in_think = prompt.rstrip().endswith("<think>") or prompt.rstrip().endswith("<think>\n")
+    in_think = _prompt_ends_in_think  # Start inside think block if template injected it
+
+    if in_think and not suppress_thinking and not sent_think_open:
+        chunk = {"id": msg_id, "delta": "<think>"}
+        yield f"data: {json.dumps(chunk)}\n\n"
+        sent_think_open = True
 
     for token_text in streamer:
         accumulated += token_text
 
-        # ── Handle <think>…</think> blocks — suppress from visible output ──
+        # ── Handle <think>…</think> blocks ──
         if "<think>" in accumulated and not in_think:
             in_think = True
+            if not suppress_thinking and not sent_think_open:
+                chunk = {"id": msg_id, "delta": "<think>"}
+                yield f"data: {json.dumps(chunk)}\n\n"
+                sent_think_open = True
         if in_think:
             if "</think>" in accumulated:
-                # Think block complete — extract and continue with answer
+                # Think block complete — extract thinking and continue with answer
                 think_end = accumulated.index("</think>") + len("</think>")
                 thinking_text = accumulated[:think_end]
+                if not suppress_thinking:
+                    # Only send the closing tag — individual tokens were already
+                    # streamed in the else branch below, so content is already in
+                    # the frontend's message.content after <think>.
+                    chunk = {"id": msg_id, "delta": "</think>"}
+                    yield f"data: {json.dumps(chunk)}\n\n"
                 accumulated = accumulated[think_end:]
                 in_think = False
-                # If there's text after </think>, process it below
                 if not accumulated:
                     continue
             else:
-                continue  # Don't stream thinking tokens
+                if not suppress_thinking:
+                    # Stream thinking tokens as they arrive (stripped of tags)
+                    tok = token_text
+                    for tag in ["<think>", "</think>"]:
+                        tok = tok.replace(tag, "")
+                    if tok:
+                        chunk = {"id": msg_id, "delta": tok}
+                        yield f"data: {json.dumps(chunk)}\n\n"
+                        await asyncio.sleep(0)
+                continue
 
         # ── Clean special tokens from the visible output ──
         clean_token = token_text
@@ -1489,11 +1521,18 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
 
         # ── Query-adaptive evidence limits ──
         # Complex/synthesis queries need more context for comprehensive answers.
+        # For local 9B model, limit evidence to avoid extremely slow generation.
         _query_complexity = query_analysis.get("complexity", 0.5) if isinstance(query_analysis, dict) else 0.5
         _query_intent = query_analysis.get("intent", "") if isinstance(query_analysis, dict) else ""
         _is_synthesis = _query_complexity >= 0.6 or _query_intent in ("reflective", "comparative", "causal")
-        _max_evidence_chars = 1500 if _is_synthesis else 500
-        _max_evidence_items = 12 if _is_synthesis else 7
+        _is_local_model = not _is_gemini_active()
+        if _is_local_model:
+            # Local 9B model: keep evidence compact for faster generation
+            _max_evidence_chars = 600 if _is_synthesis else 350
+            _max_evidence_items = 7 if _is_synthesis else 5
+        else:
+            _max_evidence_chars = 1500 if _is_synthesis else 500
+            _max_evidence_items = 12 if _is_synthesis else 7
 
         # First pass: collect PageIndex evidence (from uploaded documents)
         for e in evidence[:20]:
@@ -1606,12 +1645,15 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
             return
 
         # ── Pre-generation: For simple factual queries, try direct extraction ──
-        extracted_answer = _try_extract_factual(user_message, evidence_texts)
-        if extracted_answer:
-            chunk = {"id": msg_id, "delta": extracted_answer}
-            yield f"data: {json.dumps(chunk)}\n\n"
-            yield f"data: {json.dumps({'id': msg_id, 'delta': '', 'done': True})}\n\n"
-            return
+        # Skip when thinking_mode is ON — user wants to see the model reason
+        _thinking_on = getattr(req, "thinking_mode", True)
+        if not _thinking_on:
+            extracted_answer = _try_extract_factual(user_message, evidence_texts)
+            if extracted_answer:
+                chunk = {"id": msg_id, "delta": extracted_answer}
+                yield f"data: {json.dumps(chunk)}\n\n"
+                yield f"data: {json.dumps({'id': msg_id, 'delta': '', 'done': True})}\n\n"
+                return
 
         if has_meaningful_evidence:
             if has_pageindex_evidence:
@@ -1636,6 +1678,15 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
             ):
                 yield event
             return
+
+        # ── Force thinking mode for Qwen3.5 ─────────────────────────────
+        # Qwen3.5-Opus chat_template ends with <|im_start|>assistant\n<think>\n
+        # but _format_chat only produces <|im_start|>assistant\n — append <think>
+        # so the model enters its reasoning mode (matches chat_template behavior).
+        # When thinking_mode is OFF we still inject it (model needs it) but
+        # suppress the thinking tokens in the streaming loop below.
+        if not rag_prompt.rstrip().endswith("<think>"):
+            rag_prompt = rag_prompt.rstrip() + "<think>\n"
 
         inputs = tokenizer(rag_prompt, return_tensors="pt", truncation=True, max_length=4096)
         if torch.cuda.is_available():
@@ -1669,26 +1720,54 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
 
         accumulated = ""
         streamed_text = ""  # Track what we've actually sent to client
-        in_think = False  # Track <think> block to suppress from stream
         halluc_detected = False  # Track if hallucination was detected mid-stream
+        suppress_thinking = not getattr(req, "thinking_mode", True)
+        sent_think_open = False
+
+        # Qwen3.5-Opus: if prompt ends with <think>, generation starts inside think block
+        _prompt_ends_in_think = rag_prompt.rstrip().endswith("<think>") or rag_prompt.rstrip().endswith("<think>\n")
+        in_think = _prompt_ends_in_think
+
+        if in_think and not suppress_thinking and not sent_think_open:
+            chunk = {"id": msg_id, "delta": "<think>"}
+            yield f"data: {json.dumps(chunk)}\n\n"
+            sent_think_open = True
+
         for token_text in streamer:
             accumulated += token_text
 
-            # Handle <think>...</think> blocks — don't stream them
+            # Handle <think>...</think> blocks
             if "<think>" in accumulated and not in_think:
                 in_think = True
+                if not suppress_thinking and not sent_think_open:
+                    chunk = {"id": msg_id, "delta": "<think>"}
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                    sent_think_open = True
             if in_think:
                 if "</think>" in accumulated:
-                    # Think block complete — extract thinking and continue streaming the rest
+                    # Think block complete
                     think_end = accumulated.index("</think>") + len("</think>")
+                    if not suppress_thinking:
+                        # Only send closing tag — tokens already streamed below
+                        chunk = {"id": msg_id, "delta": "</think>"}
+                        yield f"data: {json.dumps(chunk)}\n\n"
                     accumulated = accumulated[think_end:]
                     in_think = False
-                continue  # Don't stream thinking tokens
+                else:
+                    if not suppress_thinking:
+                        tok = token_text
+                        for tag in ["<think>", "</think>"]:
+                            tok = tok.replace(tag, "")
+                        if tok:
+                            chunk = {"id": msg_id, "delta": tok}
+                            yield f"data: {json.dumps(chunk)}\n\n"
+                            await asyncio.sleep(0)
+                    continue
 
             # Clean special tokens from the visible output
             clean_token = token_text
             for tok in ["<｜end▁of▁sentence｜>", "<|im_end|>", "<|endoftext|>",
-                         "<｜User｜>", "<｜Assistant｜>"]:
+                         "<｜User｜>", "<｜Assistant｜>", "<think>", "</think>"]:
                 clean_token = clean_token.replace(tok, "")
             if not clean_token:
                 continue

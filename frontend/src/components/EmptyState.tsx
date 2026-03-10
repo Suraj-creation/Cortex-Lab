@@ -74,8 +74,8 @@ export function EmptyState({ isOnline, onSuggestion }: Props) {
           Cortex Lab
         </h2>
         <p className="text-sm text-slate-500 max-w-md leading-relaxed">
-          <span className="text-slate-700 font-medium">DeepSeek-R1-7B</span> reasoning model ·
-          Curriculum fine-tuned across 15 stages ·
+          <span className="text-slate-700 font-medium">Qwen3.5-9B Opus</span> reasoning model ·
+          Claude 4.6 Opus reasoning distilled ·
           Advanced chain-of-thought reasoning
         </p>
 

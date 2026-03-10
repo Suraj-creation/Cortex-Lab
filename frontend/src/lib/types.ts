@@ -12,6 +12,7 @@ export interface ChatMessage {
     total_tokens: number;
   };
   isStreaming?: boolean;
+  isRAG?: boolean;
   // RAG-enhanced fields
   evidence?: EvidenceCard[];
   agentsUsed?: string[];
@@ -249,6 +250,7 @@ export interface ChatSettings {
   stream: boolean;
   useRAG: boolean;
   llmProvider: "local" | "gemini";
+  thinkingMode: boolean;
 }
 
 export const DEFAULT_SETTINGS: ChatSettings = {
@@ -258,6 +260,7 @@ export const DEFAULT_SETTINGS: ChatSettings = {
   stream: true,
   useRAG: true,
   llmProvider: "local",
+  thinkingMode: true,
 };
 
 // ── Ambient Voice Types ─────────────────────────────────────────

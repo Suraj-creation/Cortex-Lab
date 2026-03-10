@@ -32,6 +32,7 @@ export async function sendMessage(
       max_tokens: settings.maxTokens,
       stream: false,
       llm_provider: settings.llmProvider || "local",
+      thinking_mode: settings.thinkingMode ?? true,
     }),
   });
 
@@ -63,6 +64,7 @@ export async function streamMessage(
         max_tokens: settings.maxTokens,
         stream: true,
         llm_provider: settings.llmProvider || "local",
+        thinking_mode: settings.thinkingMode ?? true,
       }),
     });
 
@@ -142,6 +144,7 @@ export async function ragChat(
       use_rag: true,
       session_id: sessionId,
       llm_provider: settings.llmProvider || "local",
+      thinking_mode: settings.thinkingMode ?? true,
     }),
   });
 
@@ -189,6 +192,7 @@ export async function streamRAGMessage(
         use_rag: true,
         session_id: sessionId,
         llm_provider: settings.llmProvider || "local",
+        thinking_mode: settings.thinkingMode ?? true,
       }),
     });
 

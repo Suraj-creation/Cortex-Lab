@@ -223,11 +223,72 @@ body {
 }
 
 .prose-thinking {
-  @apply text-sm leading-relaxed text-slate-500;
+  @apply text-sm leading-relaxed;
+  color: #64748b;
 }
 
 .prose-thinking p {
-  @apply mb-2 last:mb-0;
+  @apply mb-2.5 last:mb-0;
+}
+
+.prose-thinking strong,
+.prose-thinking b {
+  @apply font-semibold text-slate-600;
+}
+
+.prose-thinking em,
+.prose-thinking i {
+  @apply italic text-slate-500;
+}
+
+.prose-thinking ul,
+.prose-thinking ol {
+  @apply ml-4 mb-2 space-y-1;
+}
+
+.prose-thinking ul { @apply list-disc; }
+.prose-thinking ol { @apply list-decimal; }
+
+.prose-thinking li {
+  @apply pl-0.5 text-slate-500;
+}
+
+.prose-thinking code {
+  @apply font-mono text-xs bg-indigo-50/60 text-indigo-500 px-1 py-0.5 rounded;
+}
+
+.prose-thinking pre {
+  @apply my-2 rounded-lg overflow-x-auto p-3 text-xs;
+  background: rgba(99, 102, 241, 0.04);
+  border: 1px solid rgba(99, 102, 241, 0.08);
+}
+
+.prose-thinking blockquote {
+  @apply border-l-2 border-indigo-200 pl-3 italic text-slate-400 my-2;
+}
+
+.prose-thinking h1, .prose-thinking h2, .prose-thinking h3, .prose-thinking h4 {
+  @apply font-semibold text-slate-600 mb-1.5 mt-3 first:mt-0 text-sm;
+}
+
+/* Thinking panel expand/collapse animation */
+@keyframes thinking-expand {
+  from { max-height: 0; opacity: 0; }
+  to { max-height: 24rem; opacity: 1; }
+}
+
+@keyframes thinking-pulse-border {
+  0%, 100% { border-color: rgba(99, 102, 241, 0.15); }
+  50% { border-color: rgba(99, 102, 241, 0.3); }
+}
+
+.thinking-active {
+  animation: thinking-pulse-border 2s ease-in-out infinite;
+}
+
+.thinking-content-enter {
+  animation: thinking-expand 0.3s ease-out forwards;
+  overflow: hidden;
 }
 
 /* ── Sidebar animation ──────────────────────────────────────────── */
