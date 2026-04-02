@@ -8,6 +8,16 @@ Model: Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled (local 4-bit)
 
 import os
 import sys
+
+# Windows consoles often use cp1252; emoji in log lines would raise UnicodeEncodeError.
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 import time
 import json
 import re
@@ -281,16 +291,33 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_default_allowed_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+    "http://localhost:8081",
+    "http://127.0.0.1:8081",
+    "http://localhost:19006",
+    "http://127.0.0.1:19006",
+    "http://192.168.3.169:3000",
+]
+
+_allowed_origins_env = os.environ.get("CORS_ALLOW_ORIGINS", "")
+_allowed_origins = [o.strip() for o in _allowed_origins_env.split(",") if o.strip()] or _default_allowed_origins
+
+_default_origin_regex = (
+    r"^https?://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?$"
+    r"|^https://.*\.trycloudflare\.com$"
+    r"|^https://.*\.up\.railway\.app$"
+    r"|^https://.*\.railway\.app$"
+)
+_allow_origin_regex = os.environ.get("CORS_ALLOW_ORIGIN_REGEX", _default_origin_regex)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://192.168.3.169:3000",
-        "https://*.trycloudflare.com",
-    ],
-    allow_origin_regex=r"https?://.*\.(trycloudflare\.com|localhost|192\.168\.\d+\.\d+)",
+    allow_origins=_allowed_origins,
+    allow_origin_regex=_allow_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

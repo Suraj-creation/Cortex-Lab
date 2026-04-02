@@ -2,11 +2,25 @@ import { ChatSettings, DEFAULT_SETTINGS, MemoryObject, GraphData, RAGStats, Evid
 
 const API_BASE = "/api";
 
+function normalizeBaseUrl(url: string): string {
+  return url.endsWith("/") ? url.slice(0, -1) : url;
+}
+
 // Direct backend URL for long-running SSE connections that may exceed
 // the Next.js proxy timeout (RAG retrieval can take 30-60s before streaming).
-const BACKEND_DIRECT = typeof window !== "undefined"
-  ? `http://${window.location.hostname}:8000/api`
-  : "http://localhost:8000/api";
+const BACKEND_DIRECT = (() => {
+  const envBase = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
+  if (envBase) {
+    return normalizeBaseUrl(envBase);
+  }
+
+  if (typeof window !== "undefined") {
+    const protocol = window.location.protocol === "https:" ? "https:" : "http:";
+    return `${protocol}//${window.location.hostname}:8000/api`;
+  }
+
+  return "http://localhost:8000/api";
+})();
 
 // ── Non-streaming chat ──────────────────────────────────────────
 

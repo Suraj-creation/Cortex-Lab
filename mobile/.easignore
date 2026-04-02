@@ -1,0 +1,18 @@
+# Keep EAS upload minimal and deterministic
+# Reuse gitignore defaults first
+.gitignore
+
+# Never upload local build artifacts or caches
+.expo
+.expo/**
+dist
+dist/**
+node_modules
+node_modules/**
+
+# Misc local files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store

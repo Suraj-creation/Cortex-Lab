@@ -1,5 +1,5 @@
 """
-Training script for fine-tuning DeepSeek-R1-Distill-Qwen-14B
+Training script for fine-tuning DeepSeek-R1-Distill-Qwen-7B
 Supports LoRA, QLoRA, and full fine-tuning
 """
 
