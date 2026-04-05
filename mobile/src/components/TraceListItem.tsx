@@ -1,7 +1,7 @@
 import React from "react";
 import { View, Text, StyleSheet } from "react-native";
 import { PipelineTrace } from "../../shared/core/types";
-import { COLORS, SEMANTIC_COLORS, SPACING, TYPOGRAPHY, BORDER_RADIUS, SHADOWS } from "../theme/colors";
+import { NEURAL, SEMANTIC_COLORS, SPACING, TYPOGRAPHY, BORDER_RADIUS } from "../theme/colors";
 
 interface TraceListItemProps {
   trace: PipelineTrace;
@@ -110,7 +110,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: SPACING.lg,
     paddingVertical: SPACING.lg,
     marginBottom: SPACING.md,
-    ...SHADOWS.sm,
+    ...{},
   },
   header: {
     flexDirection: "row",
@@ -137,12 +137,12 @@ const styles = StyleSheet.create({
     borderColor: SEMANTIC_COLORS.borderPrimary,
   },
   cacheBadge: {
-    backgroundColor: COLORS.success[50],
-    borderColor: COLORS.success[200],
+    backgroundColor: `${NEURAL.tertiary}22`,
+    borderColor: `${NEURAL.tertiary}60`,
   },
   confidenceBadge: {
-    backgroundColor: COLORS.warning[50],
-    borderColor: COLORS.warning[200],
+    backgroundColor: '#f59e0b18',
+    borderColor: '#f59e0b60',
   },
   badgeText: {
     fontSize: TYPOGRAPHY.fontSize.xs,
@@ -184,14 +184,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: SPACING.sm,
     paddingVertical: SPACING.xs,
     borderRadius: BORDER_RADIUS.sm,
-    backgroundColor: COLORS.warning[50],
+    backgroundColor: '#f59e0b18',
     borderWidth: 0.5,
-    borderColor: COLORS.warning[200],
+    borderColor: '#f59e0b60',
   },
   qgText: {
     fontSize: TYPOGRAPHY.fontSize.xs,
     fontWeight: TYPOGRAPHY.fontWeight.semibold,
-    color: COLORS.warning[700],
+    color: '#d97706',
   },
   metaRow: {
     flexDirection: "row",

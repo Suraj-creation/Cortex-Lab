@@ -41,6 +41,20 @@
 - `hybrid`: local inference primary, backend optional for enrichment (docs/cloud sync) when online.
 - `cloud`: existing backend/Gemini/local-server mode for low-end devices or users who skip model packs.
 
+### 4.1 Reality Check: Current App vs Target State
+
+- **Current app (today):** chat and most features are backend-URL driven.
+- **Target offline app (after P1+P5+P6):** chat/reasoning routes to local on-device adapter first, backend becomes optional.
+- If backend is deployed in cloud, app connectivity to that backend requires internet by definition.
+- Therefore, "fully offline" and "cloud backend only" are mutually exclusive runtime states.
+
+### 4.2 Do We Need The Backend Running Inside Mobile?
+
+- **Not required** to run the full Python/FastAPI backend process on-device for offline inference.
+- **Preferred production design:** implement local inference directly in-app through native bridge + JS adapter (no localhost server layer).
+- **Optional compatibility approach:** embed a local HTTP bridge (`127.0.0.1`) to mimic backend APIs, but this increases complexity and battery overhead.
+- Decision: treat on-device inference as a first-class client runtime, not a "mini cloud backend" inside phone.
+
 ## 5. Model Profile Strategy
 
 | Profile | Intended Users | Storage Budget (Practical) | Runtime Characteristics | Default |
@@ -260,6 +274,20 @@
 - Do not rely on free GPU hosting for sustained production inference.
 - Use cloud hosting only for model pack delivery (CDN/object storage), not required for runtime inference.
 - Keep cloud inference as optional fallback, not a hard dependency.
+
+### 11.1 Immediate Production Path (Deploy Now, Auto-Connect on App Open)
+
+1. Deploy FastAPI backend behind HTTPS with stable domain (Railway/Render/Fly.io/Azure App Service are valid short-path options).
+2. Set `EXPO_PUBLIC_API_BASE_URL=https://<your-domain>/api` in mobile build environment.
+3. Build and distribute app from EAS using that environment variable.
+4. On launch, app auto-connects to deployed backend without manual Settings edits.
+5. Keep Settings override for diagnostics only (hidden behind advanced toggle in production UX).
+
+### 11.2 Local LAN URL Behavior (Current Dev Workflow)
+
+- A LAN backend URL works on another phone only when both devices are on the same network and the backend machine/firewall allows inbound traffic on the backend port.
+- If your computer IP changes (DHCP), previous LAN URL stops working until updated.
+- Cloud domain avoids LAN fragility and is the recommended production default.
 
 ## 12. "No Internet at All" Scenarios
 

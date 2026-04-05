@@ -1,76 +1,79 @@
-import React from "react";
-import { View, Text, StyleSheet, Pressable, ViewStyle } from "react-native";
-import { COLORS, SEMANTIC_COLORS, SPACING, TYPOGRAPHY, BORDER_RADIUS, SHADOWS } from "../../theme/colors";
-import { ModelStatus } from "../../../shared/core/types";
+/**
+ * Header — Neural Dark top bar
+ * Stitch Chat Screen: model status, title, hamburger → drawer, gear → settings
+ */
+import React from 'react';
+import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { NEURAL, RADIUS, FONT_SIZE, FONT_WEIGHT, SPACING } from '../../theme/colors';
+import { NeuralPulse } from './NeuralPulse';
+import { AppIcon } from './AppIcon';
+import type { ModelStatus } from '../../../shared/core/types';
 
 interface HeaderProps {
-  modelStatus: ModelStatus;
   title?: string;
   subtitle?: string;
+  modelStatus?: ModelStatus;
+  onMenuPress?: () => void;
   onSettingsPress?: () => void;
-  style?: ViewStyle;
 }
 
 export function Header({
-  modelStatus,
-  title = "Cortex Lab",
+  title = 'Cortex Lab',
   subtitle,
+  modelStatus,
+  onMenuPress,
   onSettingsPress,
-  style,
 }: HeaderProps) {
-  const isLoaded = modelStatus.model_loaded;
-  const isLoading = modelStatus.status === "loading";
-
-  const statusColor = isLoaded
-    ? COLORS.success[500]
-    : isLoading
-      ? COLORS.warning[500]
-      : COLORS.error[500];
-
-  const statusBgColor = isLoaded
-    ? COLORS.success[50]
-    : isLoading
-      ? COLORS.warning[50]
-      : COLORS.error[50];
-
-  const statusText = isLoaded ? "Online" : isLoading ? "Loading…" : "Offline";
+  const isOnline =
+    modelStatus?.status === 'ready' ||
+    modelStatus?.status === 'gemini' ||
+    (modelStatus?.model_loaded ?? false);
+  const isLoading = modelStatus?.status === 'loading';
 
   return (
-    <View
-      style={[
-        styles.container,
-        style,
-      ]}
-    >
-      <View style={styles.leftSection}>
-        <Text style={styles.eyebrow}>CORTEX MOBILE</Text>
-        <Text style={styles.title}>{title}</Text>
-        {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
+    <View style={styles.container}>
+      {/* Left: hamburger */}
+      <TouchableOpacity
+        style={styles.iconButton}
+        onPress={onMenuPress}
+        activeOpacity={0.7}
+        accessibilityLabel="Open conversation history"
+      >
+        <View style={styles.hamburger}>
+          <View style={styles.hamburgerLine} />
+          <View style={[styles.hamburgerLine, { width: 16 }]} />
+          <View style={styles.hamburgerLine} />
+        </View>
+      </TouchableOpacity>
+
+      {/* Center: title + subtitle */}
+      <View style={styles.center}>
+        <Text style={styles.title} numberOfLines={1}>{title}</Text>
+        {subtitle ? (
+          <Text style={styles.subtitle} numberOfLines={1}>{subtitle}</Text>
+        ) : null}
       </View>
 
-      <View style={styles.rightSection}>
-        <View
-          style={[
-            styles.statusBadge,
-            { backgroundColor: statusBgColor },
-          ]}
-        >
-          <View
-            style={[
-              styles.statusDot,
-              { backgroundColor: statusColor },
-            ]}
+      {/* Right: status + settings */}
+      <View style={styles.right}>
+        <View style={styles.statusPill}>
+          <NeuralPulse
+            active={!isLoading}
+            color={isOnline ? NEURAL.tertiary : NEURAL.onSurfaceVariant}
+            size={6}
           />
-          <Text style={[styles.statusText, { color: statusColor }]}>
-            {statusText}
+          <Text style={[styles.statusText, { color: isOnline ? NEURAL.tertiary : NEURAL.onSurfaceVariant }]}>
+            {isLoading ? 'Loading' : isOnline ? 'Online' : 'Offline'}
           </Text>
         </View>
-
-        {onSettingsPress ? (
-          <Pressable onPress={onSettingsPress} style={styles.settingsButton}>
-            <Text style={styles.settingsButtonText}>Tune</Text>
-          </Pressable>
-        ) : null}
+        <TouchableOpacity
+          style={styles.iconButton}
+          onPress={onSettingsPress}
+          activeOpacity={0.7}
+          accessibilityLabel="Open settings"
+        >
+          <AppIcon name="cog-outline" size={18} color={NEURAL.onSurfaceVariant} style={styles.settingsIcon} />
+        </TouchableOpacity>
       </View>
     </View>
   );
@@ -78,73 +81,62 @@ export function Header({
 
 const styles = StyleSheet.create({
   container: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    paddingHorizontal: SPACING.xl,
-    paddingTop: SPACING.md,
-    paddingBottom: SPACING.sm,
-    backgroundColor: SEMANTIC_COLORS.bgPrimary,
-    borderBottomWidth: 1,
-    borderBottomColor: SEMANTIC_COLORS.borderPrimary,
-    ...SHADOWS.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: NEURAL.surfaceContainerLow,
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: SPACING.md,
+    borderBottomWidth: 0, // No-line rule — color shift defines edge
   },
-  leftSection: {
+  iconButton: {
+    padding: SPACING.sm,
+    borderRadius: RADIUS.md,
+  },
+  hamburger: {
+    gap: 4,
+    alignItems: 'flex-start',
+  },
+  hamburgerLine: {
+    width: 20,
+    height: 2,
+    backgroundColor: NEURAL.onSurfaceVariant,
+    borderRadius: 1,
+  },
+  center: {
     flex: 1,
-    paddingRight: SPACING.sm,
-  },
-  eyebrow: {
-    fontSize: TYPOGRAPHY.fontSize.xs,
-    color: SEMANTIC_COLORS.textTertiary,
-    fontWeight: TYPOGRAPHY.fontWeight.semibold,
-    letterSpacing: 0.9,
-    marginBottom: SPACING.xs,
+    alignItems: 'center',
+    paddingHorizontal: SPACING.sm,
   },
   title: {
-    fontSize: TYPOGRAPHY.fontSize.xl,
-    fontWeight: TYPOGRAPHY.fontWeight.bold,
-    color: SEMANTIC_COLORS.textPrimary,
+    fontSize: FONT_SIZE.lg,
+    fontWeight: FONT_WEIGHT.bold,
+    color: NEURAL.onSurface,
+    letterSpacing: -0.3,
   },
   subtitle: {
-    fontSize: TYPOGRAPHY.fontSize.xs,
-    color: SEMANTIC_COLORS.textSecondary,
-    marginTop: SPACING.xs,
+    fontSize: FONT_SIZE.xs,
+    color: NEURAL.onSurfaceVariant,
+    marginTop: 1,
   },
-  rightSection: {
-    alignItems: "flex-end",
-    gap: SPACING.sm,
-    marginLeft: SPACING.sm,
+  right: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
   },
-  statusBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: SPACING.sm,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    borderRadius: BORDER_RADIUS.full,
-    borderWidth: 1,
-    borderColor: SEMANTIC_COLORS.borderPrimary,
-  },
-  statusDot: {
-    width: 7,
-    height: 7,
-    borderRadius: BORDER_RADIUS.full,
+  statusPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: NEURAL.surfaceContainerHighest,
+    borderRadius: RADIUS.full,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    gap: 2,
   },
   statusText: {
-    fontSize: TYPOGRAPHY.fontSize.xs,
-    fontWeight: TYPOGRAPHY.fontWeight.semibold,
+    fontSize: FONT_SIZE.xs,
+    fontWeight: FONT_WEIGHT.semibold,
   },
-  settingsButton: {
-    borderWidth: 1,
-    borderColor: SEMANTIC_COLORS.borderAccent,
-    backgroundColor: SEMANTIC_COLORS.bgHighlight,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    borderRadius: BORDER_RADIUS.full,
-  },
-  settingsButtonText: {
-    fontSize: TYPOGRAPHY.fontSize.xs,
-    color: COLORS.primary[700],
-    fontWeight: TYPOGRAPHY.fontWeight.medium,
+  settingsIcon: {
+    marginVertical: 1,
   },
 });

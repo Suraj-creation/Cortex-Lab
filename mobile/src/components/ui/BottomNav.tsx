@@ -1,80 +1,58 @@
-import React from "react";
-import { View, Pressable, Text, StyleSheet, ViewStyle, ScrollView } from "react-native";
-import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { COLORS, SEMANTIC_COLORS, SPACING, TYPOGRAPHY, BORDER_RADIUS, SHADOWS } from "../../theme/colors";
+/**
+ * BottomNav — Neural Dark 7-tab navigation
+ * Background: surfaceContainer (#0f1930), active: primary with underline
+ * No border — color shift creates separation from content
+ */
+import React from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, ScrollView } from 'react-native';
+import { NEURAL, FONT_SIZE, FONT_WEIGHT, SPACING } from '../../theme/colors';
+import { AppIcon, type AppIconName } from './AppIcon';
 
-type ActiveView = "chat" | "memories" | "graph" | "dashboard" | "observability" | "ambient" | "documents";
+export type NavKey = 'chat' | 'memories' | 'graph' | 'dashboard' | 'observability' | 'ambient' | 'documents';
 
 interface NavItem {
-  key: ActiveView;
+  key: NavKey;
   label: string;
-  icon?: React.ReactNode;
+  iconName: AppIconName;
 }
 
 interface BottomNavProps {
   items: NavItem[];
-  activeKey: ActiveView;
-  onSelect: (key: ActiveView) => void;
-  style?: ViewStyle;
+  activeKey: NavKey;
+  onSelect: (key: NavKey) => void;
 }
 
-const NAV_ICONS: Record<ActiveView, keyof typeof MaterialCommunityIcons.glyphMap> = {
-  chat: "chat-outline",
-  memories: "head-snowflake-outline",
-  graph: "graph-outline",
-  dashboard: "view-dashboard-outline",
-  observability: "pulse",
-  ambient: "microphone-outline",
-  documents: "file-document-outline",
-};
-
-export function BottomNav({
-  items,
-  activeKey,
-  onSelect,
-  style,
-}: BottomNavProps) {
+export function BottomNav({ items, activeKey, onSelect }: BottomNavProps) {
   return (
-    <View style={[styles.container, style]}>
+    <View style={styles.container}>
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.navContent}
-        style={styles.navScroll}
+        contentContainerStyle={styles.scrollContent}
+        bounces={false}
       >
         {items.map((item) => {
           const isActive = item.key === activeKey;
           return (
-            <Pressable
+            <TouchableOpacity
               key={item.key}
+              style={[styles.tab, isActive && styles.tabActive]}
               onPress={() => onSelect(item.key)}
-              style={({ pressed }) => [
-                styles.navItem,
-                isActive && styles.navItemActive,
-                pressed && styles.navItemPressed,
-              ]}
+              activeOpacity={0.75}
+              accessibilityRole="button"
+              accessibilityLabel={item.label}
             >
-              <View style={[styles.iconContainer, isActive && styles.iconContainerActive]}>
-                {item.icon ? (
-                  item.icon
-                ) : (
-                  <MaterialCommunityIcons
-                    name={NAV_ICONS[item.key]}
-                    size={15}
-                    color={isActive ? COLORS.primary[700] : SEMANTIC_COLORS.textSecondary}
-                  />
-                )}
-              </View>
-              <Text
-                style={[
-                  styles.label,
-                  isActive && styles.labelActive,
-                ]}
-                numberOfLines={1}
-              >
+              <AppIcon
+                name={item.iconName}
+                size={18}
+                color={isActive ? NEURAL.primary : NEURAL.onSurfaceVariant}
+                style={styles.icon}
+              />
+              <Text style={[styles.label, isActive && styles.labelActive]}>
                 {item.label}
               </Text>
-            </Pressable>
+              {isActive && <View style={styles.indicator} />}
+            </TouchableOpacity>
           );
         })}
       </ScrollView>
@@ -84,61 +62,45 @@ export function BottomNav({
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: SEMANTIC_COLORS.navBackground,
-    borderTopWidth: 1,
-    borderTopColor: SEMANTIC_COLORS.borderPrimary,
+    backgroundColor: NEURAL.surfaceContainerLow,
+    paddingBottom: SPACING.sm,
+    paddingTop: SPACING.xs,
+  },
+  scrollContent: {
     paddingHorizontal: SPACING.sm,
+    gap: 2,
+  },
+  tab: {
+    alignItems: 'center',
+    paddingHorizontal: SPACING.md,
     paddingVertical: SPACING.sm,
-    ...SHADOWS.md,
+    borderRadius: 12,
+    minWidth: 60,
+    position: 'relative',
   },
-  navScroll: {
-    flexGrow: 0,
+  tabActive: {
+    backgroundColor: `${NEURAL.primary}18`,
   },
-  navContent: {
-    gap: SPACING.sm,
-    paddingHorizontal: SPACING.sm,
-  },
-  navItem: {
-    minWidth: 78,
-    maxWidth: 90,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: SPACING.sm,
-    paddingHorizontal: SPACING.sm,
-    borderRadius: BORDER_RADIUS.xl,
-    borderWidth: 1,
-    borderColor: "transparent",
-    gap: SPACING.xs,
-  },
-  navItemActive: {
-    backgroundColor: SEMANTIC_COLORS.bgHighlight,
-    borderColor: SEMANTIC_COLORS.borderAccent,
-  },
-  navItemPressed: {
-    opacity: 0.8,
-  },
-  iconContainer: {
-    width: 30,
-    height: 30,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: BORDER_RADIUS.full,
-    borderWidth: 1,
-    borderColor: SEMANTIC_COLORS.borderPrimary,
-    backgroundColor: SEMANTIC_COLORS.bgSecondary,
-  },
-  iconContainerActive: {
-    backgroundColor: COLORS.primary[100],
-    borderColor: COLORS.primary[300],
+  icon: {
+    marginBottom: 2,
   },
   label: {
-    fontSize: 11,
-    fontWeight: TYPOGRAPHY.fontWeight.medium,
-    color: SEMANTIC_COLORS.textSecondary,
-    textAlign: "center",
+    fontSize: FONT_SIZE.xs,
+    color: NEURAL.onSurfaceVariant,
+    fontWeight: FONT_WEIGHT.medium,
   },
   labelActive: {
-    color: COLORS.primary[700],
-    fontWeight: TYPOGRAPHY.fontWeight.semibold,
+    color: NEURAL.primary,
+    fontWeight: FONT_WEIGHT.bold,
+  },
+  indicator: {
+    position: 'absolute',
+    top: 0,
+    left: '20%',
+    right: '20%',
+    height: 2,
+    backgroundColor: NEURAL.primary,
+    borderBottomLeftRadius: 2,
+    borderBottomRightRadius: 2,
   },
 });

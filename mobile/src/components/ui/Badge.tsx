@@ -1,77 +1,106 @@
-import React from "react";
-import { View, Text, StyleSheet, TextStyle, ViewStyle } from "react-native";
-import { COLORS, SPACING, TYPOGRAPHY, BORDER_RADIUS } from "../../theme/colors";
+/**
+ * Badge — Neural Dark chip/badge component
+ * Used for: type labels, status indicators, confidence chips
+ */
+import React from 'react';
+import { View, Text, StyleSheet, ViewStyle } from 'react-native';
+import { NEURAL, RADIUS, FONT_SIZE, FONT_WEIGHT } from '../../theme/colors';
+
+export type BadgeVariant =
+  | 'primary'
+  | 'secondary'
+  | 'success'
+  | 'warning'
+  | 'error'
+  | 'info'
+  | 'ghost'
+  | 'tertiary';
 
 interface BadgeProps {
   label: string;
-  variant?: "default" | "success" | "warning" | "error" | "info" | "primary";
+  variant?: BadgeVariant;
   small?: boolean;
+  dot?: boolean;
   style?: ViewStyle;
-  textStyle?: TextStyle;
 }
 
-const variantStyles = {
-  default: { bg: COLORS.surface[100], text: COLORS.surface[700] },
-  success: { bg: COLORS.success[50], text: COLORS.success[700] },
-  warning: { bg: COLORS.warning[50], text: COLORS.warning[700] },
-  error: { bg: COLORS.error[50], text: COLORS.error[700] },
-  info: { bg: COLORS.info[50], text: COLORS.info[700] },
-  primary: { bg: COLORS.primary[50], text: COLORS.primary[700] },
+const BG: Record<BadgeVariant, string> = {
+  primary:   `${NEURAL.primary}26`,    // 15% opacity
+  secondary: `${NEURAL.secondary}26`,
+  success:   `${NEURAL.tertiary}26`,
+  warning:   '#f59e0b26',
+  error:     `${NEURAL.error}26`,
+  info:      `${NEURAL.primary}1a`,
+  ghost:     NEURAL.outlineVariant + '22',
+  tertiary:  `${NEURAL.tertiary}26`,
 };
 
-export function Badge({
-  label,
-  variant = "default",
-  small = false,
-  style,
-  textStyle,
-}: BadgeProps) {
-  const variantStyle = variantStyles[variant];
+const FG: Record<BadgeVariant, string> = {
+  primary:   NEURAL.primary,
+  secondary: NEURAL.secondary,
+  success:   NEURAL.tertiary,
+  warning:   '#f59e0b',
+  error:     NEURAL.error,
+  info:      NEURAL.primary,
+  ghost:     NEURAL.onSurfaceVariant,
+  tertiary:  NEURAL.tertiary,
+};
+
+const BORDER: Record<BadgeVariant, string> = {
+  primary:   `${NEURAL.primary}40`,
+  secondary: `${NEURAL.secondary}40`,
+  success:   `${NEURAL.tertiary}40`,
+  warning:   '#f59e0b40',
+  error:     `${NEURAL.error}40`,
+  info:      `${NEURAL.primary}30`,
+  ghost:     NEURAL.outlineVariant,
+  tertiary:  `${NEURAL.tertiaryDim}60`,
+};
+
+export function Badge({ label, variant = 'primary', small = false, dot = false, style }: BadgeProps) {
+  const fs = small ? FONT_SIZE.xs : FONT_SIZE.sm;
+  const px = small ? 8 : 10;
+  const py = small ? 2 : 4;
 
   return (
     <View
       style={[
-        styles.badge,
-        small && styles.badgeSmall,
-        { backgroundColor: variantStyle.bg },
+        styles.base,
+        {
+          backgroundColor: BG[variant],
+          borderColor: BORDER[variant],
+          paddingHorizontal: px,
+          paddingVertical: py,
+        },
         style,
       ]}
     >
-      <Text
-        style={[
-          styles.text,
-          small && styles.textSmall,
-          { color: variantStyle.text },
-          textStyle,
-        ]}
-      >
-        {label}
-      </Text>
+      {dot && (
+        <View
+          style={[styles.dot, { backgroundColor: FG[variant] }]}
+        />
+      )}
+      <Text style={[styles.label, { fontSize: fs, color: FG[variant] }]}>{label}</Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  badge: {
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    borderRadius: BORDER_RADIUS.full,
+  base: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: RADIUS.full,
     borderWidth: 1,
-    borderColor: "rgba(15, 23, 42, 0.08)",
-    alignSelf: "flex-start",
+    alignSelf: 'flex-start',
   },
-  badgeSmall: {
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
-    borderRadius: BORDER_RADIUS.full,
+  dot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    marginRight: 5,
   },
-  text: {
-    fontSize: TYPOGRAPHY.fontSize.xs,
-    fontWeight: TYPOGRAPHY.fontWeight.semibold,
+  label: {
+    fontWeight: FONT_WEIGHT.semibold,
     letterSpacing: 0.2,
-  },
-  textSmall: {
-    fontSize: 10,
-    fontWeight: TYPOGRAPHY.fontWeight.semibold,
   },
 });

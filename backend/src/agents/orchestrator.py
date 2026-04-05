@@ -722,6 +722,7 @@ class AgentOrchestrator:
 
         try:
             routing = self.llm.route_query(query.raw_query, session_context)
+            heuristic_intent = query.intent
 
             # Map LLM intent to our enum
             intent_map = {
@@ -735,7 +736,23 @@ class AgentOrchestrator:
             }
             llm_intent = routing.get("intent", "").lower()
             if llm_intent in intent_map:
-                query.intent = intent_map[llm_intent]
+                candidate_intent = intent_map[llm_intent]
+
+                # Guardrail: keep explicit "why/causal" queries on the causal path
+                # when heuristic routing already identified causality.
+                raw_query_lower = query.raw_query.lower()
+                strong_causal_signal = any(
+                    token in raw_query_lower
+                    for token in ("why", "how come", "what caused", "because", "reason")
+                )
+                if (
+                    heuristic_intent == QueryIntent.CAUSAL
+                    and candidate_intent == QueryIntent.REFLECTIVE
+                    and strong_causal_signal
+                ):
+                    candidate_intent = QueryIntent.CAUSAL
+
+                query.intent = candidate_intent
 
             # Use LLM complexity if it disagrees significantly
             llm_complexity = float(routing.get("complexity", query.complexity))

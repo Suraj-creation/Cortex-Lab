@@ -1,6 +1,6 @@
 import React from "react";
 import { View, ScrollView, StyleSheet, ViewStyle } from "react-native";
-import { COLORS, SPACING } from "../../theme/colors";
+import { NEURAL, SPACING } from "../../theme/colors";
 
 interface ScreenProps {
   children: React.ReactNode;
@@ -20,7 +20,7 @@ export function Screen({
   scrollable = false,
   paddingHorizontal = SPACING.lg,
   paddingVertical = SPACING.lg,
-  backgroundColor = COLORS.surface[50],
+  backgroundColor = NEURAL.background,
   style,
 }: ScreenProps) {
   const containerStyle = {

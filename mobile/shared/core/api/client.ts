@@ -100,6 +100,26 @@ function normalizeBaseUrl(rawBaseUrl: string): string {
   return rawBaseUrl.endsWith("/") ? rawBaseUrl.slice(0, -1) : rawBaseUrl;
 }
 
+function ensureApiPath(rawBaseUrl: string): string {
+  const normalized = normalizeBaseUrl(rawBaseUrl.trim());
+
+  // Prefer URL parsing when the value is absolute; fallback keeps relative values working.
+  try {
+    const parsed = new URL(normalized);
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    if (pathname === "" || pathname === "/") {
+      parsed.pathname = "/api";
+    } else if (!pathname.endsWith("/api")) {
+      parsed.pathname = `${pathname}/api`;
+    } else {
+      parsed.pathname = pathname;
+    }
+    return normalizeBaseUrl(parsed.toString());
+  } catch {
+    return normalized.endsWith("/api") ? normalized : `${normalized}/api`;
+  }
+}
+
 function extractHostname(rawUrl: string): string | null {
   try {
     return new URL(rawUrl).hostname;
@@ -121,7 +141,7 @@ async function parseError(res: Response): Promise<Error> {
 }
 
 export function createApiClient(config: ApiConfig) {
-  const baseUrl = normalizeBaseUrl(config.baseUrl);
+  const baseUrl = ensureApiPath(config.baseUrl);
 
   async function getModelStatus(): Promise<ModelStatus> {
     const res = await fetch(`${baseUrl}/health`);
@@ -706,7 +726,7 @@ export function getDefaultApiBaseUrl(): string {
       ? process.env.EXPO_PUBLIC_API_BASE_URL || process.env.NEXT_PUBLIC_API_BASE_URL
       : undefined;
 
-  const normalizedEnvBase = envBase?.trim() ? normalizeBaseUrl(envBase.trim()) : undefined;
+  const normalizedEnvBase = envBase?.trim() ? ensureApiPath(envBase.trim()) : undefined;
 
   // In web builds, prefer same-host backend because 10.0.2.2 is Android-emulator only.
   if (typeof window !== "undefined" && window.location?.hostname) {
@@ -716,7 +736,7 @@ export function getDefaultApiBaseUrl(): string {
 
     const protocol = window.location.protocol === "https:" ? "https:" : "http:";
     const host = window.location.hostname;
-    return normalizeBaseUrl(`${protocol}//${host}:8000/api`);
+    return ensureApiPath(`${protocol}//${host}:8000`);
   }
 
   if (normalizedEnvBase) {
@@ -725,5 +745,5 @@ export function getDefaultApiBaseUrl(): string {
 
   // Android emulator: use 10.0.2.2. iOS simulator can use localhost.
   // For physical devices, set EXPO_PUBLIC_API_BASE_URL to your machine LAN IP.
-  return "http://10.0.2.2:8000/api";
+  return ensureApiPath("http://10.0.2.2:8000");
 }

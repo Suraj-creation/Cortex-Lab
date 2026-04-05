@@ -1,131 +1,167 @@
-import React from "react";
-import { Pressable, Text, StyleSheet, ViewStyle, TextStyle } from "react-native";
-import { COLORS, SEMANTIC_COLORS, SPACING, TYPOGRAPHY, BORDER_RADIUS, SHADOWS } from "../../theme/colors";
+/**
+ * Button — Neural Dark gradient CTA
+ * Primary: gradient indigo → primaryDim at 135°
+ * Design: "Glass & Gradient Rule" from Cortex Neural Dark
+ */
+import React from 'react';
+import {
+  Pressable,
+  Text,
+  StyleSheet,
+  ViewStyle,
+  TextStyle,
+  ActivityIndicator,
+  View,
+} from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import { NEURAL, RADIUS, FONT_SIZE, FONT_WEIGHT } from '../../theme/colors';
+
+export type ButtonVariant = 'primary' | 'secondary' | 'outline' | 'ghost' | 'error' | 'success';
+export type ButtonSize = 'xs' | 'sm' | 'md' | 'lg';
 
 interface ButtonProps {
-  onPress: () => void;
   label: string;
-  variant?: "primary" | "secondary" | "outline" | "error";
-  size?: "sm" | "md" | "lg";
+  onPress?: () => void;
+  variant?: ButtonVariant;
+  size?: ButtonSize;
   disabled?: boolean;
   loading?: boolean;
-  icon?: React.ReactNode;
   style?: ViewStyle;
+  textStyle?: TextStyle;
+  icon?: React.ReactNode;
+  fullWidth?: boolean;
 }
 
-const createButtonStyles = (variant: string, size: string, disabled: boolean) => {
-  const buttonStyle: ViewStyle = {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: SPACING.sm,
-    borderRadius: BORDER_RADIUS.xl,
-    paddingHorizontal: size === "sm" ? SPACING.md : size === "lg" ? SPACING["2xl"] : SPACING.xl,
-    paddingVertical: size === "sm" ? SPACING.sm : size === "lg" ? SPACING.lg : SPACING.md,
-    minHeight: size === "sm" ? 36 : size === "lg" ? 50 : 42,
-  };
-
-  const textStyle: TextStyle = {
-    fontSize: size === "sm" ? TYPOGRAPHY.fontSize.sm : size === "lg" ? TYPOGRAPHY.fontSize.lg : TYPOGRAPHY.fontSize.md,
-    fontWeight: TYPOGRAPHY.fontWeight.semibold,
-  };
-
-  if (variant === "primary") {
-    return {
-      buttonStyle: {
-        ...buttonStyle,
-        backgroundColor: disabled ? SEMANTIC_COLORS.buttonPrimaryDisabled : SEMANTIC_COLORS.buttonPrimary,
-        borderWidth: 1,
-        borderColor: disabled ? COLORS.surface[300] : COLORS.primary[700],
-        ...SHADOWS.md,
-      },
-      textStyle: {
-        ...textStyle,
-        color: SEMANTIC_COLORS.textOnAccent,
-      },
-    };
-  }
-
-  if (variant === "secondary") {
-    return {
-      buttonStyle: {
-        ...buttonStyle,
-        backgroundColor: disabled ? COLORS.surface[100] : SEMANTIC_COLORS.buttonSecondary,
-        borderWidth: 1,
-        borderColor: SEMANTIC_COLORS.borderPrimary,
-      },
-      textStyle: {
-        ...textStyle,
-        color: SEMANTIC_COLORS.buttonSecondaryText,
-      },
-    };
-  }
-
-  if (variant === "outline") {
-    return {
-      buttonStyle: {
-        ...buttonStyle,
-        backgroundColor: COLORS.transparent,
-        borderWidth: 1,
-        borderColor: SEMANTIC_COLORS.borderAccent,
-      },
-      textStyle: {
-        ...textStyle,
-        color: COLORS.primary[700],
-      },
-    };
-  }
-
-  if (variant === "error") {
-    return {
-      buttonStyle: {
-        ...buttonStyle,
-        backgroundColor: disabled ? SEMANTIC_COLORS.buttonPrimaryDisabled : COLORS.error[500],
-        borderWidth: 1,
-        borderColor: COLORS.error[600],
-        ...SHADOWS.sm,
-      },
-      textStyle: {
-        ...textStyle,
-        color: COLORS.white,
-      },
-    };
-  }
-
-  return { buttonStyle, textStyle };
+const SIZE_CONFIG: Record<ButtonSize, { px: number; py: number; fontSize: number; radius: number }> = {
+  xs: { px: 10, py: 4,  fontSize: FONT_SIZE.xs,   radius: RADIUS.md },
+  sm: { px: 14, py: 7,  fontSize: FONT_SIZE.sm,   radius: RADIUS.lg },
+  md: { px: 18, py: 10, fontSize: FONT_SIZE.base, radius: RADIUS.xl },
+  lg: { px: 24, py: 14, fontSize: FONT_SIZE.lg,   radius: RADIUS.full },
 };
 
 export function Button({
-  onPress,
   label,
-  variant = "primary",
-  size = "md",
+  onPress,
+  variant = 'primary',
+  size = 'md',
   disabled = false,
   loading = false,
-  icon,
   style,
+  textStyle,
+  icon,
+  fullWidth = false,
 }: ButtonProps) {
-  const { buttonStyle, textStyle } = createButtonStyles(variant, size, disabled);
+  const cfg = SIZE_CONFIG[size];
+  const isPrimary = variant === 'primary';
+
+  const inner = (
+    <View
+      style={[
+        styles.inner,
+        { paddingHorizontal: cfg.px, paddingVertical: cfg.py, borderRadius: cfg.radius },
+        !isPrimary && styles.nonGradient,
+        !isPrimary && variantStyles[variant],
+        (disabled || loading) && styles.disabled,
+      ]}
+    >
+      {loading ? (
+        <ActivityIndicator size="small" color={isPrimary ? NEURAL.onPrimary : NEURAL.primary} />
+      ) : (
+        <>
+          {icon && <View style={styles.iconWrap}>{icon}</View>}
+          <Text
+            style={[
+              styles.label,
+              { fontSize: cfg.fontSize },
+              variantTextStyles[variant],
+              textStyle,
+              (disabled || loading) && styles.disabledText,
+            ]}
+          >
+            {label}
+          </Text>
+        </>
+      )}
+    </View>
+  );
+
+  if (isPrimary && !disabled && !loading) {
+    return (
+      <Pressable
+        onPress={onPress}
+        disabled={disabled || loading}
+        style={[fullWidth && styles.fullWidth, style]}
+      >
+        {({ pressed }) => (
+          <LinearGradient
+            colors={[NEURAL.primary, NEURAL.primaryDim]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={[
+              styles.inner,
+              { paddingHorizontal: cfg.px, paddingVertical: cfg.py, borderRadius: cfg.radius },
+              pressed && styles.pressed,
+            ]}
+          >
+            {icon && <View style={styles.iconWrap}>{icon}</View>}
+            <Text style={[styles.label, { fontSize: cfg.fontSize, color: '#ffffff' }, textStyle]}>
+              {label}
+            </Text>
+          </LinearGradient>
+        )}
+      </Pressable>
+    );
+  }
 
   return (
     <Pressable
       onPress={onPress}
       disabled={disabled || loading}
       style={({ pressed }) => [
-        buttonStyle,
+        fullWidth && styles.fullWidth,
+        pressed && !disabled && styles.pressed,
         style,
-        pressed && !disabled && { opacity: 0.9, transform: [{ scale: 0.985 }] },
-        disabled && { opacity: 0.6 },
       ]}
     >
-      {icon ? <>{icon}</> : null}
-      <Text style={[textStyle, styles.label]}>{loading ? "…" : label}</Text>
+      {inner}
     </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  label: {
-    textAlign: "center",
+  inner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: RADIUS.xl,
   },
+  nonGradient: {},
+  label: {
+    fontWeight: FONT_WEIGHT.semibold,
+    color: NEURAL.onSurface,
+    letterSpacing: 0.2,
+  },
+  iconWrap: { marginRight: 6 },
+  disabled: { opacity: 0.45 },
+  disabledText: { color: NEURAL.onSurfaceVariant },
+  fullWidth: { width: '100%' },
+  pressed: { opacity: 0.82 },
 });
+
+const variantStyles: Record<ButtonVariant, ViewStyle> = {
+  primary:   { backgroundColor: NEURAL.primary },
+  secondary: { backgroundColor: NEURAL.surfaceContainerHigh },
+  outline:   { backgroundColor: 'transparent', borderWidth: 1, borderColor: NEURAL.outlineVariant },
+  ghost:     { backgroundColor: 'transparent' },
+  error:     { backgroundColor: `${NEURAL.error}22`, borderWidth: 1, borderColor: NEURAL.error },
+  success:   { backgroundColor: `${NEURAL.tertiary}22`, borderWidth: 1, borderColor: NEURAL.tertiary },
+};
+
+const variantTextStyles: Record<ButtonVariant, TextStyle> = {
+  primary:   { color: '#ffffff' },
+  secondary: { color: NEURAL.onSurface },
+  outline:   { color: NEURAL.onSurfaceVariant },
+  ghost:     { color: NEURAL.primary },
+  error:     { color: NEURAL.error },
+  success:   { color: NEURAL.tertiary },
+};

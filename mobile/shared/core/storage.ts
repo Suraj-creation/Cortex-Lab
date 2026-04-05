@@ -12,6 +12,7 @@ const STORAGE_KEYS = {
   CURRENT_CONVERSATION_ID: 'current_conversation_id',
   CHAT_SETTINGS: 'chat_settings',
   LAST_API_URL: 'last_api_url',
+  ONBOARDING_COMPLETED: 'onboarding_completed',
   SYNC_METADATA: 'sync_metadata',
 };
 
@@ -195,6 +196,24 @@ export async function saveLastApiUrl(url: string): Promise<void> {
  */
 export async function getLastApiUrl(): Promise<string | null> {
   return await StorageBackend.getItem(STORAGE_KEYS.LAST_API_URL);
+}
+
+/**
+ * Persist onboarding completion flag
+ */
+export async function saveOnboardingCompleted(completed: boolean): Promise<void> {
+  await StorageBackend.setItem(STORAGE_KEYS.ONBOARDING_COMPLETED, completed ? 'true' : 'false');
+}
+
+/**
+ * Check whether onboarding has been completed
+ */
+export async function getOnboardingCompleted(): Promise<boolean> {
+  try {
+    return (await StorageBackend.getItem(STORAGE_KEYS.ONBOARDING_COMPLETED)) === 'true';
+  } catch {
+    return false;
+  }
 }
 
 /**

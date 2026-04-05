@@ -264,6 +264,144 @@ class TestHallucinationPatterns:
         assert "emotional resilience" in _HALLUC_PATTERNS
 
 
+# ─── Test Non-Streaming Personal Info Post-Processing ─────────────────────
+
+class TestPersonalInfoPostProcessing:
+    """Test non-streaming personal-info evidence supplementation and extraction."""
+
+    def test_adds_direct_supplement_for_personal_query(self):
+        from server import _postprocess_non_stream_result
+
+        captured = {"query": ""}
+
+        def fake_search(query: str, top_k: int = 3):
+            captured["query"] = query
+            return [
+                {
+                    "content": "My name is Suraj Kumar and I am pursuing B.Tech at IIIT Ranchi.",
+                    "score": 0.71,
+                    "memory_type": "semantic",
+                }
+            ]
+
+        result = {
+            "answer": "I cannot determine your name from the available information.",
+            "thinking": "Initial retrieval completed.",
+            "evidence": [],
+            "confidence": 0.42,
+        }
+
+        updated = _postprocess_non_stream_result(
+            "What is my name?",
+            result,
+            search_fn=fake_search,
+        )
+
+        assert "resume contact information summary" in captured["query"].lower()
+        assert updated["evidence"], "Expected direct supplement evidence to be added"
+        assert updated["evidence"][0]["channel"] == "direct_supplement"
+        assert "suraj" in updated["answer"].lower(), updated["answer"]
+
+    def test_skips_low_score_supplement(self):
+        from server import _postprocess_non_stream_result
+
+        def fake_search(_query: str, top_k: int = 3):
+            return [{"content": "My name is Suraj Kumar", "score": 0.21, "memory_type": "semantic"}]
+
+        result = {
+            "answer": "I cannot determine your name from the available information.",
+            "thinking": "Initial retrieval completed.",
+            "evidence": [],
+            "confidence": 0.42,
+        }
+
+        updated = _postprocess_non_stream_result(
+            "What is my name?",
+            result,
+            search_fn=fake_search,
+        )
+
+        assert updated["evidence"] == [], "Low-score supplement should not be injected"
+        assert "cannot determine" in updated["answer"].lower()
+
+    def test_non_personal_query_is_unchanged(self):
+        from copy import deepcopy
+        from server import _postprocess_non_stream_result
+
+        def fake_search(_query: str, top_k: int = 3):
+            raise AssertionError("Search should not be called for non-personal query")
+
+        result = {
+            "answer": "You discussed three deep learning projects.",
+            "thinking": "Initial retrieval completed.",
+            "evidence": [{"content": "Project A...", "score": 0.77, "channel": "vector"}],
+            "confidence": 0.86,
+        }
+
+        original = deepcopy(result)
+        updated = _postprocess_non_stream_result(
+            "Summarize my deep learning projects",
+            result,
+            search_fn=fake_search,
+        )
+
+        assert updated == original
+
+    def test_overrides_confident_answer_when_fact_missing(self):
+        from server import _postprocess_non_stream_result
+
+        def fake_search(_query: str, top_k: int = 3):
+            return []
+
+        result = {
+            "answer": "I cannot find a specific name in your data because the speakers are anonymized.",
+            "thinking": "Initial retrieval completed.",
+            "evidence": [
+                {
+                    "content": "My name is Suraj Kumar and I am pursuing B.Tech at IIIT Ranchi.",
+                    "score": 0.92,
+                    "channel": "vector",
+                }
+            ],
+            "confidence": 0.91,
+        }
+
+        updated = _postprocess_non_stream_result(
+            "What is my name?",
+            result,
+            search_fn=fake_search,
+        )
+
+        assert "suraj" in updated["answer"].lower(), updated["answer"]
+
+    def test_overrides_confident_explanatory_answer_without_fact(self):
+        from server import _postprocess_non_stream_result
+
+        def fake_search(_query: str, top_k: int = 3):
+            return []
+
+        result = {
+            "answer": "Based on the provided documents, your name is not mentioned by any speaker.",
+            "thinking": "Initial retrieval completed.",
+            "evidence": [
+                {
+                    "content": "My name is Suraj Kumar and I am pursuing B.Tech at IIIT Ranchi.",
+                    "score": 0.92,
+                    "channel": "vector",
+                }
+            ],
+            "confidence": 0.93,
+        }
+
+        updated = _postprocess_non_stream_result(
+            "What is my name?",
+            result,
+            search_fn=fake_search,
+        )
+
+        assert "suraj" in updated["answer"].lower(), updated["answer"]
+
+
 # ─── Run ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

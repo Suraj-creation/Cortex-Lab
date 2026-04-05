@@ -8,7 +8,8 @@ import {
   StyleSheet,
 } from "react-native";
 import { PipelineTrace, PipelineStep } from "../../shared/core/types";
-import { COLORS, SEMANTIC_COLORS, SPACING, TYPOGRAPHY, BORDER_RADIUS } from "../theme/colors";
+import { NEURAL, SEMANTIC_COLORS, SPACING, TYPOGRAPHY, BORDER_RADIUS } from "../theme/colors";
+import { AppIcon, type AppIconName } from "./ui/AppIcon";
 
 interface TraceDetailModalProps {
   trace: PipelineTrace;
@@ -33,30 +34,26 @@ export default function TraceDetailModal({
   };
 
   const renderStepIcon = (stepType: string) => {
-    const iconMap: Record<string, string> = {
-      query_analysis: "QRY",
-      routing: "RTE",
-      query_transform: "TRN",
-      agent_execution: "AGN",
-      crag: "CRG",
-      self_rag: "SRG",
-      flare: "FLR",
-      compression: "CMP",
-      reranking: "RNK",
+    const iconMap: Record<string, AppIconName> = {
+      query_analysis: "magnify-scan",
+      routing: "source-branch",
+      query_transform: "swap-horizontal",
+      agent_execution: "robot-outline",
+      crag: "check-decagram-outline",
+      self_rag: "account-search-outline",
+      flare: "flash-outline",
+      compression: "arrow-collapse-vertical",
+      reranking: "tune-variant",
     };
-    return iconMap[stepType] || "STEP";
+    return iconMap[stepType] || "playlist-check";
   };
 
   const getStatusColor = (status: string) => {
     switch (status) {
-      case "completed":
-        return COLORS.success[500];
-      case "skipped":
-        return COLORS.surface[400];
-      case "error":
-        return COLORS.error[500];
-      default:
-        return COLORS.surface[600];
+      case "completed": return NEURAL.tertiary;
+      case "skipped":   return NEURAL.onSurfaceVariant;
+      case "error":     return NEURAL.error;
+      default:          return NEURAL.outline;
     }
   };
 
@@ -73,7 +70,7 @@ export default function TraceDetailModal({
           <View style={styles.header}>
             <Text style={styles.title}>Trace Details</Text>
             <Pressable onPress={onClose} style={styles.closeButton}>
-              <Text style={styles.closeButtonText}>X</Text>
+              <AppIcon name="close" size={20} color={SEMANTIC_COLORS.textTertiary} style={styles.closeButtonText} />
             </Pressable>
           </View>
 
@@ -280,7 +277,7 @@ interface StepRowProps {
   index: number;
   isExpanded: boolean;
   onToggle: () => void;
-  icon: string;
+  icon: AppIconName;
   statusColor: string;
 }
 
@@ -311,12 +308,17 @@ function StepRow({
           },
         ]}
       >
-        <Text style={styles.stepIcon}>{icon}</Text>
+        <AppIcon name={icon} size={14} color={SEMANTIC_COLORS.textSecondary} style={styles.stepIcon} />
         <View style={styles.stepInfo}>
           <Text style={styles.stepName}>{step.step_name}</Text>
           <Text style={styles.stepStatus}>{statusText}</Text>
         </View>
-        <Text style={styles.expandIndicator}>{isExpanded ? "v" : ">"}</Text>
+        <AppIcon
+          name={isExpanded ? "chevron-down" : "chevron-right"}
+          size={14}
+          color={NEURAL.onSurfaceVariant}
+          style={styles.expandIndicator}
+        />
       </Pressable>
 
       {isExpanded && step.details && Object.keys(step.details).length > 0 ? (
@@ -378,8 +380,7 @@ const styles = StyleSheet.create({
     paddingVertical: SPACING.xs,
   },
   closeButtonText: {
-    fontSize: TYPOGRAPHY.fontSize.xl,
-    color: SEMANTIC_COLORS.textTertiary,
+    marginVertical: 1,
   },
   content: {
     flex: 1,
@@ -425,15 +426,15 @@ const styles = StyleSheet.create({
   agentBadge: {
     paddingHorizontal: SPACING.md,
     paddingVertical: SPACING.sm,
-    backgroundColor: COLORS.info[50],
+    backgroundColor: `${NEURAL.primary}18`,
     borderRadius: BORDER_RADIUS.md,
     borderWidth: 1,
-    borderColor: COLORS.info[200],
+    borderColor: `${NEURAL.primary}40`,
   },
   agentName: {
     fontSize: TYPOGRAPHY.fontSize.xs,
     fontWeight: TYPOGRAPHY.fontWeight.semibold,
-    color: COLORS.info[700],
+    color: NEURAL.primary,
   },
   stepsContainer: {
     gap: 8,
@@ -449,9 +450,6 @@ const styles = StyleSheet.create({
     borderColor: SEMANTIC_COLORS.borderPrimary,
   },
   stepIcon: {
-    fontSize: TYPOGRAPHY.fontSize.xs,
-    fontWeight: TYPOGRAPHY.fontWeight.bold,
-    color: SEMANTIC_COLORS.textSecondary,
     marginRight: SPACING.sm,
   },
   stepInfo: {
@@ -468,8 +466,7 @@ const styles = StyleSheet.create({
     color: SEMANTIC_COLORS.textTertiary,
   },
   expandIndicator: {
-    fontSize: TYPOGRAPHY.fontSize.xs,
-    color: COLORS.surface[300],
+    marginLeft: SPACING.xs,
   },
   stepDetails: {
     marginTop: -2,
@@ -519,7 +516,7 @@ const styles = StyleSheet.create({
   channelValue: {
     fontSize: TYPOGRAPHY.fontSize.md,
     fontWeight: TYPOGRAPHY.fontWeight.bold,
-    color: COLORS.primary[600],
+    color: NEURAL.primary,
     marginBottom: SPACING.xs,
   },
   channelMeta: {
@@ -541,7 +538,7 @@ const styles = StyleSheet.create({
     marginBottom: SPACING.sm,
     paddingBottom: SPACING.sm,
     borderBottomWidth: 1,
-    borderBottomColor: COLORS.surface[100],
+    borderBottomColor: `${NEURAL.outlineVariant}40`,
   },
   spacer: {
     height: 24,

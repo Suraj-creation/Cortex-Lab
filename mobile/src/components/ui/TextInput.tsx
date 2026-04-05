@@ -1,85 +1,114 @@
-import React, { useState } from "react";
-import { View, TextInput as RNTextInput, StyleSheet, ViewStyle, TextStyle } from "react-native";
-import { COLORS, SEMANTIC_COLORS, SPACING, TYPOGRAPHY, BORDER_RADIUS, SHADOWS } from "../../theme/colors";
+/**
+ * TextInput — Neural Dark command-line input
+ * "The Command Line" — surface-container-highest pill, no border, primary glow on focus
+ */
+import React, { useState } from 'react';
+import {
+  TextInput as RNTextInput,
+  View,
+  StyleSheet,
+  TextInputProps as RNTextInputProps,
+  ViewStyle,
+  Text,
+} from 'react-native';
+import { NEURAL, RADIUS, FONT_SIZE, FONT_WEIGHT } from '../../theme/colors';
 
-interface TextInputProps {
-  placeholder?: string;
-  value: string;
-  onChangeText: (text: string) => void;
-  multiline?: boolean;
-  maxHeight?: number;
-  editable?: boolean;
-  numberOfLines?: number;
+interface TextInputProps extends RNTextInputProps {
+  label?: string;
   style?: ViewStyle;
-  inputStyle?: TextStyle;
+  inputStyle?: object;
+  pill?: boolean;
+  icon?: React.ReactNode;
 }
 
 export function TextInput({
-  placeholder,
-  value,
-  onChangeText,
-  multiline = false,
-  maxHeight = 120,
-  editable = true,
-  numberOfLines,
+  label,
   style,
   inputStyle,
+  pill = false,
+  icon,
+  multiline,
+  ...rest
 }: TextInputProps) {
-  const [isFocused, setIsFocused] = useState(false);
+  const [focused, setFocused] = useState(false);
 
   return (
-    <View
-      style={[
-        styles.container,
-        isFocused && styles.containerFocused,
-        style,
-      ]}
-    >
-      <RNTextInput
-        placeholder={placeholder}
-        placeholderTextColor={SEMANTIC_COLORS.textTertiary}
-        value={value}
-        onChangeText={onChangeText}
-        onFocus={() => setIsFocused(true)}
-        onBlur={() => setIsFocused(false)}
-        multiline={multiline}
-        editable={editable}
-        numberOfLines={numberOfLines}
-        textAlignVertical={multiline ? "top" : "center"}
+    <View style={[styles.wrapper, style]}>
+      {label && <Text style={styles.label}>{label}</Text>}
+      <View
         style={[
-          styles.input,
-          multiline && { maxHeight },
-          inputStyle,
+          styles.container,
+          pill && styles.pill,
+          multiline && styles.multiline,
+          focused && styles.focused,
         ]}
-      />
+      >
+        {icon && <View style={styles.icon}>{icon}</View>}
+        <RNTextInput
+          {...rest}
+          multiline={multiline}
+          onFocus={(e) => {
+            setFocused(true);
+            rest.onFocus?.(e);
+          }}
+          onBlur={(e) => {
+            setFocused(false);
+            rest.onBlur?.(e);
+          }}
+          style={[styles.input, multiline && styles.inputMultiline, inputStyle]}
+          placeholderTextColor={NEURAL.outline}
+          selectionColor={NEURAL.primary}
+        />
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    borderRadius: BORDER_RADIUS.xl,
-    borderWidth: 1,
-    borderColor: SEMANTIC_COLORS.borderPrimary,
-    backgroundColor: SEMANTIC_COLORS.bgPrimary,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    flexDirection: "row",
-    alignItems: "center",
-    ...SHADOWS.none,
+  wrapper: {},
+  label: {
+    fontSize: FONT_SIZE.sm,
+    color: NEURAL.onSurfaceVariant,
+    fontWeight: FONT_WEIGHT.medium,
+    marginBottom: 6,
   },
-  containerFocused: {
-    borderColor: SEMANTIC_COLORS.borderAccent,
+  container: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: NEURAL.surfaceContainerHighest,
+    borderRadius: RADIUS.xl,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
     borderWidth: 1,
-    backgroundColor: COLORS.white,
-    ...SHADOWS.sm,
+    borderColor: NEURAL.outlineVariant,
+  },
+  pill: {
+    borderRadius: RADIUS.full,
+  },
+  multiline: {
+    alignItems: 'flex-start',
+    paddingVertical: 12,
+  },
+  focused: {
+    borderColor: NEURAL.primary,
+    shadowColor: NEURAL.primary,
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 4,
   },
   input: {
     flex: 1,
-    fontSize: TYPOGRAPHY.fontSize.md,
-    color: SEMANTIC_COLORS.textPrimary,
-    paddingVertical: SPACING.sm,
-    minHeight: 22,
-    lineHeight: TYPOGRAPHY.fontSize.md * TYPOGRAPHY.lineHeight.normal,
+    fontSize: FONT_SIZE.base,
+    color: NEURAL.onSurface,
+    padding: 0,
+    margin: 0,
+  },
+  inputMultiline: {
+    minHeight: 60,
+    textAlignVertical: 'top',
+  },
+  icon: {
+    marginRight: 8,
   },
 });

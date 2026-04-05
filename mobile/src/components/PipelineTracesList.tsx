@@ -12,20 +12,22 @@ import { PipelineTrace, TraceAnalytics } from "../../shared/core/types";
 import TraceListItem from "./TraceListItem";
 import TraceDetailModal from "./TraceDetailModal";
 import DateRangeFilter from "./DateRangeFilter";
-import { COLORS, SEMANTIC_COLORS, SPACING, TYPOGRAPHY, BORDER_RADIUS } from "../theme/colors";
+import { NEURAL, SEMANTIC_COLORS, SPACING, TYPOGRAPHY, BORDER_RADIUS } from "../theme/colors";
 
 interface PipelineTracesListProps {
+  baseUrl?: string;
   refreshInterval?: number; // ms, 0 = disabled
   maxTraces?: number; // 10, 20, 50, 100
 }
 
 export default function PipelineTracesList({
+  baseUrl,
   refreshInterval = 10000,
   maxTraces = 20,
 }: PipelineTracesListProps) {
   const api = useMemo(
-    () => createApiClient({ baseUrl: getDefaultApiBaseUrl() }),
-    []
+    () => createApiClient({ baseUrl: baseUrl || getDefaultApiBaseUrl() }),
+    [baseUrl]
   );
   const [traces, setTraces] = useState<PipelineTrace[]>([]);
   const [analytics, setAnalytics] = useState<TraceAnalytics | null>(null);
@@ -168,7 +170,7 @@ export default function PipelineTracesList({
         ListEmptyComponent={
           loading ? (
             <View style={styles.loadingContainer}>
-              <ActivityIndicator size="large" color={COLORS.primary[500]} />
+              <ActivityIndicator size="large" color={NEURAL.primary} />
               <Text style={styles.loadingText}>Loading traces...</Text>
             </View>
           ) : (
@@ -229,8 +231,8 @@ const styles = StyleSheet.create({
     borderColor: SEMANTIC_COLORS.borderPrimary,
   },
   filterButtonActive: {
-    backgroundColor: COLORS.primary[50],
-    borderColor: COLORS.primary[500],
+    backgroundColor: `${NEURAL.primary}18`,
+    borderColor: `${NEURAL.primary}60`,
   },
   filterButtonText: {
     fontSize: TYPOGRAPHY.fontSize.xs,

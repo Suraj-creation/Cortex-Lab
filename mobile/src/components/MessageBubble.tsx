@@ -1,279 +1,381 @@
-import { StyleSheet, Text, View } from "react-native";
-import type { EvidenceCard, QueryAnalysis } from "../../shared/core/types";
-import { COLORS, SEMANTIC_COLORS, SPACING, TYPOGRAPHY, BORDER_RADIUS, SHADOWS } from "../theme/colors";
+/**
+ * MessageBubble — Neural Dark Chat Message
+ * Stitch design: user=indigo gradient bubble, assistant=dark card with reasoning block
+ */
+import React, { useState } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  Pressable,
+  ScrollView,
+  Animated,
+} from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import { NEURAL, RADIUS, FONT_SIZE, FONT_WEIGHT, SPACING } from '../theme/colors';
+import { Badge } from './ui/Badge';
+import { NeuralPulse } from './ui/NeuralPulse';
+
+interface Evidence {
+  content?: string;
+  source?: string;
+  score?: number;
+}
 
 interface MessageBubbleProps {
-  role: "user" | "assistant";
+  role: 'user' | 'assistant';
   content: string;
   timestamp?: number;
   isStreaming?: boolean;
   thinking?: string;
   confidence?: number;
   agentsUsed?: string[];
-  evidence?: EvidenceCard[];
-  queryAnalysis?: QueryAnalysis;
+  evidence?: Evidence[];
+  queryAnalysis?: string;
+}
+
+function formatTs(ts?: number) {
+  if (!ts) return '';
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function toPercent(v?: number) {
+  if (typeof v !== 'number') return null;
+  return `${Math.round(v * 100)}%`;
 }
 
 export function MessageBubble({
   role,
   content,
   timestamp,
-  isStreaming = false,
+  isStreaming,
   thinking,
   confidence,
   agentsUsed,
   evidence,
   queryAnalysis,
 }: MessageBubbleProps) {
-  const isUser = role === "user";
-  const timeText = timestamp ? new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
-  const safeContent = content.trim();
-  const evidencePreview = (evidence || []).slice(0, 2);
+  const [showThinking, setShowThinking] = useState(false);
 
+  if (role === 'user') {
+    return (
+      <View style={styles.userRow}>
+        <LinearGradient
+          colors={[NEURAL.primary, NEURAL.primaryDim]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.userBubble}
+        >
+          <Text style={styles.userText}>{content}</Text>
+          {timestamp ? (
+            <Text style={styles.userTime}>{formatTs(timestamp)}</Text>
+          ) : null}
+        </LinearGradient>
+      </View>
+    );
+  }
+
+  // Assistant message
   return (
-    <View style={[styles.row, isUser ? styles.userRow : styles.assistantRow]}>
-      <View style={styles.metaRow}>
-        <Text style={styles.roleText}>{isUser ? "You" : "Cortex"}</Text>
-        {timeText ? <Text style={styles.timeText}>{timeText}</Text> : null}
-        {!isUser && typeof confidence === "number" ? (
-          <View style={styles.confidenceBadge}>
-            <Text style={styles.confidenceText}>{Math.round(confidence * 100)}%</Text>
+    <View style={styles.assistantRow}>
+      {/* Avatar dot */}
+      <View style={styles.avatarWrap}>
+        <LinearGradient
+          colors={[NEURAL.secondary, NEURAL.primaryDim]}
+          style={styles.avatar}
+        >
+          <Text style={styles.avatarText}>C</Text>
+        </LinearGradient>
+      </View>
+
+      <View style={styles.assistantContent}>
+        {/* Reasoning block */}
+        {thinking ? (
+          <View style={styles.reasoningBlock}>
+            <Pressable
+              onPress={() => setShowThinking((prev) => !prev)}
+              style={styles.reasoningHeader}
+            >
+              <Text style={styles.reasoningLabel}>Reasoning</Text>
+              {confidence != null && (
+                <Badge
+                  label={`${Math.round(confidence * 100)}% confident`}
+                  variant="tertiary"
+                  small
+                />
+              )}
+            </Pressable>
+            {showThinking && (
+              <Text style={styles.reasoningText}>{thinking}</Text>
+            )}
           </View>
         ) : null}
-      </View>
 
-      {!isUser && thinking ? (
-        <View style={styles.reasoningCard}>
-          <Text style={styles.reasoningLabel}>Reasoning</Text>
-          <Text style={styles.reasoningText} numberOfLines={4}>
-            {thinking}
-          </Text>
-        </View>
-      ) : null}
-
-      <View
-        style={[
-          styles.bubble,
-          isUser ? styles.userBubble : styles.assistantBubble,
-        ]}
-      >
-        <Text
-          style={[
-            styles.text,
-            isUser ? styles.userText : styles.assistantText,
-          ]}
-        >
-          {safeContent || (isStreaming && !isUser ? "…" : "No response generated.")}
-        </Text>
-        {isStreaming && !isUser ? <Text style={styles.streamingText}>Generating…</Text> : null}
-      </View>
-
-      {!isUser && agentsUsed && agentsUsed.length > 0 ? (
-        <View style={styles.agentRow}>
-          {agentsUsed.slice(0, 4).map((agent, idx) => (
-            <View key={`${agent}-${idx}`} style={styles.agentChip}>
-              <Text style={styles.agentChipText}>{agent}</Text>
+        {/* Main response card */}
+        <View style={styles.assistantCard}>
+          {isStreaming && !content ? (
+            <View style={styles.streamingRow}>
+              <NeuralPulse active size={6} color={NEURAL.primary} />
+              <Text style={styles.streamingLabel}>Thinking...</Text>
             </View>
-          ))}
-        </View>
-      ) : null}
+          ) : (
+            <Text style={styles.assistantText}>
+              {content}
+              {isStreaming ? (
+                <Text style={{ color: NEURAL.primary }}> |</Text>
+              ) : null}
+            </Text>
+          )}
 
-      {!isUser && queryAnalysis ? (
-        <View style={styles.analysisRow}>
-          <Text style={styles.analysisChip}>Intent {queryAnalysis.intent}</Text>
-          <Text style={styles.analysisChip}>Route {queryAnalysis.routing}</Text>
-          <Text style={styles.analysisChip}>Complexity {(queryAnalysis.complexity * 100).toFixed(0)}%</Text>
+          {/* Confidence badge (bottom right of card) */}
+          {!isStreaming && confidence != null && (
+            <View style={styles.confidenceRow}>
+              <Badge
+                label={`${Math.round(confidence * 100)}% confidence`}
+                variant="tertiary"
+                small
+              />
+            </View>
+          )}
         </View>
-      ) : null}
 
-      {!isUser && evidencePreview.length > 0 ? (
-        <View style={styles.evidenceList}>
-          {evidencePreview.map((item, idx) => (
-            <View key={`${item.channel}-${idx}`} style={styles.evidenceCard}>
-              <View style={styles.evidenceMetaRow}>
-                <Text style={styles.evidenceChannel}>{item.channel || "context"}</Text>
-                <Text style={styles.evidenceScore}>{Math.round((item.score || 0) * 100)}%</Text>
+        {/* Agent chips */}
+        {agentsUsed && agentsUsed.length > 0 && !isStreaming ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.agentChipList}
+          >
+            {agentsUsed.map((agent, i) => (
+              <View key={i} style={styles.agentChip}>
+                <Text style={styles.agentChipText}>{agent.replace(/_/g, ' ')}</Text>
               </View>
-              <Text style={styles.evidenceText} numberOfLines={3}>
-                {item.content}
-              </Text>
-            </View>
-          ))}
-        </View>
-      ) : null}
+            ))}
+          </ScrollView>
+        ) : null}
+
+        {/* Evidence cards */}
+        {evidence && evidence.length > 0 && !isStreaming ? (
+          <View style={styles.evidenceSection}>
+            <Text style={styles.evidenceLabel}>Evidence</Text>
+            {evidence.slice(0, 3).map((ev, i) => (
+              <View key={i} style={styles.evidenceCard}>
+                <View style={styles.evidenceCardHeader}>
+                  {ev.source ? (
+                    <Text style={styles.evidenceSource} numberOfLines={1}>{ev.source}</Text>
+                  ) : null}
+                  {ev.score != null ? (
+                    <Badge label={`${Math.round(ev.score * 100)}%`} variant="info" small />
+                  ) : null}
+                </View>
+                {ev.content ? (
+                  <Text style={styles.evidenceText} numberOfLines={3}>{ev.content}</Text>
+                ) : null}
+              </View>
+            ))}
+          </View>
+        ) : null}
+
+        {/* Query analysis */}
+        {queryAnalysis && !isStreaming ? (
+          <View style={styles.queryAnalysisChip}>
+            <Text style={styles.queryAnalysisText} numberOfLines={1}>
+              {typeof queryAnalysis === 'string' ? queryAnalysis : (queryAnalysis as { intent?: string; routing?: string }).intent || (queryAnalysis as { routing?: string }).routing || 'Query analyzed'}
+            </Text>
+          </View>
+        ) : null}
+
+        {timestamp ? (
+          <Text style={styles.assistantTime}>{formatTs(timestamp)}</Text>
+        ) : null}
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  row: {
-    width: "100%",
-    marginBottom: SPACING["2xl"],
-    paddingHorizontal: SPACING.xl,
-  },
+  // ─── User ─────────────────────────────────────────────────────────────
   userRow: {
-    alignItems: "flex-end",
-  },
-  assistantRow: {
-    alignItems: "flex-start",
-  },
-  metaRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: SPACING.sm,
-    marginBottom: SPACING.sm,
-    paddingHorizontal: SPACING.xs,
-  },
-  roleText: {
-    fontSize: TYPOGRAPHY.fontSize.xs,
-    color: SEMANTIC_COLORS.textSecondary,
-    fontWeight: TYPOGRAPHY.fontWeight.semibold,
-  },
-  timeText: {
-    fontSize: TYPOGRAPHY.fontSize.xs,
-    color: SEMANTIC_COLORS.textTertiary,
-  },
-  confidenceBadge: {
-    marginLeft: "auto",
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
-    borderRadius: BORDER_RADIUS.full,
-    borderWidth: 1,
-    borderColor: COLORS.success[200],
-    backgroundColor: COLORS.success[50],
-  },
-  confidenceText: {
-    fontSize: TYPOGRAPHY.fontSize.xs,
-    color: COLORS.success[700],
-    fontWeight: TYPOGRAPHY.fontWeight.semibold,
-  },
-  reasoningCard: {
-    maxWidth: "85%",
-    marginBottom: SPACING.sm,
-    borderRadius: BORDER_RADIUS.xl,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    borderWidth: 1,
-    borderColor: SEMANTIC_COLORS.borderAccent,
-    backgroundColor: SEMANTIC_COLORS.bgHighlight,
-  },
-  reasoningLabel: {
-    fontSize: TYPOGRAPHY.fontSize.xs,
-    color: COLORS.primary[700],
-    fontWeight: TYPOGRAPHY.fontWeight.semibold,
-    marginBottom: SPACING.xs,
-    textTransform: "uppercase",
-    letterSpacing: 0.4,
-  },
-  reasoningText: {
-    fontSize: TYPOGRAPHY.fontSize.sm,
-    color: SEMANTIC_COLORS.textSecondary,
-    lineHeight: TYPOGRAPHY.fontSize.sm * TYPOGRAPHY.lineHeight.normal,
-  },
-  bubble: {
-    maxWidth: "85%",
-    borderRadius: BORDER_RADIUS["2xl"],
-    paddingVertical: SPACING.lg,
-    paddingHorizontal: SPACING.xl,
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginVertical: SPACING.sm,
+    paddingHorizontal: SPACING.lg,
   },
   userBubble: {
-    backgroundColor: COLORS.primary[700],
-    borderWidth: 1,
-    borderColor: COLORS.primary[800],
-    ...SHADOWS.md,
-  },
-  assistantBubble: {
-    backgroundColor: SEMANTIC_COLORS.bgPrimary,
-    borderWidth: 1,
-    borderColor: SEMANTIC_COLORS.borderPrimary,
-    ...SHADOWS.sm,
-  },
-  text: {
-    fontSize: TYPOGRAPHY.fontSize.md,
-    lineHeight: TYPOGRAPHY.fontSize.md * TYPOGRAPHY.lineHeight.normal,
+    maxWidth: '80%',
+    borderRadius: RADIUS['2xl'],
+    borderBottomRightRadius: RADIUS.sm,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm + 2,
   },
   userText: {
-    color: COLORS.white,
-    fontWeight: TYPOGRAPHY.fontWeight.medium,
+    fontSize: FONT_SIZE.base,
+    color: '#ffffff',
+    lineHeight: FONT_SIZE.base * 1.55,
+    fontWeight: FONT_WEIGHT.medium,
   },
-  assistantText: {
-    color: SEMANTIC_COLORS.textPrimary,
+  userTime: {
+    fontSize: FONT_SIZE.xs,
+    color: 'rgba(255,255,255,0.65)',
+    textAlign: 'right',
+    marginTop: 4,
   },
-  streamingText: {
-    marginTop: SPACING.sm,
-    fontSize: TYPOGRAPHY.fontSize.xs,
-    color: SEMANTIC_COLORS.textTertiary,
-    fontWeight: TYPOGRAPHY.fontWeight.medium,
-  },
-  agentRow: {
-    marginTop: SPACING.sm,
-    maxWidth: "85%",
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: SPACING.xs,
-  },
-  agentChip: {
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
-    borderRadius: BORDER_RADIUS.full,
-    borderWidth: 1,
-    borderColor: SEMANTIC_COLORS.borderAccent,
-    backgroundColor: SEMANTIC_COLORS.bgHighlight,
-  },
-  agentChipText: {
-    fontSize: TYPOGRAPHY.fontSize.xs,
-    color: COLORS.primary[700],
-    fontWeight: TYPOGRAPHY.fontWeight.medium,
-  },
-  evidenceList: {
-    marginTop: SPACING.sm,
-    maxWidth: "85%",
+
+  // ─── Assistant ─────────────────────────────────────────────────────────
+  assistantRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginVertical: SPACING.sm,
+    paddingHorizontal: SPACING.lg,
     gap: SPACING.sm,
   },
-  analysisRow: {
-    marginTop: SPACING.sm,
-    maxWidth: "85%",
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: SPACING.xs,
+  avatarWrap: {},
+  avatar: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 4,
   },
-  analysisChip: {
-    fontSize: TYPOGRAPHY.fontSize.xs,
-    color: SEMANTIC_COLORS.textSecondary,
-    borderWidth: 1,
-    borderColor: SEMANTIC_COLORS.borderPrimary,
-    backgroundColor: SEMANTIC_COLORS.bgSecondary,
-    borderRadius: BORDER_RADIUS.full,
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
+  avatarText: {
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.bold,
+    color: '#ffffff',
   },
-  evidenceCard: {
-    borderRadius: BORDER_RADIUS.lg,
-    borderWidth: 1,
-    borderColor: SEMANTIC_COLORS.borderPrimary,
-    backgroundColor: SEMANTIC_COLORS.bgPrimary,
+  assistantContent: {
+    flex: 1,
+    gap: SPACING.sm,
+  },
+
+  // Reasoning block
+  reasoningBlock: {
+    backgroundColor: NEURAL.surfaceContainerLow,
+    borderRadius: RADIUS.lg,
+    borderLeftWidth: 2,
+    borderLeftColor: NEURAL.secondary,
+    overflow: 'hidden',
+  },
+  reasoningHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     paddingHorizontal: SPACING.md,
     paddingVertical: SPACING.sm,
-    ...SHADOWS.sm,
   },
-  evidenceMetaRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginBottom: SPACING.xs,
+  reasoningLabel: {
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: NEURAL.secondary,
   },
-  evidenceChannel: {
-    fontSize: TYPOGRAPHY.fontSize.xs,
-    color: SEMANTIC_COLORS.textSecondary,
-    textTransform: "capitalize",
+  reasoningText: {
+    fontSize: FONT_SIZE.sm,
+    color: NEURAL.onSurfaceVariant,
+    paddingHorizontal: SPACING.md,
+    paddingBottom: SPACING.md,
+    lineHeight: FONT_SIZE.sm * 1.6,
   },
-  evidenceScore: {
-    fontSize: TYPOGRAPHY.fontSize.xs,
-    color: COLORS.primary[700],
-    fontWeight: TYPOGRAPHY.fontWeight.semibold,
+
+  // Main card
+  assistantCard: {
+    backgroundColor: NEURAL.surfaceContainerHigh,
+    borderRadius: RADIUS.xl,
+    borderBottomLeftRadius: RADIUS.sm,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.md,
+  },
+  streamingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+  },
+  streamingLabel: {
+    fontSize: FONT_SIZE.sm,
+    color: NEURAL.primary,
+    fontWeight: FONT_WEIGHT.medium,
+  },
+  assistantText: {
+    fontSize: FONT_SIZE.base,
+    color: NEURAL.onSurface,
+    lineHeight: FONT_SIZE.base * 1.65,
+  },
+  confidenceRow: {
+    marginTop: SPACING.sm,
+    alignItems: 'flex-end',
+  },
+
+  // Agent chips
+  agentChipList: {
+    gap: SPACING.sm,
+  },
+  agentChip: {
+    backgroundColor: `${NEURAL.secondary}20`,
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+    borderColor: `${NEURAL.secondary}40`,
+    paddingHorizontal: SPACING.sm + 2,
+    paddingVertical: 3,
+  },
+  agentChipText: {
+    fontSize: FONT_SIZE.xs,
+    color: NEURAL.secondary,
+    fontWeight: FONT_WEIGHT.semibold,
+    textTransform: 'capitalize',
+  },
+
+  // Evidence
+  evidenceSection: { gap: SPACING.sm },
+  evidenceLabel: {
+    fontSize: FONT_SIZE.xs,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: NEURAL.onSurfaceVariant,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  evidenceCard: {
+    backgroundColor: NEURAL.surfaceContainer,
+    borderRadius: RADIUS.lg,
+    borderWidth: 1,
+    borderColor: NEURAL.outlineVariant,
+    padding: SPACING.sm + 2,
+  },
+  evidenceCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  evidenceSource: {
+    flex: 1,
+    fontSize: FONT_SIZE.xs,
+    color: NEURAL.primary,
+    fontWeight: FONT_WEIGHT.medium,
+    marginRight: 6,
   },
   evidenceText: {
-    fontSize: TYPOGRAPHY.fontSize.sm,
-    color: SEMANTIC_COLORS.textPrimary,
-    lineHeight: TYPOGRAPHY.fontSize.sm * TYPOGRAPHY.lineHeight.normal,
+    fontSize: FONT_SIZE.sm,
+    color: NEURAL.onSurfaceVariant,
+    lineHeight: FONT_SIZE.sm * 1.5,
+  },
+
+  // Query analysis
+  queryAnalysisChip: {
+    backgroundColor: `${NEURAL.primary}18`,
+    borderRadius: RADIUS.full,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: `${NEURAL.primary}30`,
+    alignSelf: 'flex-start',
+  },
+  queryAnalysisText: {
+    fontSize: FONT_SIZE.xs,
+    color: NEURAL.primary,
+    fontWeight: FONT_WEIGHT.medium,
+  },
+  assistantTime: {
+    fontSize: FONT_SIZE.xs,
+    color: NEURAL.outline,
+    marginTop: 2,
   },
 });

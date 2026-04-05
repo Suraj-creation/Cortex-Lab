@@ -1,295 +1,222 @@
 /**
- * Cortex Lab Mobile - Unified Design System
- * Replicates frontend Tailwind color system for React Native
- * Consistent with Next.js frontend implementation
+ * Cortex Lab Mobile — Neural Dark Design System
+ * Matches "Cortex Neural Dark" from Stitch Project 4565645347880235116
+ * Philosophy: The Neural Luminary — Atmospheric Intelligence
  */
 
-import { Platform } from "react-native";
+// ─── Stitch "Cortex Neural Dark" Named Colors ────────────────────────────────
+export const NEURAL = {
+  // Backgrounds / Surfaces (layered depth)
+  background:              '#060e20', // root bg
+  surfaceDim:              '#060e20', // same as bg
+  surfaceContainerLowest:  '#000000',
+  surfaceContainerLow:     '#091328',
+  surfaceContainer:        '#0f1930', // cards
+  surfaceContainerHigh:    '#141f38', // elevated cards, active rows
+  surfaceContainerHighest: '#192540', // inputs, floating sheets
+  surfaceVariant:          '#192540', // glass elements
+  surfaceBright:           '#1f2b49',
 
-export const COLORS = {
-  // Primary Brand (Indigo)
-  primary: {
-    50: "#eef2ff",
-    100: "#e0e7ff",
-    200: "#c7d2fe",
-    300: "#a5b4fc",
-    400: "#818cf8",
-    500: "#6366f1",
-    600: "#4f46e5",
-    700: "#4338ca",
-    800: "#3730a3",
-    900: "#312e81",
-    950: "#1e1b4b",
-  },
+  // Primary — Indigo
+  primary:           '#a3a6ff',
+  primaryContainer:  '#9396ff',
+  primaryDim:        '#6063ee',
+  primaryFixed:      '#9396ff',
+  primaryFixedDim:   '#8387ff',
+  inversePrimary:    '#494bd7',
 
-  // Secondary Brand (Violet)
-  secondary: {
-    500: "#8b5cf6",
-    600: "#7c3aed",
-  },
+  // Secondary — Violet
+  secondary:          '#ac8aff',
+  secondaryContainer: '#5516be',
+  secondaryDim:       '#8455ef',
+  secondaryFixed:     '#dac9ff',
 
-  // Surfaces (Slate/Neutral)
-  surface: {
-    50: "#f8fafc",
-    100: "#f1f5f9",
-    200: "#e2e8f0",
-    300: "#cbd5e1",
-    400: "#94a3b8",
-    500: "#64748b",
-    600: "#475569",
-    700: "#334155",
-    800: "#1e293b",
-    900: "#0f172a",
-    950: "#020617",
-  },
+  // Tertiary — Emerald
+  tertiary:          '#9bffce',
+  tertiaryContainer: '#69f6b8',
+  tertiaryDim:       '#58e7ab',
 
-  // Semantic Colors
-  success: {
-    50: "#f0fdf4",
-    100: "#dcfce7",
-    200: "#bbf7d0",
-    300: "#86efac",
-    400: "#4ade80",
-    500: "#22c55e",
-    600: "#16a34a",
-    700: "#15803d",
-    800: "#166534",
-    900: "#145231",
-  },
+  // Error — Coral
+  error:          '#ff6e84',
+  errorContainer: '#a70138',
+  errorDim:       '#d73357',
 
-  warning: {
-    50: "#fffbeb",
-    100: "#fef3c7",
-    200: "#fde68a",
-    300: "#fcd34d",
-    400: "#fbbf24",
-    500: "#f59e0b",
-    600: "#d97706",
-    700: "#b45309",
-    800: "#92400e",
-    900: "#78350f",
-  },
+  // On-colors (text on surfaces)
+  onBackground:        '#dee5ff',
+  onSurface:           '#dee5ff', // primary text
+  onSurfaceVariant:    '#a3aac4', // secondary text / metadata
+  onPrimary:           '#0f00a4',
+  onSecondary:         '#280067',
+  onTertiary:          '#006443',
+  onTertiaryFixed:     '#00452d',
+  onTertiaryContainer: '#005a3c',
+  onError:             '#490013',
+  inverseSurface:      '#faf8ff',
+  inverseOnSurface:    '#4d556b',
 
-  error: {
-    50: "#fef2f2",
-    100: "#fee2e2",
-    200: "#fecaca",
-    300: "#fca5a5",
-    400: "#f87171",
-    500: "#ef4444",
-    600: "#dc2626",
-    700: "#b91c1c",
-    800: "#991b1b",
-    900: "#7f1d1d",
-  },
+  // Border / Outline
+  outline:        '#6d758c',
+  outlineVariant: '#40485d', // ghost borders
 
-  info: {
-    50: "#eff6ff",
-    100: "#dbeafe",
-    200: "#bfdbfe",
-    300: "#93c5fd",
-    400: "#60a5fa",
-    500: "#3b82f6",
-    600: "#2563eb",
-    700: "#1d4ed8",
-    800: "#1e40af",
-    900: "#1e3a8a",
-  },
+  // Surface tint
+  surfaceTint: '#a3a6ff',
+} as const;
 
-  // Semantic Aliases
-  emerald: {
-    500: "#10b981",
-    600: "#059669",
-  },
-
-  cyan: {
-    500: "#06b6d4",
-    600: "#0891b2",
-  },
-
-  amber: {
-    500: "#f59e0b",
-    600: "#d97706",
-  },
-
-  violet: {
-    500: "#a78bfa",
-    600: "#8b5cf6",
-  },
-
-  // Transparent/Utilities
-  transparent: "transparent",
-  black: "#000000",
-  white: "#ffffff",
-};
-
-/**
- * Semantic color mapping for common UI patterns
- */
-export const SEMANTIC_COLORS = {
+// ─── Semantic Aliases ─────────────────────────────────────────────────────────
+export const SEMANTIC = {
   // Text
-  textPrimary: COLORS.surface[900],
-  textSecondary: COLORS.surface[700],
-  textTertiary: COLORS.surface[500],
-  textInverse: COLORS.white,
-  textMuted: COLORS.surface[400],
-  textOnAccent: COLORS.white,
+  textPrimary:   NEURAL.onSurface,         // #dee5ff
+  textSecondary: NEURAL.onSurfaceVariant,  // #a3aac4
+  textTertiary:  NEURAL.outline,           // #6d758c
+  textMuted:     NEURAL.outlineVariant,    // #40485d
+  textBrand:     NEURAL.primary,           // #a3a6ff
 
-  // Backgrounds
-  bgCanvas: "#f3f6fb",
-  bgPrimary: COLORS.white,
-  bgSecondary: "#f8fafc",
-  bgTertiary: COLORS.surface[100],
-  bgElevated: COLORS.white,
-  bgOverlay: "rgba(2, 6, 23, 0.45)",
-  bgHighlight: "rgba(79, 70, 229, 0.08)",
-
-  // Borders
-  borderPrimary: "rgba(15, 23, 42, 0.10)",
-  borderSecondary: "rgba(15, 23, 42, 0.18)",
-  borderAccent: "rgba(79, 70, 229, 0.28)",
-  borderLight: "rgba(15, 23, 42, 0.08)",
+  // Surfaces
+  bgRoot:     NEURAL.background,              // #060e20
+  bgCard:     NEURAL.surfaceContainer,        // #0f1930
+  bgCardHigh: NEURAL.surfaceContainerHigh,    // #141f38
+  bgInput:    NEURAL.surfaceContainerHighest, // #192540
+  bgSidebar:  NEURAL.surfaceContainerLow,     // #091328
+  bgElevated: NEURAL.surfaceBright,           // #1f2b49
 
   // Interactive
-  buttonPrimary: COLORS.primary[600],
-  buttonPrimaryHover: COLORS.primary[700],
-  buttonPrimaryActive: COLORS.primary[800],
-  buttonPrimaryDisabled: COLORS.surface[300],
+  brand:        NEURAL.primary,    // #a3a6ff
+  brandDim:     NEURAL.primaryDim, // #6063ee
+  accent:       NEURAL.secondary,  // #ac8aff
+  live:         NEURAL.tertiary,   // #9bffce
+  error:        NEURAL.error,      // #ff6e84
 
-  buttonSecondary: COLORS.surface[100],
-  buttonSecondaryText: COLORS.surface[800],
-  buttonSecondaryHover: COLORS.surface[200],
-  navBackground: "rgba(255, 255, 255, 0.96)",
+  // Borders (ghost border rule: outlineVariant at low opacity)
+  borderGhost:  `${NEURAL.outlineVariant}26`, // 15% opacity
+  borderSubtle: NEURAL.outlineVariant,        // #40485d full
+  borderBrand:  `${NEURAL.primary}40`,        // primary at 25%
 
-  // Status
-  statusSuccess: COLORS.success[600],
-  statusWarning: COLORS.warning[600],
-  statusError: COLORS.error[600],
-  statusInfo: COLORS.info[600],
-  statusLoading: COLORS.primary[600],
+  // Glass
+  glassBg:    `${NEURAL.surfaceVariant}99`,   // 60% opacity
+  glassBlur:  20,
 
-  // Glass/Overlay effects
-  glassBg: "rgba(255, 255, 255, 0.82)",
-  glassOverlay: "rgba(255, 255, 255, 0.94)",
+  // Gradients (used via expo-linear-gradient)
+  gradientPrimary: [NEURAL.primary, NEURAL.primaryDim] as string[], // indigo gradient CTA
+  gradientUser:    ['#a3a6ff', '#6063ee'] as string[],              // user bubble
+  gradientBg:      ['#060e20', '#091328'] as string[],              // subtle bg gradient
+} as const;
 
-  // Accent
-  accentPrimary: COLORS.primary[600],
-  accentSecondary: COLORS.cyan[500],
-};
-
-/**
- * Spacing scale (matching Tailwind)
- */
+// ─── Spacing Scale ────────────────────────────────────────────────────────────
 export const SPACING = {
-  xs: 3,
-  sm: 6,
-  md: 10,
-  lg: 14,
-  xl: 18,
-  "2xl": 22,
-  "3xl": 28,
-  "4xl": 36,
-  "5xl": 44,
-};
+  xs:   4,
+  sm:   8,
+  md:   12,
+  lg:   16,
+  xl:   20,
+  '2xl': 24,
+  '3xl': 32,
+  '4xl': 40,
+  '5xl': 56,
+} as const;
 
-/**
- * Typography scale
- * React Native fontWeight must be: "normal" | "bold" | "100" | "200" | "300" | "400" | "500" | "600" | "700" | "800" | "900"
- */
+// ─── Border Radius ────────────────────────────────────────────────────────────
+// Stitch: ROUND_FOUR ≈ rounded-xl. No radius < 6px ("Don't use border-radius smaller than md")
+export const RADIUS = {
+  sm:   6,
+  md:   10,
+  lg:   14,
+  xl:   18,
+  '2xl': 24,
+  '3xl': 32,
+  full: 9999,
+} as const;
+
+// ─── Typography Scale ─────────────────────────────────────────────────────────
+export const FONT_SIZE = {
+  xs:   11,
+  sm:   12,
+  base: 14,
+  md:   15,
+  lg:   17,
+  xl:   20,
+  '2xl': 24,
+  '3xl': 28,
+  '4xl': 34,
+} as const;
+
+export const FONT_WEIGHT = {
+  light:     '300' as const,
+  normal:    '400' as const,
+  medium:    '500' as const,
+  semibold:  '600' as const,
+  bold:      '700' as const,
+  extrabold: '800' as const,
+} as const;
+
+// ─── Status Colors (for pipeline events, badges) ──────────────────────────────
+export const STATUS_COLORS = {
+  running:  NEURAL.primary,   // indigo pulse
+  complete: NEURAL.tertiary,  // emerald
+  error:    NEURAL.error,     // coral
+  pending:  NEURAL.secondary, // violet
+  cached:   NEURAL.tertiaryDim,
+} as const;
+
+// ─── Legacy compatibility (for shared components still using COLORS / SEMANTIC_COLORS) ──
+export const COLORS = {
+  primary:   { 300: '#c4c6ff', 500: NEURAL.primary, 600: NEURAL.primaryDim, 700: '#4f51c8' },
+  secondary: { 500: NEURAL.secondary },
+  success:   { 50: '#f0fff7', 100: '#d6f7e8', 300: NEURAL.tertiaryDim, 500: NEURAL.tertiary, 600: NEURAL.tertiaryContainer },
+  warning:   { 100: '#fff3c4', 300: '#ffd86b', 500: '#f59e0b', 600: '#d97706' },
+  error:     { 50: '#fff0f2', 100: '#ffd6db', 200: '#ffb3bc', 300: NEURAL.errorDim, 500: NEURAL.error, 600: NEURAL.errorContainer, 700: '#7a0020' },
+  info:      { 100: '#dbeafe', 300: '#93c5fd', 500: '#60a5fa', 600: '#3b82f6' },
+  surface:   { 400: NEURAL.onSurfaceVariant, 500: NEURAL.outline, 700: NEURAL.surfaceBright, 800: NEURAL.surfaceContainerHigh, 900: NEURAL.surfaceContainer },
+  white:     '#ffffff',
+  black:     '#000000',
+  transparent: 'transparent',
+  violet:    { 500: NEURAL.secondary, 600: NEURAL.secondaryDim },
+  emerald:   { 500: NEURAL.tertiary, 600: NEURAL.tertiaryDim },
+  amber:     { 500: '#f59e0b', 600: '#d97706' },
+  cyan:      { 500: '#58e7ff', 600: '#00bcd4' },
+} as const;
+
+export const SEMANTIC_COLORS = {
+  textPrimary:    SEMANTIC.textPrimary,
+  textSecondary:  SEMANTIC.textSecondary,
+  textTertiary:   SEMANTIC.textTertiary,
+  textInverse:    NEURAL.inverseSurface,
+  textMuted:      SEMANTIC.textMuted,
+  textOnAccent:   NEURAL.onPrimary,
+  bgCanvas:       NEURAL.background,
+  bgPrimary:      NEURAL.surfaceContainer,
+  bgSecondary:    NEURAL.surfaceContainerLow,
+  bgTertiary:     NEURAL.surfaceContainerHigh,
+  bgElevated:     NEURAL.surfaceContainerHighest,
+  bgOverlay:      'rgba(6, 14, 32, 0.85)',
+  bgHighlight:    `${NEURAL.primary}20`,
+  borderPrimary:   NEURAL.outlineVariant,
+  borderSecondary: NEURAL.outline,
+  borderAccent:    `${NEURAL.primary}40`,
+  borderLight:     `${NEURAL.outlineVariant}26`,
+  buttonPrimary:          NEURAL.primary,
+  buttonPrimaryHover:     NEURAL.primaryDim,
+  buttonPrimaryActive:    NEURAL.inversePrimary,
+  buttonPrimaryDisabled:  NEURAL.surfaceBright,
+  buttonSecondary:        NEURAL.surfaceContainerHigh,
+  buttonSecondaryText:    NEURAL.onSurface,
+  buttonSecondaryHover:   NEURAL.surfaceContainerHighest,
+  navBackground:          NEURAL.surfaceContainer,
+  statusSuccess: NEURAL.tertiary,
+  statusWarning: '#f59e0b',
+  statusError:   NEURAL.error,
+  statusInfo:    NEURAL.primary,
+  statusLoading: NEURAL.primary,
+  glassBg:     SEMANTIC.glassBg,
+  glassOverlay: NEURAL.surfaceContainerHighest,
+  accentPrimary:   NEURAL.primary,
+  accentSecondary: NEURAL.secondary,
+} as const;
+
+// Re-export spacing + radius with old names for backward compat
+export { SPACING as SPACING_OLD };
+export const BORDER_RADIUS = RADIUS;
 export const TYPOGRAPHY = {
-  fontSize: {
-    xs: 11,
-    sm: 12,
-    base: 14,
-    md: 15,
-    lg: 16,
-    xl: 18,
-    "2xl": 20,
-    "3xl": 24,
-    "4xl": 28,
-  },
-  fontWeight: {
-    light: "300" as const,
-    normal: "400" as const,
-    medium: "500" as const,
-    semibold: "600" as const,
-    bold: "700" as const,
-    extrabold: "800" as const,
-  } as const,
-  // Line height multipliers (actual pixel heights)
-  lineHeight: {
-    tight: 1.2,
-    normal: 1.5,
-    relaxed: 1.75,
-    loose: 2,
-  },
-};
-
-/**
- * Border radius scale
- */
-export const BORDER_RADIUS = {
-  none: 0,
-  sm: 4,
-  md: 6,
-  lg: 8,
-  xl: 12,
-  "2xl": 16,
-  "3xl": 20,
-  full: 999,
-};
-
-/**
- * Shadows (using elevation system)
- */
-const isWebPlatform = Platform.OS === "web";
-
-type ShadowToken = Record<string, unknown>;
-
-export const SHADOWS: Record<"none" | "sm" | "md" | "lg" | "xl", ShadowToken> = {
-  none: isWebPlatform
-    ? { boxShadow: "none" }
-    : {
-        elevation: 0,
-        shadowColor: COLORS.black,
-        shadowOpacity: 0,
-        shadowRadius: 0,
-        shadowOffset: { width: 0, height: 0 },
-      },
-  sm: isWebPlatform
-    ? { boxShadow: "0 2px 8px rgba(15, 23, 42, 0.06)" }
-    : {
-        elevation: 2,
-        shadowColor: "#0f172a",
-        shadowOpacity: 0.08,
-        shadowRadius: 4,
-        shadowOffset: { width: 0, height: 2 },
-      },
-  md: isWebPlatform
-    ? { boxShadow: "0 6px 16px rgba(15, 23, 42, 0.10)" }
-    : {
-        elevation: 4,
-        shadowColor: "#0f172a",
-        shadowOpacity: 0.12,
-        shadowRadius: 8,
-        shadowOffset: { width: 0, height: 4 },
-      },
-  lg: isWebPlatform
-    ? { boxShadow: "0 10px 28px rgba(15, 23, 42, 0.14)" }
-    : {
-        elevation: 7,
-        shadowColor: "#0f172a",
-        shadowOpacity: 0.16,
-        shadowRadius: 12,
-        shadowOffset: { width: 0, height: 7 },
-      },
-  xl: isWebPlatform
-    ? { boxShadow: "0 16px 40px rgba(15, 23, 42, 0.18)" }
-    : {
-        elevation: 10,
-        shadowColor: "#0f172a",
-        shadowOpacity: 0.2,
-        shadowRadius: 18,
-        shadowOffset: { width: 0, height: 10 },
-      },
-};
+  fontSize:   FONT_SIZE,
+  fontWeight: FONT_WEIGHT,
+  lineHeight:  { tight: 1.2, normal: 1.5, relaxed: 1.75, loose: 2 },
+} as const;

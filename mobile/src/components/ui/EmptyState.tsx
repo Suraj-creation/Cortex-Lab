@@ -1,6 +1,6 @@
 import React from "react";
 import { View, Text, StyleSheet, Pressable } from "react-native";
-import { COLORS, SEMANTIC_COLORS, SPACING, TYPOGRAPHY, BORDER_RADIUS } from "../../theme/colors";
+import { NEURAL, SEMANTIC_COLORS, SPACING, TYPOGRAPHY, BORDER_RADIUS } from "../../theme/colors";
 
 interface EmptyStateProps {
   icon?: React.ReactNode;
@@ -64,15 +64,15 @@ const styles = StyleSheet.create({
   actionContainer: {
     paddingHorizontal: SPACING.lg,
     paddingVertical: SPACING.md,
-    backgroundColor: COLORS.primary[50],
+    backgroundColor: `${NEURAL.primary}18`,
     borderRadius: BORDER_RADIUS.lg,
     borderWidth: 1,
-    borderColor: COLORS.primary[200],
+    borderColor: `${NEURAL.primary}40`,
   },
   actionText: {
     fontSize: TYPOGRAPHY.fontSize.md,
     fontWeight: TYPOGRAPHY.fontWeight.semibold,
-    color: COLORS.primary[600],
+    color: NEURAL.primary,
     textAlign: "center",
   },
   actionPressed: {

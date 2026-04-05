@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from "react";
 import { View, Animated, StyleSheet, Text } from "react-native";
-import { COLORS, SEMANTIC_COLORS, SPACING, TYPOGRAPHY } from "../../theme/colors";
+import { NEURAL, SEMANTIC_COLORS, SPACING, TYPOGRAPHY } from "../../theme/colors";
 
 interface LoadingSpinnerProps {
   size?: "sm" | "md" | "lg";
@@ -46,10 +46,10 @@ export function LoadingSpinner({
             styles.spinner,
             spinnerSize,
             {
-              borderColor: COLORS.primary[500],
-              borderTopColor: COLORS.primary[200],
-              borderRightColor: COLORS.primary[200],
-              borderBottomColor: COLORS.primary[200],
+              borderColor: NEURAL.primary,
+              borderTopColor: NEURAL.primaryDim,
+              borderRightColor: NEURAL.primaryDim,
+              borderBottomColor: NEURAL.primaryDim,
               transform: [{ rotate: spin }],
             },
           ]}
@@ -66,10 +66,10 @@ export function LoadingSpinner({
           styles.spinner,
           spinnerSize,
           {
-            borderColor: COLORS.primary[500],
-            borderTopColor: COLORS.primary[200],
-            borderRightColor: COLORS.primary[200],
-            borderBottomColor: COLORS.primary[200],
+            borderColor: NEURAL.primary,
+            borderTopColor: NEURAL.primaryDim,
+            borderRightColor: NEURAL.primaryDim,
+            borderBottomColor: NEURAL.primaryDim,
             transform: [{ rotate: spin }],
           },
         ]}
@@ -89,7 +89,7 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    backgroundColor: COLORS.white,
+    backgroundColor: NEURAL.background,
   },
   spinner: {
     borderRadius: 999,

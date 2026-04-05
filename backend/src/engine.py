@@ -6,6 +6,7 @@ Provides a single interface for the FastAPI server.
 """
 
 import asyncio
+import os
 import time
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -50,8 +51,16 @@ class CortexRAGEngine:
     - MultiLevelCache (3-level)
     """
 
-    def __init__(self, data_dir: str = "data"):
-        self.data_dir = data_dir
+    def __init__(self, data_dir: Optional[str] = None):
+        # Resolve data path from env or backend-root default so startup is stable
+        # regardless of the process working directory.
+        if data_dir is None:
+            data_dir = os.environ.get("CORTEX_DATA_DIR")
+        if not data_dir:
+            data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
+
+        self.data_dir = os.path.abspath(data_dir)
+        os.makedirs(self.data_dir, exist_ok=True)
         self.initialized = False
 
         # Components (initialized in init())

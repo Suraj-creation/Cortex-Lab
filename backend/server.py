@@ -588,6 +588,210 @@ def _fix_person_pronouns(text: str) -> str:
     return text
 
 
+# Personal-info supplementation config used by both streaming and non-streaming RAG.
+_PERSONAL_QUERY_TRIGGERS = [
+    "my name", "who am i", "my email", "e-mail", "my phone",
+    "my number", "contact", "my education", "where do i study",
+    "my university", "my college", "my skills", "my resume",
+    "my experience", "my projects", "what do i do",
+    "my location", "my hometown", "my address", "about me",
+    "my degree", "my profile", "my background",
+]
+
+_PERSONAL_QUERY_BASE = "resume contact information summary"
+_PERSONAL_QUERY_AUGMENTS = {
+    "my name": f"{_PERSONAL_QUERY_BASE} name email phone B.Tech",
+    "who am i": f"{_PERSONAL_QUERY_BASE} name email phone B.Tech",
+    "my email": f"{_PERSONAL_QUERY_BASE} name email phone B.Tech",
+    "e-mail": f"{_PERSONAL_QUERY_BASE} name email phone B.Tech",
+    "my phone": f"{_PERSONAL_QUERY_BASE} name email phone B.Tech",
+    "my number": f"{_PERSONAL_QUERY_BASE} name email phone B.Tech",
+    "contact": f"{_PERSONAL_QUERY_BASE} name email phone B.Tech",
+    "my education": f"{_PERSONAL_QUERY_BASE} education university degree B.Tech",
+    "where do i study": f"{_PERSONAL_QUERY_BASE} education university degree B.Tech",
+    "my university": f"{_PERSONAL_QUERY_BASE} education university degree B.Tech",
+    "my college": f"{_PERSONAL_QUERY_BASE} education university degree B.Tech",
+    "my skills": f"{_PERSONAL_QUERY_BASE} skills programming technical tools frameworks",
+    "my resume": f"{_PERSONAL_QUERY_BASE} name email phone education skills B.Tech",
+    "my experience": f"{_PERSONAL_QUERY_BASE} experience internship work projects",
+    "my projects": f"{_PERSONAL_QUERY_BASE} projects portfolio built developed",
+    "about me": f"{_PERSONAL_QUERY_BASE} name email phone education skills B.Tech",
+    "my degree": f"{_PERSONAL_QUERY_BASE} education university degree B.Tech",
+    "my profile": f"{_PERSONAL_QUERY_BASE} name email phone education skills B.Tech",
+    "my background": f"{_PERSONAL_QUERY_BASE} education experience skills B.Tech",
+}
+
+_UNCERTAIN_ANSWER_MARKERS = [
+    "i don't have",
+    "i do not have",
+    "i don't know",
+    "cannot determine",
+    "can't determine",
+    "not enough",
+    "no information",
+    "unable to",
+    "unknown",
+    "can't find",
+    "cannot find",
+]
+
+_SIMPLE_PERSONAL_FACT_TRIGGERS = [
+    "my name", "who am i", "full name", "what's my name", "whats my name",
+    "my email", "e-mail", "mail address", "gmail",
+    "my phone", "my number", "contact number", "mobile",
+    "where do i study", "my university", "my college", "my degree",
+]
+
+
+def _is_personal_info_query(query: str) -> bool:
+    q = (query or "").lower()
+    return any(trigger in q for trigger in _PERSONAL_QUERY_TRIGGERS)
+
+
+def _is_simple_personal_fact_query(query: str) -> bool:
+    q = (query or "").lower()
+    return any(trigger in q for trigger in _SIMPLE_PERSONAL_FACT_TRIGGERS)
+
+
+def _build_personal_augmented_query(query: str) -> str:
+    q = (query or "").lower()
+    for trigger, augmented in _PERSONAL_QUERY_AUGMENTS.items():
+        if trigger in q:
+            return augmented
+    return f"{_PERSONAL_QUERY_BASE} name email phone B.Tech"
+
+
+def _supplement_personal_evidence(
+    user_message: str,
+    evidence: list,
+    search_fn=None,
+    min_score: float = 0.45,
+) -> list:
+    """Best-effort direct supplement for personal-info queries.
+
+    Uses augmented query terms that better match resume-style personal memories.
+    """
+    if not _is_personal_info_query(user_message):
+        return evidence
+
+    search_fn = search_fn or rag_engine.search_memories
+    merged = list(evidence) if isinstance(evidence, list) else []
+    existing_previews = {
+        (item.get("content", "")[:80])
+        for item in merged
+        if isinstance(item, dict)
+    }
+
+    try:
+        augmented_query = _build_personal_augmented_query(user_message)
+        supplements = search_fn(augmented_query, top_k=3) or []
+    except Exception:
+        return merged
+
+    for mem in supplements:
+        score = float(mem.get("score", 0) or 0)
+        content = (mem.get("content", "") or "").strip()
+        if not content or score <= min_score:
+            continue
+
+        preview = content[:80]
+        if preview in existing_previews:
+            continue
+
+        merged.insert(0, {
+            "content": content[:600],
+            "score": score,
+            "channel": "direct_supplement",
+            "memory_type": mem.get("memory_type", "semantic"),
+        })
+        existing_previews.add(preview)
+
+    return merged
+
+
+def _is_uncertain_answer(answer: str) -> bool:
+    clean = (answer or "").strip().lower()
+    if len(clean) < 8:
+        return True
+    return any(marker in clean for marker in _UNCERTAIN_ANSWER_MARKERS)
+
+
+def _answer_contains_extracted_fact(answer: str, extracted: str) -> bool:
+    """Check whether the generated answer actually contains extracted fact values."""
+    import re as _re
+
+    haystack = (answer or "").lower()
+    if not haystack:
+        return False
+
+    tokens = []
+
+    # Prefer explicit fact values wrapped in markdown bold.
+    for value in _re.findall(r'\*\*([^*]{2,80})\*\*', extracted or ""):
+        v = value.strip().lower()
+        if v:
+            tokens.append(v)
+
+    # Also capture direct email/phone values.
+    for value in _re.findall(r'[\w.+-]+@[\w-]+\.[\w.]+', extracted or ""):
+        tokens.append(value.strip().lower())
+    for value in _re.findall(r'\+?\d[\d\s-]{8,15}\d', extracted or ""):
+        tokens.append(value.strip().lower())
+
+    # Deduplicate while preserving order.
+    unique_tokens = []
+    seen = set()
+    for token in tokens:
+        if token not in seen:
+            seen.add(token)
+            unique_tokens.append(token)
+
+    return any(token in haystack for token in unique_tokens)
+
+
+def _postprocess_non_stream_result(user_message: str, result: dict, search_fn=None) -> dict:
+    """Align non-stream /api/rag/chat behavior with streaming factual safeguards."""
+    if not isinstance(result, dict) or not _is_personal_info_query(user_message):
+        return result
+
+    evidence = result.get("evidence", [])
+    evidence = _supplement_personal_evidence(user_message, evidence, search_fn=search_fn)
+    result["evidence"] = evidence
+
+    evidence_texts = [
+        e.get("content", "").strip()
+        for e in evidence
+        if isinstance(e, dict) and e.get("content")
+    ]
+    if not evidence_texts:
+        return result
+
+    extracted = _try_extract_factual(user_message, evidence_texts)
+    if not extracted:
+        return result
+
+    answer = result.get("answer", "")
+    try:
+        confidence = float(result.get("confidence", 0) or 0)
+    except Exception:
+        confidence = 0.0
+
+    missing_fact_in_answer = (
+        _is_simple_personal_fact_query(user_message)
+        and not _answer_contains_extracted_fact(answer, extracted)
+    )
+
+    if missing_fact_in_answer or _is_uncertain_answer(answer) or confidence < 0.65:
+        result["answer"] = extracted
+        result["confidence"] = round(max(confidence, 0.88), 3)
+        note = "Direct factual extraction applied for personal info query."
+        thinking = (result.get("thinking") or "").strip()
+        if note not in thinking:
+            result["thinking"] = f"{thinking}\n{note}".strip() if thinking else note
+
+    return result
+
+
 def _try_extract_factual(query: str, evidence_texts: list) -> str:
     """
     Pre-generation extraction: for simple factual queries, try to extract
@@ -1408,6 +1612,10 @@ async def rag_chat(req: RAGChatRequest):
                 timeout=_REQUEST_TIMEOUT,
             )
 
+            # Keep non-stream behavior aligned with streaming safeguards for
+            # personal-profile factual queries (name/email/phone/education).
+            result = _postprocess_non_stream_result(user_message, result)
+
             # Store trace for observability history
             _store_trace(result.get("pipeline_trace"))
 
@@ -1475,70 +1683,9 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
 
         # Step 2: Build prompt with evidence context for streaming generation
 
-        # ── Supplement: Direct memory search for personal info queries ──
-        # The hybrid retriever's RRF fusion can miss high-quality results.
-        # For simple personal-info queries, do a direct vector search and
-        # inject any highly-relevant results into the evidence list.
-        _personal_triggers = [
-            "my name", "who am i", "my email", "e-mail", "my phone",
-            "my number", "contact", "my education", "where do i study",
-            "my university", "my college", "my skills", "my resume",
-            "my experience", "my projects", "what do i do",
-            "my location", "my hometown", "my address", "about me",
-            "my degree", "my profile", "my background",
-        ]
-        _q_for_supplement = user_message.lower()
-        if any(t in _q_for_supplement for t in _personal_triggers):
-            try:
-                # Use augmented search terms that match resume/personal data content
-                # rather than the raw question (which has low semantic similarity).
-                # All personal-info queries benefit from "resume contact summary"
-                # base terms since personal data lives in the resume memories.
-                _base = "resume contact information summary"
-                _search_augments = {
-                    "my name": f"{_base} name email phone B.Tech",
-                    "who am i": f"{_base} name email phone B.Tech",
-                    "my email": f"{_base} name email phone B.Tech",
-                    "e-mail": f"{_base} name email phone B.Tech",
-                    "my phone": f"{_base} name email phone B.Tech",
-                    "my number": f"{_base} name email phone B.Tech",
-                    "contact": f"{_base} name email phone B.Tech",
-                    "my education": f"{_base} education university degree B.Tech",
-                    "where do i study": f"{_base} education university degree B.Tech",
-                    "my university": f"{_base} education university degree B.Tech",
-                    "my college": f"{_base} education university degree B.Tech",
-                    "my skills": f"{_base} skills programming technical tools frameworks",
-                    "my resume": f"{_base} name email phone education skills B.Tech",
-                    "my experience": f"{_base} experience internship work projects",
-                    "my projects": f"{_base} projects portfolio built developed",
-                    "about me": f"{_base} name email phone education skills B.Tech",
-                    "my degree": f"{_base} education university degree B.Tech",
-                    "my profile": f"{_base} name email phone education skills B.Tech",
-                    "my background": f"{_base} education experience skills B.Tech",
-                }
-                # Pick the best augmented query based on which triggers matched
-                matched_aug = None
-                for trigger, aug in _search_augments.items():
-                    if trigger in _q_for_supplement:
-                        matched_aug = aug
-                        break
-                augmented_query = matched_aug or f"{_base} name email phone B.Tech"
-
-                supplement = rag_engine.search_memories(augmented_query, top_k=3)
-                existing_ids = {e.get("content", "")[:50] for e in evidence}
-                for mem in supplement:
-                    score = mem.get("score", 0)
-                    if score > 0.45:
-                        preview = mem.get("content", "")[:50]
-                        if preview not in existing_ids:
-                            evidence.insert(0, {
-                                "content": mem.get("content", "")[:600],
-                                "score": score,
-                                "channel": "direct_supplement",
-                                "memory_type": mem.get("memory_type", "semantic"),
-                            })
-            except Exception as exc:
-                pass  # Supplement is best-effort
+        # Supplement personal-info evidence with direct semantic search to
+        # recover high-signal resume facts that fusion may downrank.
+        evidence = _supplement_personal_evidence(user_message, evidence)
 
         # PageIndex evidence gets priority — document content should always appear
         # when the user is asking about uploaded documents
