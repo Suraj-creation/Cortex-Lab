@@ -23,6 +23,8 @@ export function MemoryBrowser({ onBack }: { onBack: () => void }) {
   const [showIngest, setShowIngest] = useState(false);
   const [newMemory, setNewMemory] = useState("");
   const [ingesting, setIngesting] = useState(false);
+  const [deleteApprovals, setDeleteApprovals] = useState<Record<string, string>>({});
+  const [notice, setNotice] = useState<string>("");
 
   const loadMemories = useCallback(async () => {
     setLoading(true);
@@ -62,12 +64,21 @@ export function MemoryBrowser({ onBack }: { onBack: () => void }) {
     if (!newMemory.trim()) return;
     setIngesting(true);
     try {
-      await ingestMemory(newMemory);
-      setNewMemory("");
-      setShowIngest(false);
-      loadMemories();
+      const result = await ingestMemory(newMemory);
+      if (result.status === "pending_approval") {
+        const pendingId = result.permission_request?.permission_id;
+        setNotice(
+          `Memory ingest queued for approval (permission ${pendingId || "pending"}). Approve it in Pipeline Observability; execution is automatic after approval.`,
+        );
+      } else {
+        setNotice("Memory stored.");
+        setNewMemory("");
+        setShowIngest(false);
+        loadMemories();
+      }
     } catch (err) {
       console.error("Ingest failed:", err);
+      setNotice(err instanceof Error ? err.message : "Ingest failed.");
     } finally {
       setIngesting(false);
     }
@@ -75,11 +86,43 @@ export function MemoryBrowser({ onBack }: { onBack: () => void }) {
 
   const handleDelete = async (id: string) => {
     try {
-      await deleteMemory(id);
-      setMemories((prev) => prev.filter((m) => m.id !== id));
-      setTotal((prev) => prev - 1);
+      const permissionId = deleteApprovals[id];
+      const result = await deleteMemory(id, permissionId);
+
+      if (result.status === "pending_approval") {
+        const pendingId = result.permission_request?.permission_id;
+        if (pendingId) {
+          setDeleteApprovals((prev) => ({ ...prev, [id]: pendingId }));
+        }
+        setNotice(
+          `Delete queued for approval (permission ${pendingId || "pending"}). Approve in Pipeline Observability; the background worker executes it automatically.`,
+        );
+        return;
+      }
+
+      if (result.status === "pending_execution") {
+        setNotice(
+          `Delete already approved (permission ${result.permission_id}) and currently executing in the background worker.`,
+        );
+        return;
+      }
+
+      if (result.status === "ok") {
+        setMemories((prev) => prev.filter((m) => m.id !== id));
+        setTotal((prev) => prev - 1);
+        setDeleteApprovals((prev) => {
+          const next = { ...prev };
+          delete next[id];
+          return next;
+        });
+        setNotice("Memory deleted.");
+        return;
+      }
+
+      setNotice("Memory not found.");
     } catch (err) {
       console.error("Delete failed:", err);
+      setNotice(err instanceof Error ? err.message : "Delete failed.");
     }
   };
 
@@ -134,6 +177,11 @@ export function MemoryBrowser({ onBack }: { onBack: () => void }) {
 
       {/* Search + Ingest */}
       <div className="px-5 py-3.5 space-y-3 border-b border-slate-200">
+        {notice && (
+          <div className="rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs text-indigo-700">
+            {notice}
+          </div>
+        )}
         <div className="flex gap-2">
           <div className="flex-1 relative">
             <Search
@@ -258,7 +306,7 @@ export function MemoryBrowser({ onBack }: { onBack: () => void }) {
                   className="flex items-center gap-1 text-[10px] text-red-400 hover:text-red-500 transition-colors"
                 >
                   <Trash2 size={10} />
-                  Delete
+                  {deleteApprovals[mem.id] ? "Delete Queued" : "Delete"}
                 </button>
               </div>
             </div>

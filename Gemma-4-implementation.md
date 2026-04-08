@@ -1,143 +1,337 @@
-# Gemma 4 Offline Mobile Inference Implementation Plan
+# Gemma 4 Orchestrator-Aligned Speech-to-Speech Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship a cross-platform mobile app that can run Gemma 4 inference locally with no internet dependency at runtime, while preserving optional cloud fallback and production safety.
+**Goal:** Implement a production-grade, orchestrator-aligned Gemma integration across mobile and web, with full speech-to-speech architecture and local-first runtime contracts, while keeping the current Gemini-based path fully operational until Gemma model packs are downloaded later.
 
-**Architecture:** Keep the current backend-centric Cortex system for cloud and sync features, then add an on-device inference plane (MediaPipe/AI Edge runtime + local model packs + local retrieval store). Route chat/inference through a mode-aware adapter (`local_offline`, `hybrid`, `cloud`) selected by device capability and user preference.
+**Architecture:** Preserve the existing backend and ambient voice system, then add a cross-platform inference routing layer that supports `cloud`, `hybrid`, and `local_offline` modes. Mobile is the primary always-on speech-to-speech runtime ("Eva" wake flow); web gets voice parity within browser constraints. L0/L1/L2 orchestrator contracts from `Orchestrator.md` are treated as hard requirements.
 
-**Tech Stack:** Expo/EAS development builds, React Native, native modules for MediaPipe AI Edge runtime, model pack CDN/object storage, signed manifests, resumable downloader, AsyncStorage/SQLite local state, existing FastAPI backend for optional services.
+**Tech Stack:** FastAPI backend, existing ambient voice pipeline, React/Next.js web app, React Native mobile app (Expo EAS Dev Build), native Gemma runtime bridge, model-pack manifest/signing pipeline, local SQLite/vector store for offline RAG, and strict audit/permission gates.
 
 ---
 
-## 1. What This Plan Solves
+## 1. Executive Direction (What We Implement Now vs Later)
 
-- True offline inference after model pack install.
-- Cross-platform packaging strategy for Android and iOS.
-- Device-aware profile recommendation (INT4 default, INT8 mid, FP16 premium).
-- Production-grade model delivery (resume, integrity check, rollback).
-- Seamless coexistence with the existing backend APIs.
+### 1.1 Implement Now (Required)
 
-## 2. Current System Baseline (Repo-Grounded)
+- End-to-end integration contracts for STT -> Orchestrator -> RAG -> TTS.
+- Provider and mode routing across backend, mobile, and web.
+- Full mobile always-on "Eva" orchestration path.
+- Web voice interaction path aligned to the same orchestrator contracts.
+- Local runtime adapters, model registry, downloader, verifier, and install-state machine.
+- Local memory/RAG storage contracts and retention/compaction policy.
+- Quality loops (CRAG, Self-RAG, FLARE), trace IDs, audit, and permission checks.
 
-- Mobile is API-first and depends on backend endpoints for chat, RAG, memories, graph, ambient voice, and documents.
-- Primary integration surface is [mobile/App.tsx](mobile/App.tsx), which calls the shared API client methods.
-- API client base URL and network fallback behavior live in [mobile/shared/core/api/client.ts](mobile/shared/core/api/client.ts).
-- Chat settings and provider type currently support only `"local" | "gemini"` in [mobile/shared/core/types.ts](mobile/shared/core/types.ts).
-- Backend provider switching is implemented in [backend/server.py](backend/server.py) and [backend/src/llm/__init__.py](backend/src/llm/__init__.py).
-- Backend currently exposes extensive `/api/*` surfaces; mobile can remain functional online while offline mode is incrementally added.
+### 1.2 Defer Until Later (Explicitly Deferred)
 
-## 3. Critical Constraints and Decisions
+- Downloading and activating large Gemma model packs on this machine right now.
+- Final per-device Gemma latency/thermal tuning that requires target devices and real packs.
 
-- FP16 E2B (~9.6 GB weights) must be optional, not default.
-- Consumer app-store first-launch with zero internet and FP16 bundled is not practical.
-- Offline-first for mass users means model pack download once, then run without internet.
-- "No internet ever" requires enterprise preload/sideload/OEM path.
-- Expo Go is not sufficient for custom native inference runtime; use EAS Development Build and config plugins.
+### 1.3 Current Default Runtime (Today)
 
-## 4. Target Runtime Modes
+- Gemini remains the default testing/runtime provider path.
+- Existing traditional and Gemini voice providers remain intact.
+- Existing APIs and UI paths continue to work while Gemma-local pieces are integrated behind feature flags.
 
-- `local_offline`: on-device model + local retrieval/data store, no network calls for inference.
-- `hybrid`: local inference primary, backend optional for enrichment (docs/cloud sync) when online.
-- `cloud`: existing backend/Gemini/local-server mode for low-end devices or users who skip model packs.
+---
 
-### 4.1 Reality Check: Current App vs Target State
+## 2. Current Baseline (Repo-Grounded)
 
-- **Current app (today):** chat and most features are backend-URL driven.
-- **Target offline app (after P1+P5+P6):** chat/reasoning routes to local on-device adapter first, backend becomes optional.
-- If backend is deployed in cloud, app connectivity to that backend requires internet by definition.
-- Therefore, "fully offline" and "cloud backend only" are mutually exclusive runtime states.
+### 2.1 Existing Orchestrator and Runtime Contracts
 
-### 4.2 Do We Need The Backend Running Inside Mobile?
+- Layer model is already defined in `Orchestrator.md`: L0 Master-Orchestrator, L1 Runtime Orchestrator, L2 Specialized Agents.
+- Flow contracts already defined and must be preserved:
+  - CAPTURE FLOW (always-on voice path)
+  - QUERY FLOW (agent dispatch and synthesis)
+  - REFLECTION FLOW (scheduled)
+- Bus contracts exist and must be mirrored in implementation design:
+  - `CONTROL_BUS`
+  - `DATA_BUS`
+  - `EVENT_BUS`
 
-- **Not required** to run the full Python/FastAPI backend process on-device for offline inference.
-- **Preferred production design:** implement local inference directly in-app through native bridge + JS adapter (no localhost server layer).
-- **Optional compatibility approach:** embed a local HTTP bridge (`127.0.0.1`) to mimic backend APIs, but this increases complexity and battery overhead.
-- Decision: treat on-device inference as a first-class client runtime, not a "mini cloud backend" inside phone.
+### 2.2 Existing Runtime in This Repository
 
-## 5. Model Profile Strategy
+- LLM provider switching is currently `local` and `gemini` in:
+  - `backend/server.py`
+  - `backend/src/llm/__init__.py`
+- Ambient voice pipeline is already substantial in:
+  - `backend/src/ambient/__init__.py`
+  - `backend/src/ambient/config.py`
+  - `backend/src/ambient/vad.py`
+  - `backend/src/ambient/transcription.py`
+  - `backend/src/ambient/tts.py`
+  - `backend/src/ambient/gemini_voice.py`
+  - `backend/src/ambient/wake_word.py`
+- Mobile already has ambient UI/controls:
+  - `mobile/src/screens/AmbientVoiceScreen.tsx`
+  - `mobile/shared/core/api/client.ts`
+  - `mobile/shared/core/types.ts`
+- Web already has ambient UI/controls:
+  - `frontend/src/components/AmbientPanel.tsx`
+  - `frontend/src/lib/api.ts`
+  - `frontend/src/lib/types.ts`
+- Mobile Gemma inference module tree from the previous plan is **not yet present** under `mobile/shared/core/inference/` and must be created.
 
-| Profile | Intended Users | Storage Budget (Practical) | Runtime Characteristics | Default |
-|---|---|---:|---|---|
-| `e2b-int4` | Most users | 4-6 GB | Fastest startup, lowest quality among tiers | Yes |
-| `e2b-int8` | Mid/high devices | 7-10 GB | Better quality, moderate speed | Recommended when device qualifies |
-| `e2b-fp16` | Flagship devices only | 12-16 GB+ | Highest quality, highest memory/thermal pressure | Optional premium |
+### 2.3 Constraint to Preserve
 
-### Capability Gating Inputs
+- Current working behavior must not regress:
+  - chat path
+  - ambient voice controls
+  - provider switching
+  - memory ingestion
 
-- Total RAM.
-- Available disk/storage.
-- Device model class and SoC generation.
-- Thermal trend and startup benchmark score.
-- User consent for large download and Wi-Fi-only policy.
+---
 
-### Capability Gating Outcome
+## 3. Scope and Non-Goals
 
-- Recommend one profile by default.
-- Show optional higher/lower profiles with tradeoff summary.
-- Block profiles that fail hard constraints.
+### 3.1 In Scope
 
-## 6. Offline Product Behavior Contract
+- Full architecture and integration for Gemma-ready speech-to-speech runtime.
+- Mobile always-active Eva invocation path using wake-word and orchestrator gating.
+- Web speech path aligned with same orchestration and memory contracts.
+- Local/offline-capable routing and storage contracts.
 
-### What Works Fully Offline (Target)
+### 3.2 Out of Scope for This Immediate Cycle
 
-- Local chat and reasoning.
-- Local conversation memory and retrieval from device data.
-- Local model profile switching among downloaded packs.
+- Shipping all model weights inside app binaries.
+- Removing Gemini or traditional providers.
+- Requiring offline-only behavior before model packs are available.
 
-### What Remains Online-Optional
+---
 
-- Cloud documents pipeline and PageIndex features.
-- Backend observability dashboards and server-side traces.
-- Cloud sync and remote backup.
+## 4. Target Runtime Modes and Fallback Strategy
 
-### First-Launch Internet Policy
+### 4.1 Runtime Modes
 
-- Consumer path: one-time download needed for model pack.
-- Enterprise path: preload model pack in managed deployment image.
-- Sideload path: import signed offline pack via file transfer.
+| Mode | Platform | LLM Path | STT Path | TTS Path | Internet Dependency |
+|---|---|---|---|---|---|
+| `cloud` | mobile + web | backend (`gemini` or existing `local`) | existing backend provider | existing backend provider | required |
+| `hybrid` | mobile + web | prefer local gemma when ready, fallback cloud | local or cloud | local or cloud | optional |
+| `local_offline` | mobile primary, web optional limited | on-device Gemma | on-device STT | on-device TTS | none at runtime |
 
-## 7. Production Architecture
+### 4.2 Provider Contract Expansion
 
-### 7.1 Control Plane
+Current contracts are narrow and must be upgraded while preserving backward compatibility.
 
-- Model manifest service (versioned JSON, signatures, checksums, profile metadata).
-- Release channels (`stable`, `candidate`, `canary`).
-- Revocation list for compromised model signatures.
+```ts
+// Target cross-platform contract
+type InferenceMode = "cloud" | "hybrid" | "local_offline";
+type LLMProvider = "local" | "gemini" | "gemma_local";
+type VoiceProvider = "traditional" | "gemini" | "local";
 
-### 7.2 Data Plane
+interface RuntimeSelection {
+  mode: InferenceMode;
+  llmProvider: LLMProvider;
+  sttProvider: VoiceProvider;
+  ttsProvider: VoiceProvider;
+  allowCloudFallback: boolean;
+}
+```
 
-- Chunked model artifact delivery from object storage + CDN.
-- HTTP range requests for resume support.
-- SHA-256 verification per chunk and whole package.
-- Signature verification before activation.
+### 4.3 Fallback Resolution Rules
 
-### 7.3 On-Device Runtime
+1. If `mode=local_offline`, never call cloud providers.
+2. If local model or local voice component is unavailable in `local_offline`, return explicit offline-unavailable error (no silent cloud fallback).
+3. If `mode=hybrid`, local path is first attempt; cloud fallback allowed only if `allowCloudFallback=true`.
+4. If `mode=cloud`, use existing backend provider logic unchanged.
 
-- Native MediaPipe/AI Edge bridge module.
-- Local inference adapter in JS/TS layer.
-- Download manager with pause/resume/cancel.
-- Local state store for model registry and active profile.
+---
 
-### 7.4 Security
+## 5. End-to-End Speech-to-Speech Architecture
 
-- Signed manifests and signed model package metadata.
-- Integrity-first activation (never run unverified model files).
-- Optional at-rest encryption for model artifacts and local vector DB.
+### 5.1 Mobile Always-On Eva Flow (Primary)
 
-## 8. Repository Change Plan (Exact Touchpoints)
+Mobile is the canonical always-active speech-to-speech runtime.
 
-### Existing Files To Modify
+```text
+Mic -> VAD -> Wake Word ("Eva") -> Speaker ID -> STT ->
+L0 Master-Orchestrator (noise filter + relevance + health gates) ->
+L1 Runtime Orchestrator (intent + agent routing + evidence merge) ->
+RAG (local/offline or hybrid) ->
+Response synthesis (CRAG + Self-RAG + FLARE) ->
+TTS -> audio playback -> memory/audit write
+```
 
-- [mobile/shared/core/types.ts](mobile/shared/core/types.ts)
-- [mobile/shared/core/api/client.ts](mobile/shared/core/api/client.ts)
-- [mobile/App.tsx](mobile/App.tsx)
-- [mobile/app.json](mobile/app.json)
-- [mobile/package.json](mobile/package.json)
-- [backend/server.py](backend/server.py) (only for optional hybrid telemetry and manifest proxy endpoints)
-- [backend/requirements.txt](backend/requirements.txt) (only if backend model pack metadata generation is hosted here)
+### 5.2 Web Voice Flow (Parity)
 
-### New Mobile Files To Create
+Web supports the same logical flow with browser/platform constraints:
+
+- Session-active voice (click-to-start, optional wake strategy where supported).
+- Same L0/L1 contracts and quality loops.
+- Same response synthesis contract and trace propagation.
+- Same memory write/audit constraints.
+
+### 5.3 Activation/Deactivation Contract (Hard Requirement)
+
+Adopt the orchestrator sequence as implementation rule:
+
+Activation order:
+1. Start VAD.
+2. Start lightweight speaker check.
+3. Start STT after wake/session conditions are met.
+4. Start model workers only when active processing begins.
+5. Enable TTS only when response is ready.
+
+Deactivation order:
+1. Stop TTS first.
+2. Flush ingestion queue.
+3. Stop model workers.
+4. Return STT to passive VAD state.
+
+### 5.4 Barge-In and Interrupt Contract
+
+- User speech while TTS is playing immediately triggers barge-in:
+  - pause/stop TTS
+  - preserve partial response in trace
+  - open new query turn
+- This applies in all modes (`cloud`, `hybrid`, `local_offline`).
+
+---
+
+## 6. Orchestrator Alignment Matrix (Must Match `Orchestrator.md`)
+
+| Orchestrator Requirement | Gemma Plan Requirement | Primary Implementation Areas |
+|---|---|---|
+| L0 is gatekeeper | Add L0-compatible noise/relevance/privacy gate before memory commit | `backend/src/agents/orchestrator.py`, `backend/src/ambient/__init__.py` |
+| Capture Flow | Keep STT ingestion path aligned to VAD -> filter -> chunk -> embed -> write -> index | `backend/src/ambient/*`, `backend/src/ingestion/__init__.py` |
+| Query Flow | Route all voice/text queries through L1 decision logic and quality loops | `backend/src/agents/orchestrator.py`, inference routers |
+| CRAG + Self-RAG + FLARE | Enforce in non-trivial responses across cloud/hybrid/local | L1 runtime + adapter layer |
+| CONTROL/DATA/EVENT buses | Introduce explicit event envelope and trace propagation in mobile/web/backend | new runtime bus/contracts files |
+| Sessionization contract | Enforce open/close rules and metadata object for voice sessions | ambient service + conversation store |
+| Permission order | Schema -> scope -> resource -> privacy -> user permission -> audit | backend gate + mobile/web write actions |
+| Auditability | Every retention/provider/mode decision logged with reason | backend audit + telemetry modules |
+
+---
+
+## 7. STT/TTS and Gemma Capability Mapping
+
+Gemma is the reasoning model path. Speech IO must still be handled by STT/TTS modules.
+
+### 7.1 Current Working Providers (Keep)
+
+- STT: `traditional`, `gemini`
+- TTS: `traditional`, `gemini`
+- LLM: `gemini` (and existing backend `local` contract)
+
+### 7.2 Target Added Providers
+
+- STT: add `local` on-device path for offline mode.
+- TTS: add `local` on-device path for offline mode.
+- LLM: add `gemma_local` provider path.
+
+### 7.3 Provider Policy
+
+- Do not remove existing providers.
+- Add Gemma-local capabilities as additive, not replacing current operations.
+- Use explicit provider availability checks; no silent fallback in `local_offline`.
+
+---
+
+## 8. Memory, RAG, and Retention Contract for Voice Sessions
+
+### 8.1 Mandatory Ingestion Rules
+
+- Apply noise filtering before persistence.
+- Apply relevance scoring dimensions:
+  - user relevance
+  - semantic novelty
+  - future utility
+  - personal significance
+  - policy safety
+- Apply retention tiers:
+  - `<0.30` discard
+  - `0.30-0.49` session-only
+  - `0.50-0.74` structured memory
+  - `>=0.75` priority memory
+
+### 8.2 Memory Object Minimum Fields
+
+- `session_id`
+- `timestamp`
+- `speaker_id` and confidence
+- `mode` (`voice`, `text`, `hybrid`)
+- `source` (`ambient`, `chat`, `local_offline`, etc.)
+- `trace_id`
+- `agent_tags`
+
+### 8.3 Local RAG for Offline Mode
+
+- Local conversation store + retrieval corpus on device (SQLite + vector index).
+- Prompt builder must consume local context first in `local_offline`.
+- Sync/merge queue when returning online in `hybrid` mode.
+
+### 8.4 Storage Control on Device
+
+- Retention + compaction mandatory for offline data:
+  - hot: recent full-fidelity turns
+  - warm: compressed summaries + selective turns
+  - cold: highly compressed summaries and pinned facts
+
+---
+
+## 9. Security, Privacy, and Permission Enforcement
+
+### 9.1 Permission Check Order (Required)
+
+1. Schema validation
+2. Agent scope check
+3. Resource governor check
+4. Privacy policy check
+5. User permission check
+6. Audit log write
+
+### 9.2 Privacy Rules
+
+- Journaling/private tiers cannot be cross-exposed without explicit user policy.
+- Sensitive domains require hold/review policy handling.
+- No long-term write for low-confidence unknown speaker attribution.
+
+### 9.3 Integrity Rules for Model Packs
+
+- Manifest signature validation.
+- Chunk hash and full file hash validation.
+- Never activate unverifiable model artifacts.
+
+---
+
+## 10. Repository Change Plan (Exact Touchpoints)
+
+### 10.1 Existing Files to Modify
+
+Backend:
+- `backend/server.py`
+- `backend/src/llm/__init__.py`
+- `backend/src/agents/orchestrator.py`
+- `backend/src/ambient/__init__.py`
+- `backend/src/ambient/config.py`
+- `backend/src/ambient/gemini_voice.py`
+- `backend/src/ambient/transcription.py`
+- `backend/src/ambient/tts.py`
+- `backend/src/ambient/wake_word.py`
+- `backend/src/ingestion/__init__.py`
+- `backend/src/storage/vector_store.py`
+
+Mobile:
+- `mobile/App.tsx`
+- `mobile/shared/core/types.ts`
+- `mobile/shared/core/api/client.ts`
+- `mobile/src/screens/AmbientVoiceScreen.tsx`
+- `mobile/src/screens/SettingsScreen.tsx`
+- `mobile/src/modals/SettingsSheet.tsx`
+- `mobile/app.json`
+- `mobile/package.json`
+
+Web:
+- `frontend/src/lib/types.ts`
+- `frontend/src/lib/api.ts`
+- `frontend/src/components/AmbientPanel.tsx`
+- `frontend/src/components/LiveTranscript.tsx`
+- `frontend/src/app/page.tsx`
+
+Infra/Build:
+- `backend/requirements.txt` (only if backend hosts new manifest helpers)
+
+### 10.2 New Mobile Files
 
 - `mobile/shared/core/inference/types.ts`
 - `mobile/shared/core/inference/router.ts`
@@ -156,171 +350,274 @@
 - `mobile/src/components/modelpacks/ModelDownloadManager.tsx`
 - `mobile/src/components/modelpacks/OfflineReadinessBadge.tsx`
 
-### New Native Integration Files (Expo Development Build Path)
+### 10.3 New Web Files
+
+- `frontend/src/lib/inference/types.ts`
+- `frontend/src/lib/inference/router.ts`
+- `frontend/src/lib/inference/adapters/cloudAdapter.ts`
+- `frontend/src/lib/inference/adapters/localAdapter.ts`
+- `frontend/src/components/voice/WebVoiceRuntimePanel.tsx`
+- `frontend/src/components/modelpacks/WebOfflineReadinessBadge.tsx`
+
+### 10.4 New Backend Runtime Files
+
+- `backend/src/runtime/contracts.py`
+- `backend/src/runtime/event_bus.py`
+- `backend/src/runtime/permission_gate.py`
+- `backend/src/runtime/health_governor.py`
+- `backend/src/runtime/session_manager.py`
+- `backend/src/runtime/trace.py`
+
+### 10.5 Native Integration and Infra Files
 
 - `mobile/plugins/withGemmaRuntime.js`
-- `mobile/modules/gemma-runtime/` (native bridge implementation)
-- `mobile/android/` and `mobile/ios/` generated via `expo prebuild` for native module linking
-
-### New Backend/Infra Planning Files
-
+- `mobile/modules/gemma-runtime/` (native bridge)
 - `infra/modelpacks/manifest.schema.json`
-- `infra/modelpacks/release-manifest.json` (generated per release)
+- `infra/modelpacks/release-manifest.json` (generated)
 - `scripts/modelpacks/build_modelpack.py`
 - `scripts/modelpacks/sign_manifest.py`
 
-## 9. Implementation Phases (Production Track)
+---
 
-### Phase P0: Architecture and Contract Freeze
+## 11. API and Event Contracts
 
-**Outcome:** frozen interfaces and rollout contract before native work.
+### 11.1 API Surfaces (Additive)
 
-- [ ] Define inference mode contract (`local_offline`, `hybrid`, `cloud`) in `mobile/shared/core/inference/types.ts`.
-- [ ] Define model profile metadata contract (size, min specs, checksum, signature, release channel).
-- [ ] Define compatibility matrix for Android/iOS minimum versions.
-- [ ] Write failure-state matrix (download failure, checksum mismatch, thermal throttle, low storage).
-- [ ] Approve product policy for first-launch offline expectations.
+- `GET /api/runtime/mode`
+- `POST /api/runtime/mode`
+- `GET /api/runtime/providers`
+- `POST /api/runtime/providers`
+- `GET /api/modelpacks/manifest`
+- `POST /api/modelpacks/verify`
+- `GET /api/runtime/health`
 
-### Phase P1: Mobile Inference Routing Layer
+Existing ambient endpoints remain and are extended, not replaced.
 
-**Outcome:** one abstraction entry point for all chat/inference calls.
+### 11.2 Event Envelope (Cross-Platform)
 
-- [ ] Add router in `mobile/shared/core/inference/router.ts`.
-- [ ] Implement cloud adapter that wraps existing API client behavior.
-- [ ] Implement local adapter interface with placeholder native calls.
-- [ ] Refactor [mobile/App.tsx](mobile/App.tsx) chat send/stream paths to call router instead of API directly.
-- [ ] Keep existing API endpoints for non-chat modules to avoid full rewrite at once.
+```json
+{
+  "message_id": "uuid-v4",
+  "trace_id": "uuid-v4",
+  "session_id": "uuid-v4",
+  "plane": "CONTROL_BUS | DATA_BUS | EVENT_BUS",
+  "event_type": "session_started",
+  "payload": {},
+  "timestamp": "iso8601",
+  "schema_version": "2.0"
+}
+```
 
-### Phase P2: Device Profiling and Profile Recommendation
+### 11.3 Required Runtime Events
 
-**Outcome:** deterministic model recommendation based on device capability.
+- `session_started`
+- `session_ended`
+- `eva_wake_triggered`
+- `chunk_stored`
+- `health_degraded`
+- `conflict_detected`
+- `response_spoken`
+- `fallback_applied`
 
-- [ ] Implement device profiler for RAM, free disk, model class, benchmark score.
-- [ ] Add profile selector algorithm with hard constraints and safety margins.
-- [ ] Add user consent UI for download policy (Wi-Fi-only default).
-- [ ] Persist accepted profile and user overrides in local storage.
-- [ ] Add telemetry counters for recommendation acceptance and failure reasons.
+---
 
-### Phase P3: Model Pack Pipeline (Build, Sign, Publish)
+## 12. Implementation Phases (Production Track)
 
-**Outcome:** production artifact pipeline for INT4/INT8/FP16 packs.
+### Phase P0: Contract Freeze and No-Regression Rules
 
-- [ ] Build conversion pipeline from Hugging Face weights to AI Edge runtime format (`.task` / runtime-compatible binaries).
-- [ ] Generate three profile artifacts: `e2b-int4`, `e2b-int8`, `e2b-fp16`.
-- [ ] Create signed release manifest with per-artifact SHA-256.
-- [ ] Publish artifacts to object storage + CDN with range request enabled.
-- [ ] Define rollback procedure to previous manifest version.
+**Outcome:** all runtime/type contracts frozen and compatibility guarantees documented.
 
-### Phase P4: Download Manager and Integrity Verification
+- [ ] Freeze `InferenceMode`, provider, and event envelope contracts.
+- [ ] Document backward compatibility for existing `local/gemini` behavior.
+- [ ] Lock no-regression acceptance list for ambient, chat, and memory APIs.
 
-**Outcome:** resilient download/install lifecycle for large model packs.
+### Phase P1: Cross-Platform Provider/Mode Type Expansion
 
-- [ ] Implement chunked resumable download with retries and backoff.
-- [ ] Verify chunk hash and final package hash.
-- [ ] Verify signature before model activation.
-- [ ] Keep previous working model as rollback target.
-- [ ] Add explicit install states: `not_installed`, `downloading`, `verifying`, `ready`, `failed`.
+**Outcome:** backend, mobile, and web can represent Gemma-local capabilities without breaking current paths.
 
-### Phase P5: Native Runtime Integration (MediaPipe/AI Edge)
+- [ ] Expand provider enums in backend/mobile/web type contracts.
+- [ ] Add mode selection state (`cloud`, `hybrid`, `local_offline`).
+- [ ] Add strict availability checks and explicit error codes.
 
-**Outcome:** on-device inference available through React Native bridge.
+### Phase P2: Inference Routing Layer (Mobile + Web)
 
-- [ ] Add custom native module and expose `loadModel`, `unloadModel`, `generate`, `health` bridge methods.
-- [ ] Wire plugin/config in [mobile/app.json](mobile/app.json) and EAS build profile.
-- [ ] Move development/testing from Expo Go to EAS Development Build.
-- [ ] Implement streaming token callback API for UI typing effect compatibility.
-- [ ] Validate local inference for all profiles on representative devices.
+**Outcome:** single inference entrypoint per platform with deterministic routing and fallback rules.
 
-### Phase P6: Local Retrieval and Memory Layer
+- [ ] Implement platform router and adapters.
+- [ ] Route existing chat calls through router abstraction.
+- [ ] Keep non-chat API modules untouched initially to reduce migration risk.
 
-**Outcome:** offline reasoning with local data, not only pure LLM completion.
+### Phase P3: L0/L1 Orchestrator Contract Integration
 
-- [ ] Create local memory store (SQLite-based) for conversations and retrieval corpus.
-- [ ] Add ingestion path from user messages and optional imported docs.
-- [ ] Add lightweight local retriever and context builder.
-- [ ] Route chat prompt assembly through local retrieval in `local_offline` mode.
-- [ ] Add retention and compaction strategy for device storage limits.
+**Outcome:** voice and text requests follow orchestrator-compatible gate, routing, and synthesis flow.
 
-### Phase P7: Hybrid and Cloud Coexistence
+- [ ] Enforce noise/relevance/privacy gate before memory commit.
+- [ ] Enforce sessionization metadata for all voice sessions.
+- [ ] Enforce L1 query analysis and execution mode logging.
 
-**Outcome:** seamless fallback without breaking current backend product surface.
+### Phase P4: Mobile Always-On Eva Speech Runtime
 
-- [ ] Keep existing backend provider flows (`local`/`gemini`) unchanged for cloud mode.
-- [ ] Add `offline_ready` and `active_model_profile` metadata in mobile status surfaces.
-- [ ] Add explicit fallback policy (local fail -> cloud only when user allows internet).
-- [ ] Keep backend-required modules (PageIndex, ambient cloud options) isolated from offline core.
-- [ ] Add UI indicators for current mode and internet requirement.
+**Outcome:** mobile can run continuous listening and speech-to-speech orchestration with wake-word invocation.
 
-### Phase P8: Test Matrix, Performance Gates, and Release
+- [ ] Connect wake-word trigger to orchestrator session open event.
+- [ ] Implement barge-in interrupt behavior.
+- [ ] Enforce activation/deactivation order contract.
 
-**Outcome:** production confidence before broad rollout.
+### Phase P5: Web Speech-to-Speech Parity
 
-- [ ] Build device matrix by RAM/storage tiers and OS versions.
-- [ ] Run correctness tests against a fixed prompt suite across INT4/INT8/FP16.
-- [ ] Run performance gates (TTFT, tokens/sec, peak RAM, thermal throttling, crash-free session).
-- [ ] Run network-off test cases (airplane mode) for full local inference flows.
-- [ ] Roll out with staged channels and kill-switch for problematic profile packs.
+**Outcome:** web supports voice interactions through the same orchestrator logic.
 
-## 10. Quality Gates (Must Pass)
+- [ ] Add web voice runtime panel and controls.
+- [ ] Reuse event envelope and trace propagation.
+- [ ] Implement web-specific fallback behavior under browser constraints.
 
-- Offline inference works in airplane mode after model install.
-- No unsigned or corrupted model can be loaded.
-- App startup remains stable if model missing or partially downloaded.
-- Profile recommendation never suggests pack that violates hard constraints.
-- Upgrade and rollback paths are deterministic and user-safe.
+### Phase P6: Local RAG Store and Ingestion Pipeline
 
-## 11. Deployment and Cost Guidance
+**Outcome:** offline reasoning uses local memory and retrieval, not pure completion.
 
-- Do not rely on free GPU hosting for sustained production inference.
-- Use cloud hosting only for model pack delivery (CDN/object storage), not required for runtime inference.
-- Keep cloud inference as optional fallback, not a hard dependency.
+- [ ] Create local memory store and retriever contracts.
+- [ ] Add ingestion from user turns and optional local docs.
+- [ ] Add retention/compaction pipeline for device storage limits.
 
-### 11.1 Immediate Production Path (Deploy Now, Auto-Connect on App Open)
+### Phase P7: Model Pack Control Plane
 
-1. Deploy FastAPI backend behind HTTPS with stable domain (Railway/Render/Fly.io/Azure App Service are valid short-path options).
-2. Set `EXPO_PUBLIC_API_BASE_URL=https://<your-domain>/api` in mobile build environment.
-3. Build and distribute app from EAS using that environment variable.
-4. On launch, app auto-connects to deployed backend without manual Settings edits.
-5. Keep Settings override for diagnostics only (hidden behind advanced toggle in production UX).
+**Outcome:** artifact lifecycle can be managed safely before model activation.
 
-### 11.2 Local LAN URL Behavior (Current Dev Workflow)
+- [ ] Define manifest schema and signing workflow.
+- [ ] Define channels (`stable`, `candidate`, `canary`).
+- [ ] Add rollback and revocation rules.
 
-- A LAN backend URL works on another phone only when both devices are on the same network and the backend machine/firewall allows inbound traffic on the backend port.
-- If your computer IP changes (DHCP), previous LAN URL stops working until updated.
-- Cloud domain avoids LAN fragility and is the recommended production default.
+### Phase P8: Downloader and Verifier
 
-## 12. "No Internet at All" Scenarios
+**Outcome:** resilient and secure install lifecycle exists even before final large packs are used.
 
-### Consumer App-Store Path
+- [ ] Implement resumable chunked download.
+- [ ] Implement chunk and full-package hash checks.
+- [ ] Implement signature verification and install states.
 
-- Realistic approach: first-time online model download, then fully offline runtime.
+### Phase P9: Native Gemma Runtime Bridge (Integration-Ready)
 
-### Enterprise/OEM Path
+**Outcome:** app can call local runtime interface even if no model pack is active yet.
 
-- Preload model packs during device provisioning.
-- Sideload signed model packs from offline media.
-- Disable network requirement completely for inference mode.
+- [ ] Expose `loadModel`, `unloadModel`, `generate`, `health` bridge methods.
+- [ ] Add streaming callback API for token stream compatibility.
+- [ ] Integrate with EAS Development Build and plugin config.
 
-## 13. Risk Register and Mitigation
+### Phase P10: Hybrid/Cloud Coexistence and Policy
 
-- Thermal throttling on mid devices: enforce profile limits and runtime backpressure.
-- Disk pressure during updates: staged unpack + rollback reserve checks.
-- Conversion/runtime mismatch: version lock runtime + pack format in manifest.
-- UX abandonment from large download: honest size/time estimates and resume support.
-- Fragmentation across devices: capability database and staged rollout channels.
+**Outcome:** existing production behavior remains stable while local mode is introduced.
 
-## 14. Execution Order Recommendation
+- [ ] Keep existing backend cloud provider flows unchanged.
+- [ ] Add explicit fallback policy (only when allowed).
+- [ ] Add runtime indicators for mode, provider, and offline readiness.
 
-1. P0 and P1 first to prevent architecture churn.
-2. P2 and P4 next so user/device safety exists before native runtime scale-up.
-3. P3 and P5 in parallel after contracts freeze.
-4. P6 after local runtime is stable.
-5. P7 and P8 for release hardening.
+### Phase P11: Quality, Safety, and Permission Hardening
 
-## 15. Immediate Next Actions (Start This Week)
+**Outcome:** production safeguards enforced consistently in all modes.
 
-- [ ] Freeze interfaces for inference routing and model profile metadata.
-- [ ] Stand up model pack manifest format and signing pipeline.
-- [ ] Add mobile capability profiling + recommendation UI skeleton.
-- [ ] Create native runtime proof-of-concept with one quantized pack.
-- [ ] Validate airplane mode offline chat on one Android and one iOS test device.
+- [ ] Enforce CRAG + Self-RAG and FLARE ceilings.
+- [ ] Enforce permission check order on write/destructive actions.
+- [ ] Enforce full audit logging and trace continuity.
+
+### Phase P12: Observability and Telemetry
+
+**Outcome:** operational visibility across mobile/web/backend runtime paths.
+
+- [ ] Emit mode/provider/fallback metrics.
+- [ ] Emit latency metrics (STT, orchestration, LLM, TTS).
+- [ ] Emit error class metrics by component and mode.
+
+### Phase P13: Validation and Release Gates
+
+**Outcome:** deployment confidence before broad rollout.
+
+- [ ] Run airplane-mode offline tests on mobile after pack install.
+- [ ] Run correctness suite across cloud/hybrid/local_offline.
+- [ ] Run performance and thermal gates on device matrix.
+
+### Phase P14: Deferred Gemma Model Download and Activation (Later)
+
+**Outcome:** complete local-offline runtime enabled on target capable devices.
+
+- [ ] Download approved model pack on target device class.
+- [ ] Verify and activate model pack.
+- [ ] Run post-activation benchmark and quality checks.
+- [ ] Switch selected users/devices from `hybrid` to `local_offline`.
+
+---
+
+## 13. Quality Gates (Must Pass)
+
+- Existing Gemini/traditional behavior remains operational (no regression).
+- Mobile Eva path supports continuous speech-to-speech sessions.
+- Web voice path follows same orchestrator and trace contracts.
+- Offline mode performs end-to-end without network after model installation.
+- No unsigned/corrupt model can be activated.
+- Memory retention and compaction prevent uncontrolled local growth.
+- Quality loops and permission checks are enforced in runtime, not just documented.
+
+---
+
+## 14. Deferred Model Download Activation Runbook
+
+### 14.1 Before Download
+
+- Confirm profile recommendation (`int4`, `int8`, `fp16`) from device profiler.
+- Confirm storage and thermal thresholds.
+- Confirm manifest signature chain and release channel.
+
+### 14.2 Download and Verify
+
+- Download in resumable chunks.
+- Verify chunk hashes during transfer.
+- Verify full hash and signature before install state changes to `ready`.
+
+### 14.3 Activate and Validate
+
+- Load model through native bridge.
+- Run health checks (`load`, `generate`, `memory`, `thermal`).
+- Run fixed prompt suite and compare against baseline quality thresholds.
+
+### 14.4 Rollback
+
+- On health/quality failure, rollback to previous known-good model pack.
+- If no local pack remains valid, fallback by policy to `hybrid` or `cloud` mode.
+
+---
+
+## 15. Risk Register and Mitigation
+
+- Thermal throttling on mid-tier devices:
+  - enforce profile gating
+  - enforce runtime backpressure
+- Storage pressure during updates:
+  - staged unpack
+  - rollback reserve checks
+- Silent mode/provider fallback causing policy drift:
+  - explicit fallback events + user policy checks
+- Regression risk to existing Gemini runtime:
+  - additive integration
+  - compatibility gate in CI
+- Browser limitations for always-on web audio:
+  - explicit UX and capability-based behavior contracts
+
+---
+
+## 16. Immediate Next Actions (Start This Week)
+
+- [ ] Freeze cross-platform runtime contracts (`mode`, `provider`, event envelope).
+- [ ] Implement provider/mode type expansion in backend/mobile/web.
+- [ ] Add inference routers with Gemini-first default and Gemma-local placeholders.
+- [ ] Wire mobile Eva wake-word trigger path to orchestrator session events.
+- [ ] Add model-pack manifest schema and verifier scaffolding.
+- [ ] Add local RAG store interfaces and retention/compaction contract.
+- [ ] Define and run no-regression test suite for existing ambient and chat paths.
+
+---
+
+## 17. Final Notes for Implementation Teams
+
+- This plan is intentionally integration-first: build all production architecture now.
+- Keep Gemini operational as the current runtime while Gemma-local readiness is built.
+- Treat model download/activation as a controlled final switch, not a prerequisite for integration work.
+- Mobile is the flagship always-on speech-to-speech surface; web receives orchestrator-aligned parity with platform-appropriate constraints.

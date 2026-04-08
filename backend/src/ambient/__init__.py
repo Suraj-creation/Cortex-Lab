@@ -4,17 +4,20 @@ AmbientService — Orchestrates all voice tiers into a single start/stop pipelin
 Tier 0: AudioCapture (Microphone + Ring Buffer)
 Tier 1: VoiceActivityDetector (Silero VAD v5)
 Tier 2: SpeakerIdentifier (ECAPA-TDNN)
-Tier 3: Transcriber — dual provider:
-        - Traditional: faster-whisper (CTranslate2), local GPU/CPU
-        - Gemini: Google Gemini API multimodal audio transcription
-Tier 4: TextToSpeech — dual provider:
-        - Traditional: Piper TTS (ONNX), local CPU
-        - Gemini: Google Gemini API audio output generation
+Tier 3: Transcriber — provider routing:
+    - Traditional: faster-whisper (CTranslate2), local GPU/CPU
+    - Local alias: maps to the traditional local stack
+    - Gemini: Google Gemini API multimodal audio transcription
+Tier 4: TextToSpeech — provider routing:
+    - Traditional: Piper TTS (ONNX), local CPU
+    - Local alias: maps to the traditional local stack
+    - Gemini: Google Gemini API audio output generation
 
 Flow:
   Mic → VAD → [speech segment] → SpeakerID + STT → ConversationSegmenter → RAG Ingest
 
 Provider selection configured via stt_provider / tts_provider in AmbientConfig.
+Accepted values: "traditional" | "local" | "gemini".
 """
 
 import asyncio
@@ -122,27 +125,37 @@ class AmbientService:
 
     def set_stt_provider(self, provider: str) -> Dict[str, Any]:
         """Switch STT provider. Returns status."""
-        if provider not in ("traditional", "gemini"):
+        if provider not in ("traditional", "local", "gemini"):
             return {"success": False, "error": f"Unknown STT provider: {provider}"}
-        if provider == "gemini" and not self._gemini_api_key:
+        backend_provider = "traditional" if provider == "local" else provider
+        if backend_provider == "gemini" and not self._gemini_api_key:
             return {"success": False, "error": "Gemini API key not configured"}
-        if provider == "gemini" and not self._gemini_stt:
+        if backend_provider == "gemini" and not self._gemini_stt:
             self._init_gemini_stt()
         self.config.stt_provider = provider
         save_config(self.config, self.data_dir)
-        return {"success": True, "stt_provider": provider}
+        return {
+            "success": True,
+            "stt_provider": provider,
+            "active_backend": backend_provider,
+        }
 
     def set_tts_provider(self, provider: str) -> Dict[str, Any]:
         """Switch TTS provider. Returns status."""
-        if provider not in ("traditional", "gemini"):
+        if provider not in ("traditional", "local", "gemini"):
             return {"success": False, "error": f"Unknown TTS provider: {provider}"}
-        if provider == "gemini" and not self._gemini_api_key:
+        backend_provider = "traditional" if provider == "local" else provider
+        if backend_provider == "gemini" and not self._gemini_api_key:
             return {"success": False, "error": "Gemini API key not configured"}
-        if provider == "gemini" and not self._gemini_tts:
+        if backend_provider == "gemini" and not self._gemini_tts:
             self._init_gemini_tts()
         self.config.tts_provider = provider
         save_config(self.config, self.data_dir)
-        return {"success": True, "tts_provider": provider}
+        return {
+            "success": True,
+            "tts_provider": provider,
+            "active_backend": backend_provider,
+        }
 
     def _init_gemini_stt(self):
         """Initialize Gemini STT if not already done."""

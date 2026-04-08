@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Deep Agentic RAG Pipeline Live Tests
 =====================================
@@ -14,20 +14,36 @@ import json
 import time
 import sys
 
+import pytest
+
 BASE = "http://localhost:8000"
 PASS = 0
 FAIL = 0
 TESTS = []
 
 
+def _pytest_server_ready() -> bool:
+    try:
+        response = requests.get(f"{BASE}/api/health", timeout=2)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _pytest_server_ready(),
+    reason="Live RAG pipeline tests require backend server at localhost:8000",
+)
+
+
 def check_server():
     """Verify server is running before tests. Wait up to 120s."""
-    print("⏳ Waiting for server...")
+    print("â³ Waiting for server...")
     for i in range(60):
         try:
             r = requests.get(f"{BASE}/api/health", timeout=3)
             if r.status_code == 200 and r.json().get("status") == "ok":
-                print(f"✅ Server ready after {i*2}s")
+                print(f"âœ… Server ready after {i*2}s")
                 return True
         except Exception:
             pass
@@ -35,7 +51,7 @@ def check_server():
     return False
 
 
-def test(name, query, checks):
+def run_case(name, query, checks):
     """Run a single RAG pipeline test."""
     global PASS, FAIL
     print(f'\n{"="*70}')
@@ -57,7 +73,7 @@ def test(name, query, checks):
         elapsed = time.time() - t0
 
         if r.status_code != 200:
-            print(f"  ❌ HTTP {r.status_code}: {r.text[:200]}")
+            print(f"  âŒ HTTP {r.status_code}: {r.text[:200]}")
             FAIL += 1
             TESTS.append((name, "FAIL", f"HTTP {r.status_code}"))
             return
@@ -71,16 +87,16 @@ def test(name, query, checks):
         proc_ms = data.get("processing_time_ms", 0)
         cache_hit = data.get("cache_hit", False)
 
-        print(f'  ⏱  Time: {elapsed:.1f}s (pipeline: {proc_ms:.0f}ms)')
-        print(f'  🔍 Intent: {qa.get("intent","?")} | Routing: {qa.get("routing","?")}')
-        print(f"  🤖 Agents: {agents}")
-        print(f"  📄 Evidence: {len(evidence)} pieces | Confidence: {conf}")
-        print(f"  💾 Cache hit: {cache_hit}")
-        print(f"  📝 ANSWER ({len(answer)} chars):")
+        print(f'  â±  Time: {elapsed:.1f}s (pipeline: {proc_ms:.0f}ms)')
+        print(f'  ðŸ” Intent: {qa.get("intent","?")} | Routing: {qa.get("routing","?")}')
+        print(f"  ðŸ¤– Agents: {agents}")
+        print(f"  ðŸ“„ Evidence: {len(evidence)} pieces | Confidence: {conf}")
+        print(f"  ðŸ’¾ Cache hit: {cache_hit}")
+        print(f"  ðŸ“ ANSWER ({len(answer)} chars):")
         print(f"     {answer[:600]}")
 
         # Show evidence
-        print(f"\n  📋 Evidence preview:")
+        print(f"\n  ðŸ“‹ Evidence preview:")
         for i, e in enumerate(evidence[:3]):
             c = e.get("content", str(e))[:100] if isinstance(e, dict) else str(e)[:100]
             print(f"     [{i+1}] {c}")
@@ -90,11 +106,11 @@ def test(name, query, checks):
         for ck_name, ck_fn in checks.items():
             try:
                 ok = ck_fn(data)
-                print(f'  {"✅" if ok else "❌"} {ck_name}')
+                print(f'  {"âœ…" if ok else "âŒ"} {ck_name}')
                 if not ok:
                     failures.append(ck_name)
             except Exception as exc:
-                print(f"  ❌ {ck_name}: {exc}")
+                print(f"  âŒ {ck_name}: {exc}")
                 failures.append(ck_name)
 
         if failures:
@@ -108,7 +124,7 @@ def test(name, query, checks):
         elapsed = time.time() - t0
         FAIL += 1
         TESTS.append((name, "FAIL", str(e)[:80]))
-        print(f"  ❌ Exception: {e}")
+        print(f"  âŒ Exception: {e}")
 
 
 def main():
@@ -116,20 +132,20 @@ def main():
 
     # Pre-flight check
     if not check_server():
-        print("❌ Server not running at http://localhost:8000")
+        print("âŒ Server not running at http://localhost:8000")
         print("   Start it first: python server.py")
         sys.exit(1)
 
-    print("\n" + "🧪 " * 20)
+    print("\n" + "ðŸ§ª " * 20)
     print("  DEEP AGENTIC RAG PIPELINE TESTS")
     print("  Testing real queries against real stored memories")
-    print("🧪 " * 20)
+    print("ðŸ§ª " * 20)
 
-    # ═══════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # TEST 1: Personal Identity (Factual)
     # DB memory: "My name is Suraj Kumar. I am from Patna, Bihar, India."
-    # ═══════════════════════════════════════════════════════════════════
-    test(
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    run_case(
         "1. Factual: Personal Identity",
         "What is my name and where am I from?",
         {
@@ -142,11 +158,11 @@ def main():
         },
     )
 
-    # ═══════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # TEST 2: Education (Factual)
     # DB: "B.Tech CSE at Vidyashilp University, Bangalore"
-    # ═══════════════════════════════════════════════════════════════════
-    test(
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    run_case(
         "2. Factual: Education Background",
         "Where am I studying and what is my degree?",
         {
@@ -162,11 +178,11 @@ def main():
         },
     )
 
-    # ═══════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # TEST 3: Contact Info (Factual Compound)
     # DB: "surajcreationinfinity1@gmail.com", "+91 6204153972"
-    # ═══════════════════════════════════════════════════════════════════
-    test(
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    run_case(
         "3. Factual: Contact Information",
         "What is my email address and phone number?",
         {
@@ -176,11 +192,11 @@ def main():
         },
     )
 
-    # ═══════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # TEST 4: Skills (Factual)
     # DB: "Python, Java, C... PyTorch, TensorFlow... NLP, CV, RAG"
-    # ═══════════════════════════════════════════════════════════════════
-    test(
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    run_case(
         "4. Factual: Technical Skills",
         "What are my programming languages and AI skills?",
         {
@@ -193,11 +209,11 @@ def main():
         },
     )
 
-    # ═══════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # TEST 5: Projects (Factual - listing)
     # DB: 20+ projects including Cortex Lab, Jarurat Care, Echo Chamber, etc.
-    # ═══════════════════════════════════════════════════════════════════
-    test(
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    run_case(
         "5. Factual: List Projects",
         "List my top projects that I have built",
         {
@@ -213,11 +229,11 @@ def main():
         },
     )
 
-    # ═══════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # TEST 6: False Premise Rejection (Hallucination Guard)
-    # Suraj has NO PhD — system must reject, not fabricate
-    # ═══════════════════════════════════════════════════════════════════
-    test(
+    # Suraj has NO PhD â€” system must reject, not fabricate
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    run_case(
         "6. Hallucination Guard: False Premise (PhD)",
         "Tell me about my PhD research at Stanford",
         {
@@ -231,11 +247,11 @@ def main():
         },
     )
 
-    # ═══════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # TEST 7: Philosophy & Vision (Reflective)
     # DB: education manifesto, "redefining learning", startup visions
-    # ═══════════════════════════════════════════════════════════════════
-    test(
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    run_case(
         "7. Reflective: Education Vision",
         "What is my vision for transforming education?",
         {
@@ -249,14 +265,14 @@ def main():
         },
     )
 
-    # ═══════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # SUMMARY
-    # ═══════════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     print(f"\n\n{'#'*70}")
     print(f"  DEEP RAG PIPELINE TEST RESULTS: {PASS} PASSED, {FAIL} FAILED / {PASS+FAIL} total")
     print(f"{'#'*70}")
     for name, status, detail in TESTS:
-        icon = "✅" if status == "PASS" else "❌"
+        icon = "âœ…" if status == "PASS" else "âŒ"
         print(f"  {icon} {name}: {detail}")
     print()
 
@@ -265,3 +281,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

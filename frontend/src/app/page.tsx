@@ -10,7 +10,8 @@ import { RAGDashboard } from "@/components/RAGDashboard";
 import { ObservabilityDashboard } from "@/components/ObservabilityDashboard";
 import { AmbientPanel } from "@/components/AmbientPanel";
 import { DocumentsPanel } from "@/components/DocumentsPanel";
-import { ModelStatus } from "@/lib/types";
+import { getRuntimeSafetyExecutorStatus, getRuntimeSafetyPermissions } from "@/lib/api";
+import { ModelStatus, RuntimeApprovalSummary } from "@/lib/types";
 
 type ActiveView = "chat" | "memories" | "graph" | "dashboard" | "observability" | "ambient" | "documents";
 
@@ -26,6 +27,15 @@ export default function Home() {
     { id: string; title: string; date: string }[]
   >([]);
   const [activeConversation, setActiveConversation] = useState("");
+  const [approvalSummary, setApprovalSummary] = useState<RuntimeApprovalSummary>({
+    pending: 0,
+    expired: 0,
+    approved_total: 0,
+    running: 0,
+    waiting_retry: 0,
+    failed: 0,
+    completed: 0,
+  });
 
   // Load conversations from localStorage on mount
   useEffect(() => {
@@ -97,6 +107,45 @@ export default function Home() {
     return () => clearInterval(intervalId);
   }, []);
 
+  useEffect(() => {
+    let mounted = true;
+
+    const loadApprovalSummary = async () => {
+      try {
+        const [permissions, executor] = await Promise.all([
+          getRuntimeSafetyPermissions(),
+          getRuntimeSafetyExecutorStatus(),
+        ]);
+        if (!mounted) return;
+
+        setApprovalSummary({
+          pending: permissions.count || 0,
+          expired: permissions.expired_count || 0,
+          approved_total: executor.summary?.approved_total || 0,
+          running: executor.summary?.running || 0,
+          waiting_retry: executor.summary?.waiting_retry || 0,
+          failed: executor.summary?.failed || 0,
+          completed: executor.summary?.completed || 0,
+        });
+      } catch {
+        if (!mounted) return;
+        setApprovalSummary((prev) => ({
+          ...prev,
+          pending: 0,
+          expired: 0,
+          waiting_retry: 0,
+        }));
+      }
+    };
+
+    loadApprovalSummary();
+    const interval = setInterval(loadApprovalSummary, 7000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+
   const handleNewChat = () => {
     const id = Date.now().toString();
     setConversations((prev) => [
@@ -128,6 +177,7 @@ export default function Home() {
         onToggle={() => setSidebarOpen((p) => !p)}
         activeView={activeView}
         onNavigate={setActiveView}
+        approvalSummary={approvalSummary}
       />
 
       {/* Main Area */}

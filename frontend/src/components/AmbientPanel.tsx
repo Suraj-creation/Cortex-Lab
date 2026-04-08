@@ -335,6 +335,8 @@ function AmbientSettings({ status }: { status: AmbientState | null }) {
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const [providers, setProviders] = useState<VoiceProviders | null>(null);
   const [switching, setSwitching] = useState(false);
+  const isLocalStt = config.stt_provider === "traditional" || config.stt_provider === "local";
+  const isLocalTts = config.tts_provider === "traditional" || config.tts_provider === "local";
 
   // Load config on mount
   useEffect(() => {
@@ -457,10 +459,10 @@ function AmbientSettings({ status }: { status: AmbientState | null }) {
             </div>
             <div className="flex gap-1.5">
               <button
-                onClick={() => handleSwitchSTT("traditional")}
-                disabled={switching || !providers?.traditional_stt_available}
+                onClick={() => handleSwitchSTT("local")}
+                disabled={switching || (!providers?.traditional_stt_available && !providers?.local_stt_available)}
                 className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-all ${
-                  config.stt_provider === "traditional"
+                  isLocalStt
                     ? "bg-indigo-100 text-indigo-700 border border-indigo-200"
                     : "bg-slate-50 text-slate-500 border border-slate-200 hover:bg-slate-100"
                 } disabled:opacity-40 disabled:cursor-not-allowed`}
@@ -502,10 +504,10 @@ function AmbientSettings({ status }: { status: AmbientState | null }) {
             </div>
             <div className="flex gap-1.5">
               <button
-                onClick={() => handleSwitchTTS("traditional")}
-                disabled={switching || !providers?.traditional_tts_available}
+                onClick={() => handleSwitchTTS("local")}
+                disabled={switching || (!providers?.traditional_tts_available && !providers?.local_tts_available)}
                 className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-all ${
-                  config.tts_provider === "traditional"
+                  isLocalTts
                     ? "bg-indigo-100 text-indigo-700 border border-indigo-200"
                     : "bg-slate-50 text-slate-500 border border-slate-200 hover:bg-slate-100"
                 } disabled:opacity-40 disabled:cursor-not-allowed`}
@@ -827,7 +829,7 @@ function AmbientSettings({ status }: { status: AmbientState | null }) {
               />
             </button>
           </div>
-          {config.tts_provider === "traditional" && (
+          {isLocalTts && (
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <span className="text-xs text-slate-500">TTS Speed</span>

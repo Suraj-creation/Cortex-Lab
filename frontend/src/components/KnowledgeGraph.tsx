@@ -10,8 +10,18 @@ import {
   Maximize2,
   RefreshCw,
 } from "lucide-react";
-import { GraphData, GraphNode, GraphEdge } from "@/lib/types";
+import { GraphData, GraphNode } from "@/lib/types";
 import { getGraphData } from "@/lib/api";
+
+const TYPE_COLORS: Record<string, string> = {
+  person: "#10b981",
+  location: "#3b82f6",
+  organization: "#a855f7",
+  concept: "#f59e0b",
+  event: "#ef4444",
+  object: "#06b6d4",
+  default: "#64748b",
+};
 
 interface NodePosition {
   x: number;
@@ -35,57 +45,79 @@ export function KnowledgeGraph({ onBack }: { onBack: () => void }) {
   const dragStart = useRef({ x: 0, y: 0 });
   const dragNode = useRef<NodePosition | null>(null);
 
-  const typeColors: Record<string, string> = {
-    person: "#10b981",
-    location: "#3b82f6",
-    organization: "#a855f7",
-    concept: "#f59e0b",
-    event: "#ef4444",
-    object: "#06b6d4",
-    default: "#64748b",
-  };
-
-  const loadGraph = useCallback(async () => {
-    setLoading(true);
-    try {
-      const data = await getGraphData();
-      setGraphData(data);
-      initializePositions(data);
-    } catch (err) {
-      console.error("Failed to load graph:", err);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    loadGraph();
-    return () => {
-      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
-    };
-  }, [loadGraph]);
-
-  const initializePositions = (data: GraphData) => {
+  const draw = useCallback((data: GraphData) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const cx = canvas.width / 2;
-    const cy = canvas.height / 2;
-    const radius = Math.min(cx, cy) * 0.6;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
 
-    nodesRef.current = data.nodes.map((node, i) => {
-      const angle = (2 * Math.PI * i) / data.nodes.length;
-      return {
-        x: cx + radius * Math.cos(angle) + (Math.random() - 0.5) * 40,
-        y: cy + radius * Math.sin(angle) + (Math.random() - 0.5) * 40,
-        vx: 0,
-        vy: 0,
-        node,
-      };
-    });
-    startSimulation(data);
-  };
+    ctx.save();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.translate(pan.x, pan.y);
+    ctx.scale(zoom, zoom);
 
-  const startSimulation = (data: GraphData) => {
+    const nodes = nodesRef.current;
+    const nodeIndex = new Map(nodes.map((n) => [n.node.id, n]));
+
+    // Draw edges
+    for (const edge of data.edges) {
+      const source = nodeIndex.get(edge.source);
+      const target = nodeIndex.get(edge.target);
+      if (!source || !target) continue;
+
+      ctx.beginPath();
+      ctx.moveTo(source.x, source.y);
+      ctx.lineTo(target.x, target.y);
+      ctx.strokeStyle = "rgba(100, 116, 139, 0.15)";
+      ctx.lineWidth = Math.max(1, (edge.weight || 0.5) * 2);
+      ctx.stroke();
+
+      // Edge label
+      if (edge.relation) {
+        const mx = (source.x + target.x) / 2;
+        const my = (source.y + target.y) / 2;
+        ctx.font = "9px Inter, sans-serif";
+        ctx.fillStyle = "rgba(100, 116, 139, 0.6)";
+        ctx.textAlign = "center";
+        ctx.fillText(edge.relation, mx, my - 4);
+      }
+    }
+
+    // Draw nodes
+    for (const np of nodes) {
+      const { node, x, y } = np;
+      const size = 6 + (node.mentions || 1) * 2;
+      const color = TYPE_COLORS[node.type] || TYPE_COLORS.default;
+      const isSelected = selectedNode?.id === node.id;
+
+      // Glow
+      if (isSelected) {
+        ctx.beginPath();
+        ctx.arc(x, y, size + 6, 0, Math.PI * 2);
+        ctx.fillStyle = color + "30";
+        ctx.fill();
+      }
+
+      // Circle
+      ctx.beginPath();
+      ctx.arc(x, y, size, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.strokeStyle = isSelected ? "#4f46e5" : color + "80";
+      ctx.lineWidth = isSelected ? 2 : 1;
+      ctx.stroke();
+
+      // Label
+      ctx.font = "11px Inter, sans-serif";
+      ctx.fillStyle = "#334155";
+      ctx.textAlign = "center";
+      ctx.fillText(node.label, x, y + size + 14);
+    }
+
+    ctx.restore();
+  }, [pan.x, pan.y, zoom, selectedNode?.id]);
+
+  const startSimulation = useCallback((data: GraphData) => {
     let iteration = 0;
     const maxIterations = 300;
 
@@ -158,79 +190,47 @@ export function KnowledgeGraph({ onBack }: { onBack: () => void }) {
     };
 
     tick();
-  };
+  }, [draw]);
 
-  const draw = (data: GraphData) => {
+  const initializePositions = useCallback((data: GraphData) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    const cx = canvas.width / 2;
+    const cy = canvas.height / 2;
+    const radius = Math.min(cx, cy) * 0.6;
 
-    ctx.save();
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.translate(pan.x, pan.y);
-    ctx.scale(zoom, zoom);
+    nodesRef.current = data.nodes.map((node, i) => {
+      const angle = (2 * Math.PI * i) / data.nodes.length;
+      return {
+        x: cx + radius * Math.cos(angle) + (Math.random() - 0.5) * 40,
+        y: cy + radius * Math.sin(angle) + (Math.random() - 0.5) * 40,
+        vx: 0,
+        vy: 0,
+        node,
+      };
+    });
+    startSimulation(data);
+  }, [startSimulation]);
 
-    const nodes = nodesRef.current;
-    const nodeIndex = new Map(nodes.map((n) => [n.node.id, n]));
-
-    // Draw edges
-    for (const edge of data.edges) {
-      const source = nodeIndex.get(edge.source);
-      const target = nodeIndex.get(edge.target);
-      if (!source || !target) continue;
-
-      ctx.beginPath();
-      ctx.moveTo(source.x, source.y);
-      ctx.lineTo(target.x, target.y);
-      ctx.strokeStyle = "rgba(100, 116, 139, 0.15)";
-      ctx.lineWidth = Math.max(1, (edge.weight || 0.5) * 2);
-      ctx.stroke();
-
-      // Edge label
-      if (edge.relation) {
-        const mx = (source.x + target.x) / 2;
-        const my = (source.y + target.y) / 2;
-        ctx.font = "9px Inter, sans-serif";
-        ctx.fillStyle = "rgba(100, 116, 139, 0.6)";
-        ctx.textAlign = "center";
-        ctx.fillText(edge.relation, mx, my - 4);
-      }
+  const loadGraph = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await getGraphData();
+      setGraphData(data);
+      initializePositions(data);
+    } catch (err) {
+      console.error("Failed to load graph:", err);
+    } finally {
+      setLoading(false);
     }
+  }, [initializePositions]);
 
-    // Draw nodes
-    for (const np of nodes) {
-      const { node, x, y } = np;
-      const size = 6 + (node.mentions || 1) * 2;
-      const color = typeColors[node.type] || typeColors.default;
-      const isSelected = selectedNode?.id === node.id;
-
-      // Glow
-      if (isSelected) {
-        ctx.beginPath();
-        ctx.arc(x, y, size + 6, 0, Math.PI * 2);
-        ctx.fillStyle = color + "30";
-        ctx.fill();
-      }
-
-      // Circle
-      ctx.beginPath();
-      ctx.arc(x, y, size, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
-      ctx.strokeStyle = isSelected ? "#4f46e5" : color + "80";
-      ctx.lineWidth = isSelected ? 2 : 1;
-      ctx.stroke();
-
-      // Label
-      ctx.font = "11px Inter, sans-serif";
-      ctx.fillStyle = "#334155";
-      ctx.textAlign = "center";
-      ctx.fillText(node.label, x, y + size + 14);
-    }
-
-    ctx.restore();
-  };
+  useEffect(() => {
+    loadGraph();
+    return () => {
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    };
+  }, [loadGraph]);
 
   // Handle canvas resize
   useEffect(() => {
@@ -248,7 +248,7 @@ export function KnowledgeGraph({ onBack }: { onBack: () => void }) {
     const observer = new ResizeObserver(resize);
     observer.observe(container);
     return () => observer.disconnect();
-  }, [graphData, zoom, pan, selectedNode]);
+  }, [graphData, draw]);
 
   // Mouse interactions
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -386,7 +386,7 @@ export function KnowledgeGraph({ onBack }: { onBack: () => void }) {
           <div className="absolute bottom-3 left-3 bg-white/80 backdrop-blur-xl rounded-xl border border-slate-200 p-3 shadow-lg">
             <p className="text-[10px] text-slate-500 mb-2 font-semibold tracking-wider uppercase">Node Types</p>
             <div className="flex flex-wrap gap-2">
-              {Object.entries(typeColors)
+              {Object.entries(TYPE_COLORS)
                 .filter(([k]) => k !== "default")
                 .map(([type, color]) => (
                   <div key={type} className="flex items-center gap-1">
@@ -423,8 +423,8 @@ export function KnowledgeGraph({ onBack }: { onBack: () => void }) {
                 <span
                   className="px-1.5 py-0.5 rounded text-[9px] font-medium capitalize"
                   style={{
-                    backgroundColor: (typeColors[selectedNode.type] || typeColors.default) + "20",
-                    color: typeColors[selectedNode.type] || typeColors.default,
+                    backgroundColor: (TYPE_COLORS[selectedNode.type] || TYPE_COLORS.default) + "20",
+                    color: TYPE_COLORS[selectedNode.type] || TYPE_COLORS.default,
                   }}
                 >
                   {selectedNode.type}

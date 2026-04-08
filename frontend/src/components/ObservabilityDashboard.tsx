@@ -19,9 +19,21 @@ import {
   ChevronRight,
   Database,
   Cpu,
+  Check,
+  X,
+  ShieldAlert,
 } from "lucide-react";
-import { PipelineTrace, TracesResponse } from "@/lib/types";
-import { getPipelineTraces, getObservabilityMetrics } from "@/lib/api";
+import { PipelineTrace, RuntimePermissionRequest, RuntimeTaskSnapshot, TracesResponse } from "@/lib/types";
+import {
+  cancelRuntimeTask,
+  getObservabilityMetrics,
+  getPipelineTraces,
+  getRuntimeSafetyExecutorStatus,
+  getRuntimeSafetyPermissions,
+  getRuntimeTasks,
+  resolveRuntimeSafetyPermission,
+  subscribeRuntimeTaskEvents,
+} from "@/lib/api";
 
 /* ─── Helpers ────────────────────────────────────────────────────── */
 
@@ -51,6 +63,10 @@ const STATUS_TEXT: Record<string, string> = {
   running: "text-blue-600",
 };
 
+function sloPass(rate: number, target: number, direction: "min" | "max"): boolean {
+  return direction === "min" ? rate >= target : rate <= target;
+}
+
 /* ─── Component ──────────────────────────────────────────────────── */
 
 export function ObservabilityDashboard({ onBack }: { onBack: () => void }) {
@@ -59,16 +75,52 @@ export function ObservabilityDashboard({ onBack }: { onBack: () => void }) {
   const [expandedTrace, setExpandedTrace] = useState<string | null>(null);
   const [traceLimit, setTraceLimit] = useState(20);
   const [liveMetrics, setLiveMetrics] = useState<Record<string, unknown> | null>(null);
+  const [pendingPermissions, setPendingPermissions] = useState<RuntimePermissionRequest[]>([]);
+  const [expiredCount, setExpiredCount] = useState(0);
+  const [executorStatus, setExecutorStatus] = useState<{
+    enabled: boolean;
+    running: boolean;
+    summary: {
+      approved_total: number;
+      pending_total: number;
+      running: number;
+      waiting_retry: number;
+      completed: number;
+      failed: number;
+      unsupported: number;
+      idle: number;
+    };
+  } | null>(null);
+  const [resolvingIds, setResolvingIds] = useState<Record<string, boolean>>({});
+  const [approvalMessage, setApprovalMessage] = useState<string>("");
+  const [runtimeTasks, setRuntimeTasks] = useState<RuntimeTaskSnapshot[]>([]);
+  const [runtimeTaskMessage, setRuntimeTaskMessage] = useState<string>("");
+  const [taskStreamConnected, setTaskStreamConnected] = useState(false);
+  const [cancellingTaskIds, setCancellingTaskIds] = useState<Record<string, boolean>>({});
+  const [taskNotifications, setTaskNotifications] = useState<Array<{
+    id: string;
+    taskId: string;
+    fromState: string;
+    toState: string;
+    timestamp: string;
+  }>>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [res, metrics] = await Promise.all([
+      const [res, metrics, permissions, executor, tasksPayload] = await Promise.all([
         getPipelineTraces(traceLimit),
         getObservabilityMetrics().catch(() => null),
+        getRuntimeSafetyPermissions().catch(() => ({ count: 0, pending: [], expired_count: 0 })),
+        getRuntimeSafetyExecutorStatus().catch(() => null),
+        getRuntimeTasks().catch(() => ({ count: 0, tasks: [] })),
       ]);
       setData(res);
       if (metrics) setLiveMetrics(metrics);
+      setPendingPermissions(permissions.pending || []);
+      setExpiredCount(permissions.expired_count || 0);
+      setExecutorStatus(executor);
+      setRuntimeTasks(tasksPayload.tasks || []);
     } catch (err) {
       console.error("Failed to load traces:", err);
     } finally {
@@ -82,8 +134,143 @@ export function ObservabilityDashboard({ onBack }: { onBack: () => void }) {
     return () => clearInterval(interval);
   }, [load]);
 
+  useEffect(() => {
+    const controller = subscribeRuntimeTaskEvents(
+      (event) => {
+        setTaskStreamConnected(true);
+        setRuntimeTasks((prev) => {
+          const idx = prev.findIndex((task) => task.task_id === event.task.task_id);
+          if (idx < 0) {
+            return [event.task, ...prev].slice(0, 128);
+          }
+          const next = [...prev];
+          next[idx] = event.task;
+          return next;
+        });
+
+        if (event.event_type === "task_transition") {
+          const fromState = event.previous_state || "unknown";
+          const toState = event.state;
+          const timestamp = event.timestamp || new Date().toISOString();
+          setTaskNotifications((prev) => [
+            {
+              id: `${event.event_id}:${timestamp}`,
+              taskId: event.task.task_id,
+              fromState,
+              toState,
+              timestamp,
+            },
+            ...prev,
+          ].slice(0, 12));
+        }
+      },
+      () => {
+        setTaskStreamConnected(false);
+      },
+    );
+
+    return () => {
+      controller.abort();
+    };
+  }, []);
+
+  const handleResolvePermission = useCallback(
+    async (permissionId: string, approve: boolean) => {
+      setResolvingIds((prev) => ({ ...prev, [permissionId]: true }));
+      try {
+        await resolveRuntimeSafetyPermission(
+          permissionId,
+          approve,
+          "observability-ui",
+          approve ? "Approved from observability panel" : "Denied from observability panel",
+        );
+        setApprovalMessage(
+          approve
+            ? `Approved permission ${permissionId}`
+            : `Denied permission ${permissionId}`,
+        );
+        await load();
+      } catch (err) {
+        setApprovalMessage(err instanceof Error ? err.message : "Failed to resolve permission");
+      } finally {
+        setResolvingIds((prev) => ({ ...prev, [permissionId]: false }));
+      }
+    },
+    [load],
+  );
+
+  const handleCancelTask = useCallback(
+    async (taskId: string) => {
+      setCancellingTaskIds((prev) => ({ ...prev, [taskId]: true }));
+      try {
+        const result = await cancelRuntimeTask(
+          taskId,
+          "Cancelled from observability panel",
+          true,
+        );
+        setRuntimeTaskMessage(
+          result.cancelled_task_ids.length > 0
+            ? `Cancelled task scope: ${result.cancelled_task_ids.join(", ")}`
+            : `Task ${taskId} was already terminal.`,
+        );
+        await load();
+      } catch (err) {
+        setRuntimeTaskMessage(err instanceof Error ? err.message : "Failed to cancel runtime task");
+      } finally {
+        setCancellingTaskIds((prev) => ({ ...prev, [taskId]: false }));
+      }
+    },
+    [load],
+  );
+
   const analytics = data?.analytics;
   const traces = data?.traces ?? [];
+  const stopReasonDistribution = analytics?.stop_reason_distribution || {};
+  const stopReasonTotal = Object.values(stopReasonDistribution).reduce((sum, count) => sum + count, 0);
+  const activeTaskStates = new Set(["queued", "running", "waiting_approval", "blocked"]);
+  const activeRuntimeTasks = runtimeTasks.filter((task) => activeTaskStates.has(task.state));
+  const taskStateTotals = runtimeTasks.reduce(
+    (acc, task) => {
+      acc[task.state] = (acc[task.state] || 0) + 1;
+      return acc;
+    },
+    {} as Record<string, number>,
+  );
+  const stopReasonRate = (reason: string): number => {
+    if (stopReasonTotal <= 0) return 0;
+    return (stopReasonDistribution[reason] || 0) / stopReasonTotal;
+  };
+
+  const stopReasonSLOs = [
+    {
+      key: "completed",
+      label: "Completed",
+      target: 0.9,
+      direction: "min" as const,
+      description: "Most queries should end cleanly.",
+    },
+    {
+      key: "rate_limited",
+      label: "Rate Limited",
+      target: 0.03,
+      direction: "max" as const,
+      description: "Dispatch throttling should remain rare.",
+    },
+    {
+      key: "max_iterations",
+      label: "Max Iterations",
+      target: 0.03,
+      direction: "max" as const,
+      description: "Runaway loops should be tightly bounded.",
+    },
+    {
+      key: "policy_denied",
+      label: "Policy Denied",
+      target: 0.08,
+      direction: "max" as const,
+      description: "Denied actions should stay controlled.",
+    },
+  ];
 
   return (
     <div className="flex-1 overflow-y-auto p-6 space-y-6">
@@ -133,6 +320,209 @@ export function ObservabilityDashboard({ onBack }: { onBack: () => void }) {
         </div>
       ) : (
         <>
+          {/* ── Runtime Approval Queue ───────────────────────────── */}
+          <div className="rounded-2xl border border-amber-200 bg-amber-50/40 p-5">
+            <div className="flex items-center gap-2 mb-3">
+              <ShieldAlert size={16} className="text-amber-600" />
+              <h3 className="text-sm font-semibold text-slate-800">
+                Runtime Approval Queue
+              </h3>
+              <span className="ml-auto text-[11px] rounded-full border border-amber-300 bg-amber-100 px-2 py-0.5 text-amber-700">
+                {pendingPermissions.length} pending
+              </span>
+            </div>
+
+            <div className="text-xs text-slate-600 mb-3">
+              Risky operations are blocked before execution and wait here for explicit approval.
+              {expiredCount > 0 ? ` ${expiredCount} request(s) expired since last refresh.` : ""}
+            </div>
+
+            {executorStatus && (
+              <div className="mb-3 grid grid-cols-2 md:grid-cols-5 gap-2 text-[11px]">
+                <div className="rounded-lg border border-slate-200 bg-white px-2.5 py-2">
+                  <div className="text-slate-500">Worker</div>
+                  <div className={`font-semibold ${executorStatus.running ? "text-emerald-600" : "text-slate-600"}`}>
+                    {executorStatus.running ? "running" : "stopped"}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-white px-2.5 py-2">
+                  <div className="text-slate-500">Approved</div>
+                  <div className="font-semibold text-slate-700">{executorStatus.summary.approved_total}</div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-white px-2.5 py-2">
+                  <div className="text-slate-500">Executing</div>
+                  <div className="font-semibold text-blue-700">{executorStatus.summary.running}</div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-white px-2.5 py-2">
+                  <div className="text-slate-500">Waiting Retry</div>
+                  <div className="font-semibold text-indigo-700">{executorStatus.summary.waiting_retry}</div>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-white px-2.5 py-2">
+                  <div className="text-slate-500">Failed</div>
+                  <div className="font-semibold text-red-700">{executorStatus.summary.failed}</div>
+                </div>
+              </div>
+            )}
+
+            {approvalMessage && (
+              <div className="mb-3 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs text-indigo-700">
+                {approvalMessage}
+              </div>
+            )}
+
+            {pendingPermissions.length === 0 ? (
+              <div className="rounded-xl border border-slate-200 bg-white px-3 py-3 text-xs text-slate-500">
+                No pending approval requests.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {pendingPermissions.map((request) => {
+                  const resolving = !!resolvingIds[request.permission_id];
+                  return (
+                    <div
+                      key={request.permission_id}
+                      className="rounded-xl border border-slate-200 bg-white px-3 py-3"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-xs font-semibold text-slate-800 break-all">
+                            {request.tool_name}
+                          </div>
+                          <div className="text-[11px] text-slate-500 mt-0.5 break-all">
+                            {request.reason}
+                          </div>
+                          <div className="text-[11px] text-slate-500 mt-0.5 break-all">
+                            {request.command_text}
+                          </div>
+                          <div className="text-[10px] text-slate-400 mt-1">
+                            ID: {request.permission_id} · Expires: {new Date(request.expires_at).toLocaleString()}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            onClick={() => handleResolvePermission(request.permission_id, true)}
+                            disabled={resolving}
+                            className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50"
+                          >
+                            {resolving ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
+                            Approve
+                          </button>
+                          <button
+                            onClick={() => handleResolvePermission(request.permission_id, false)}
+                            disabled={resolving}
+                            className="inline-flex items-center gap-1 rounded-lg border border-red-300 bg-red-50 px-2.5 py-1 text-[11px] font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
+                          >
+                            {resolving ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />}
+                            Deny
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* ── Runtime Task Lifecycle ─────────────────────────── */}
+          <div
+            data-testid="observability-runtime-task-panel"
+            className="rounded-2xl border border-indigo-200 bg-indigo-50/30 p-5"
+          >
+            <div className="flex items-center gap-2 mb-3">
+              <Activity size={16} className="text-indigo-600" />
+              <h3 className="text-sm font-semibold text-slate-800">Active Background Jobs</h3>
+              <div className="ml-auto flex items-center gap-2">
+                <span className={`text-[10px] rounded-full border px-2 py-0.5 font-semibold ${
+                  taskStreamConnected
+                    ? "border-emerald-300 bg-emerald-100 text-emerald-700"
+                    : "border-slate-300 bg-slate-100 text-slate-600"
+                }`} data-testid="observability-task-stream-status">
+                  {taskStreamConnected ? "LIVE" : "POLL"}
+                </span>
+                <span className="text-[11px] rounded-full border border-indigo-300 bg-indigo-100 px-2 py-0.5 text-indigo-700">
+                  {activeRuntimeTasks.length} active
+                </span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px] mb-3">
+              <div className="rounded-lg border border-slate-200 bg-white px-2.5 py-2">
+                <div className="text-slate-500">Queued</div>
+                <div className="font-semibold text-slate-700">{taskStateTotals.queued || 0}</div>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-white px-2.5 py-2">
+                <div className="text-slate-500">Running</div>
+                <div className="font-semibold text-blue-700">{taskStateTotals.running || 0}</div>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-white px-2.5 py-2">
+                <div className="text-slate-500">Waiting Approval</div>
+                <div className="font-semibold text-amber-700">{taskStateTotals.waiting_approval || 0}</div>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-white px-2.5 py-2">
+                <div className="text-slate-500">Blocked</div>
+                <div className="font-semibold text-violet-700">{taskStateTotals.blocked || 0}</div>
+              </div>
+            </div>
+
+            {runtimeTaskMessage && (
+              <div className="mb-3 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs text-indigo-700">
+                {runtimeTaskMessage}
+              </div>
+            )}
+
+            {activeRuntimeTasks.length === 0 ? (
+              <div className="rounded-xl border border-slate-200 bg-white px-3 py-3 text-xs text-slate-500">
+                No active background jobs.
+              </div>
+            ) : (
+              <div className="space-y-2 mb-3">
+                {activeRuntimeTasks.slice(0, 8).map((task) => {
+                  const cancelling = !!cancellingTaskIds[task.task_id];
+                  return (
+                    <div id={`runtime-task-${task.task_id}`} key={task.task_id} className="rounded-xl border border-slate-200 bg-white px-3 py-2.5">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-xs font-semibold text-slate-800 break-all">{task.task_id}</div>
+                          <div className="text-[11px] text-slate-500 mt-0.5 break-all">
+                            state={task.state} · parent={task.parent_task_id || "none"} · children={task.child_task_ids.length}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => handleCancelTask(task.task_id)}
+                          disabled={cancelling}
+                          className="inline-flex items-center gap-1 rounded-lg border border-red-300 bg-red-50 px-2.5 py-1 text-[11px] font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
+                        >
+                          {cancelling ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />}
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {taskNotifications.length > 0 && (
+              <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5">
+                <div className="text-[11px] font-semibold text-slate-700 mb-2">Recent Task State Notifications</div>
+                <div className="space-y-1.5">
+                  {taskNotifications.slice(0, 6).map((note) => (
+                    <div
+                      key={note.id}
+                      data-testid="observability-task-notification"
+                      className="text-[11px] text-slate-600 break-all"
+                    >
+                      <span className="font-medium text-slate-700">{note.taskId}</span>
+                      {` ${note.fromState} -> ${note.toState} `}
+                      <span className="text-slate-400">({new Date(note.timestamp).toLocaleTimeString()})</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* ── Aggregate Analytics Cards ──────────────────────────── */}
           {analytics && analytics.total_traces > 0 && (
             <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
@@ -166,6 +556,51 @@ export function ObservabilityDashboard({ onBack }: { onBack: () => void }) {
                 label="CRAG Active"
                 value={pct(analytics.crag_activation_rate)}
               />
+            </div>
+          )}
+
+          {/* ── Stop-Reason SLO Panel ───────────────────────────── */}
+          {analytics && analytics.total_traces > 0 && (
+            <div className="rounded-2xl border border-slate-300 bg-white p-5">
+              <h3 className="text-sm font-semibold text-slate-800 mb-4 flex items-center gap-2">
+                <Target size={16} className="text-indigo-500" />
+                Stop-Reason SLOs
+              </h3>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {stopReasonSLOs.map((slo) => {
+                  const rate = stopReasonRate(slo.key);
+                  const pass = sloPass(rate, slo.target, slo.direction);
+                  return (
+                    <div
+                      key={slo.key}
+                      className={`rounded-xl border px-3.5 py-3 ${pass ? "border-emerald-200 bg-emerald-50/50" : "border-red-200 bg-red-50/50"}`}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-xs font-semibold text-slate-800">{slo.label}</div>
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${pass ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"}`}
+                        >
+                          {pass ? "SLO pass" : "SLO miss"}
+                        </span>
+                      </div>
+                      <div className="mt-1 flex items-center justify-between text-[11px]">
+                        <span className="text-slate-500">Observed: {pct(rate)}</span>
+                        <span className="text-slate-500">
+                          Target: {slo.direction === "min" ? "≥" : "≤"} {pct(slo.target)}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-[11px] text-slate-500">{slo.description}</p>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-3 text-[11px] text-slate-600 flex flex-wrap gap-4">
+                <span>Avg loop iterations: {analytics.runtime_loop.avg_iterations.toFixed(2)}</span>
+                <span>Avg tool dispatches: {analytics.runtime_loop.avg_tool_calls.toFixed(2)}</span>
+                <span>Total stop-reason samples: {stopReasonTotal}</span>
+              </div>
             </div>
           )}
 
@@ -367,6 +802,7 @@ export function ObservabilityDashboard({ onBack }: { onBack: () => void }) {
                     key={`${trace.trace_id}-${idx}`}
                     trace={trace}
                     expanded={expandedTrace === trace.trace_id}
+                    onCancelTask={handleCancelTask}
                     onToggle={() =>
                       setExpandedTrace((prev) =>
                         prev === trace.trace_id ? null : trace.trace_id
@@ -476,10 +912,12 @@ function QualityGateCard({
 function TraceRow({
   trace,
   expanded,
+  onCancelTask,
   onToggle,
 }: {
   trace: PipelineTrace;
   expanded: boolean;
+  onCancelTask: (taskId: string) => void;
   onToggle: () => void;
 }) {
   const completedSteps = trace.steps?.filter((s) => s.status === "completed").length ?? 0;
@@ -491,6 +929,13 @@ function TraceRow({
       : (trace.final_confidence ?? 0) >= 0.4
         ? "text-amber-600"
         : "text-red-500";
+  const coordinatorTaskId =
+    trace.coordinator_task_id
+    || trace.subagent_spawn_records?.[0]?.parent_task_id
+    || "";
+  const coordinatorTaskApiPath = coordinatorTaskId
+    ? `/api/runtime/tasks/${encodeURIComponent(coordinatorTaskId)}`
+    : "";
 
   return (
     <div className="border border-slate-200 rounded-xl overflow-hidden hover:border-slate-300 transition-all">
@@ -643,6 +1088,90 @@ function TraceRow({
                 <p className="text-slate-500">
                   {trace.query_transform.total_variants} variants · {fmtMs(trace.query_transform.duration_ms ?? 0)}
                 </p>
+              </div>
+            </div>
+          )}
+
+          {/* Coordinator Plan + Sidechain */}
+          {((trace.coordinator_plan && Object.keys(trace.coordinator_plan).length > 0)
+            || Boolean(coordinatorTaskId)
+            || (trace.subagent_spawn_records && trace.subagent_spawn_records.length > 0)
+            || (trace.sidechain_transcript && trace.sidechain_transcript.length > 0)) && (
+            <div>
+              <h4 className="text-[11px] font-semibold text-slate-700 mb-2 flex items-center gap-1.5">
+                <GitBranch size={12} /> Coordinator &amp; Subagent Sidechain
+              </h4>
+              <div className="bg-white border border-slate-200 rounded-lg p-3 space-y-2">
+                {coordinatorTaskId ? (
+                  <div className="text-[11px] text-slate-600 break-all">
+                    <span className="font-medium text-slate-700">Coordinator Task:</span>{" "}
+                    <span className="font-mono text-slate-700">{coordinatorTaskId}</span>
+                    <a
+                      href={coordinatorTaskApiPath}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="ml-2 text-indigo-600 hover:text-indigo-700 underline"
+                    >
+                      view api
+                    </a>
+                    <button
+                      onClick={() => onCancelTask(coordinatorTaskId)}
+                      className="ml-2 rounded-md border border-red-300 bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold text-red-700 hover:bg-red-100"
+                    >
+                      cancel
+                    </button>
+                  </div>
+                ) : null}
+
+                {trace.coordinator_plan && Object.keys(trace.coordinator_plan).length > 0 && (
+                  <div className="text-[11px] text-slate-600">
+                    <span className="font-medium text-slate-700">Plan:</span>{" "}
+                    strategy={String(trace.coordinator_plan.strategy || "unknown")} ·
+                    primary={String(trace.coordinator_plan.primary_agent || "unknown")} ·
+                    subagents={String(trace.coordinator_plan.subagent_count || 0)}
+                  </div>
+                )}
+
+                {trace.subagent_spawn_records && trace.subagent_spawn_records.length > 0 && (
+                  <div>
+                    <div className="text-[11px] font-medium text-slate-700">Spawn Records</div>
+                    <div className="mt-1 space-y-1">
+                      {trace.subagent_spawn_records.slice(0, 6).map((record) => (
+                        <div key={record.task_id} className="text-[11px] text-slate-600 break-all">
+                          <a href={`#runtime-task-${record.task_id}`} className="font-mono text-indigo-600 hover:text-indigo-700 underline">
+                            {record.task_id}
+                          </a>
+                          {` · role=${record.role} · agent=${record.agent}`}
+                          <a
+                            href={`/api/runtime/tasks/${encodeURIComponent(record.task_id)}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="ml-2 text-indigo-600 hover:text-indigo-700 underline"
+                          >
+                            api
+                          </a>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {trace.sidechain_transcript && trace.sidechain_transcript.length > 0 && (
+                  <div>
+                    <div className="text-[11px] font-medium text-slate-700">Sidechain Transcript</div>
+                    <div className="mt-1 space-y-1">
+                      {trace.sidechain_transcript.slice(0, 8).map((event, idx) => (
+                        <div key={`${event.event}-${event.timestamp}-${idx}`} className="text-[11px] text-slate-600 break-all">
+                          {event.event}
+                          {event.agent ? ` · agent=${event.agent}` : ""}
+                          {event.task_id ? ` · task=${event.task_id}` : ""}
+                          {event.error ? ` · error=${event.error}` : ""}
+                          {event.timestamp ? ` · ${new Date(event.timestamp).toLocaleTimeString()}` : ""}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}

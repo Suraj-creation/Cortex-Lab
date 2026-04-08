@@ -8,6 +8,7 @@ Model: Jackrong/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled (local 4-bit)
 
 import os
 import sys
+import hashlib
 
 # Windows consoles often use cp1252; emoji in log lines would raise UnicodeEncodeError.
 if sys.platform == "win32":
@@ -25,7 +26,7 @@ import asyncio
 import uuid
 import traceback
 from datetime import datetime
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 from contextlib import asynccontextmanager
 
 try:
@@ -48,7 +49,7 @@ except ImportError:
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, Response
+from fastapi.responses import StreamingResponse, Response, JSONResponse
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field
@@ -57,6 +58,15 @@ from pydantic import BaseModel, Field
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.engine import rag_engine
 from src.prompts import PromptBuilder
+from src.runtime.approval_executor import ApprovalExecutionWorker
+from src.runtime.memory_personalization import (
+    build_ambient_terms,
+    build_memory_extraction_profile,
+    evaluate_personal_memory_quality,
+    is_context_dependent_query,
+    select_prompt_evidence,
+)
+from src.runtime.task_manager import RuntimeTaskManager
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -117,10 +127,213 @@ model = None
 tokenizer = None
 model_loaded = False
 model_info = {}
+_approval_execution_worker: Optional[ApprovalExecutionWorker] = None
+_runtime_task_manager = RuntimeTaskManager()
+rag_engine.set_runtime_task_manager(_runtime_task_manager)
+
+SUPPORTED_RUNTIME_MODES = ("cloud", "hybrid", "local_offline")
+SUPPORTED_LLM_PROVIDERS = ("local", "gemini", "gemma_local")
+SUPPORTED_VOICE_PROVIDERS = ("traditional", "gemini", "local")
+_LLM_PROVIDER_ALIAS_TO_BACKEND = {
+    "local": "local",
+    "gemini": "gemini",
+    "gemma_local": "local",
+}
+_VOICE_PROVIDER_ALIAS_TO_BACKEND = {
+    "traditional": "traditional",
+    "local": "local",
+    "gemini": "gemini",
+}
+
+_runtime_selection: Dict[str, Any] = {
+    "mode": "cloud",
+    "llm_provider": "local",
+    "stt_provider": "traditional",
+    "tts_provider": "traditional",
+    "allow_cloud_fallback": True,
+    "updated_at": datetime.utcnow().isoformat() + "Z",
+}
+
+_MODELPACK_MANIFEST_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..",
+    "infra",
+    "modelpacks",
+    "release-manifest.json",
+)
+_MODELPACK_DOCS_URL = (
+    "https://github.com/google-ai-edge/LiteRT-LM/blob/main/docs%2Fapi%2Fkotlin%2Fgetting_started.md"
+)
+
+
+def _default_modelpacks_manifest() -> Dict[str, Any]:
+    return {
+        "schema_version": "1.1",
+        "generated_at": _utc_now_iso(),
+        "signature_required": True,
+        "channels": ["stable", "candidate", "canary"],
+        "docs_url": _MODELPACK_DOCS_URL,
+        "source": "builtin-default",
+        "packs": [
+            {
+                "id": "gemma-4-e4b-it-litert-lm",
+                "display_name": "Gemma 4 E4B IT (LiteRT-LM)",
+                "version": "2026.04.0",
+                "target": "android-web",
+                "family": "gemma-4",
+                "quantization": "E4B",
+                "availability": "available",
+                "summary": "Higher-quality Gemma 4 local model for capable devices.",
+                "download_url": "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm",
+                "cta_label": "Download from Hugging Face",
+                "requires": ["litertlm-runtime", "gemma-runtime-bridge"],
+                "files": [],
+            },
+            {
+                "id": "gemma-4-e2b-it-litert-lm",
+                "display_name": "Gemma 4 E2B IT (LiteRT-LM)",
+                "version": "2026.04.0",
+                "target": "android-web",
+                "family": "gemma-4",
+                "quantization": "E2B",
+                "availability": "available",
+                "summary": "Lean Gemma 4 local model for faster installs and mid-range devices.",
+                "download_url": "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm",
+                "cta_label": "Download from Hugging Face",
+                "requires": ["litertlm-runtime", "gemma-runtime-bridge"],
+                "files": [],
+            },
+            {
+                "id": "gemma-3-5-ft-local",
+                "display_name": "Gemma 3.5 Fine-Tuned (Planned)",
+                "version": "planned",
+                "target": "android-web",
+                "family": "gemma-3.5",
+                "quantization": "tbd",
+                "availability": "coming_soon",
+                "summary": "Reserved slot for the upcoming fine-tuned local model.",
+                "cta_label": "Coming Soon",
+                "requires": ["litertlm-runtime", "finetuned-pack-release"],
+                "files": [],
+            },
+        ],
+    }
 
 # ── Concurrency & Timeout Guards (§9.1, §9.2) ───────────────────────────────
 _inference_semaphore = asyncio.Semaphore(2)  # Max 2 concurrent RAG/chat requests
 _REQUEST_TIMEOUT = 180.0  # Hard timeout in seconds for any LLM request
+
+
+def _extract_memory_id(metadata: Dict[str, Any]) -> str:
+    memory_id = str(metadata.get("memory_id", "")).strip()
+    if memory_id:
+        return memory_id
+
+    args = metadata.get("arguments")
+    if isinstance(args, dict):
+        memory_id = str(args.get("memory_id", "")).strip()
+        if memory_id:
+            return memory_id
+
+    return ""
+
+
+def _approval_worker_float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+        return value if value > 0 else default
+    except Exception:
+        return default
+
+
+def _approval_worker_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+        return value if value > 0 else default
+    except Exception:
+        return default
+
+
+def _build_approval_execution_handlers() -> Dict[str, Any]:
+    async def _execute_delete_memory(permission_request):
+        metadata = dict(permission_request.metadata or {})
+        memory_id = _extract_memory_id(metadata)
+        if not memory_id:
+            raise ValueError("approved delete_memory request missing memory_id")
+
+        success = rag_engine.delete_memory(memory_id)
+        return {
+            "status": "ok" if success else "not_found",
+            "memory_id": memory_id,
+        }
+
+    async def _execute_ingest_memory(permission_request):
+        metadata = dict(permission_request.metadata or {})
+        content = str(metadata.get("content", "")).strip()
+        if not content:
+            raise ValueError("approved ingest_memory request missing content")
+
+        source = str(metadata.get("source", "manual") or "manual")
+        session_id = str(metadata.get("session_id", "") or "")
+
+        memory = await rag_engine.ingest_memory(
+            content=content,
+            source=source,
+            session_id=session_id,
+        )
+        memory_id = ""
+        if isinstance(memory, dict):
+            memory_id = str(memory.get("id", ""))
+
+        return {
+            "status": "ok",
+            "memory_id": memory_id,
+            "source": source,
+        }
+
+    return {
+        "delete_memory": _execute_delete_memory,
+        "ingest_memory": _execute_ingest_memory,
+    }
+
+
+async def _start_approval_execution_worker() -> None:
+    global _approval_execution_worker
+
+    safe_runtime = getattr(rag_engine, "safe_tool_runtime", None)
+    if safe_runtime is None:
+        _approval_execution_worker = None
+        print("  ⚠ Approval execution worker disabled: safe runtime unavailable")
+        return
+
+    if _approval_execution_worker and _approval_execution_worker.is_running():
+        return
+
+    _approval_execution_worker = ApprovalExecutionWorker(
+        safe_tool_runtime=safe_runtime,
+        handlers=_build_approval_execution_handlers(),
+        poll_interval_seconds=_approval_worker_float_env("APPROVAL_WORKER_POLL_SECONDS", 2.0),
+        execution_timeout_seconds=_approval_worker_float_env("APPROVAL_WORKER_TIMEOUT_SECONDS", 60.0),
+        max_attempts=_approval_worker_int_env("APPROVAL_WORKER_MAX_ATTEMPTS", 2),
+    )
+    await _approval_execution_worker.start()
+    print("  ✓ Approval execution worker started")
+
+
+async def _stop_approval_execution_worker() -> None:
+    global _approval_execution_worker
+
+    if _approval_execution_worker is None:
+        return
+
+    await _approval_execution_worker.stop()
+    _approval_execution_worker = None
 
 # ── Lifespan – loads model once on startup ───────────────────────────────────
 
@@ -169,10 +382,16 @@ async def lifespan(app: FastAPI):
         if rag_engine.initialized and hasattr(rag_engine.llm, "set_provider"):
             rag_engine.llm.set_provider("gemini")
 
+        try:
+            await _start_approval_execution_worker()
+        except Exception as e:
+            print(f"  ⚠ Approval execution worker start failed: {e}")
+
         model_loaded = True  # Mark ready so health check returns "ok"
         print(f"\n  Server ready → http://{HOST}:{PORT}\n")
 
         yield
+        await _stop_approval_execution_worker()
         rag_engine.shutdown()
         return
 
@@ -275,9 +494,15 @@ async def lifespan(app: FastAPI):
         print(f"  ⚠ RAG Engine initialization error: {e}")
         print("  ⚠ RAG features will be unavailable, basic chat still works.")
 
+    try:
+        await _start_approval_execution_worker()
+    except Exception as e:
+        print(f"  ⚠ Approval execution worker start failed: {e}")
+
     yield  # ← app runs here
 
     # cleanup
+    await _stop_approval_execution_worker()
     rag_engine.shutdown()
     del model, tokenizer
     if torch.cuda.is_available():
@@ -387,7 +612,10 @@ class ChatRequest(BaseModel):
     top_p: float = Field(0.95, ge=0.0, le=1.0)
     max_tokens: int = Field(4096, ge=1, le=32768)
     stream: bool = False
-    llm_provider: str = Field("local", description="'local' for fine-tuned DeepSeek or 'gemini' for Gemini API")
+    llm_provider: str = Field(
+        "local",
+        description="'local'/'gemma_local' for on-device model or 'gemini' for Gemini API",
+    )
     thinking_mode: bool = Field(True, description="When True, stream <think> reasoning blocks; when False, suppress for faster responses")
 
 class ChatResponse(BaseModel):
@@ -413,8 +641,31 @@ class RAGChatRequest(BaseModel):
     stream: bool = False
     use_rag: bool = True  # Enable/disable RAG enhancement
     session_id: str = ""
-    llm_provider: str = Field("local", description="'local' for fine-tuned DeepSeek or 'gemini' for Gemini API")
+    llm_provider: str = Field(
+        "local",
+        description="'local'/'gemma_local' for on-device model or 'gemini' for Gemini API",
+    )
     thinking_mode: bool = Field(True, description="When True, stream <think> reasoning blocks; when False, suppress for faster responses")
+
+
+class RuntimeModeRequest(BaseModel):
+    mode: str = Field(
+        "cloud",
+        description="Runtime mode: cloud | hybrid | local_offline",
+    )
+    allow_cloud_fallback: Optional[bool] = True
+
+
+class RuntimeProvidersRequest(BaseModel):
+    llm_provider: Optional[str] = None
+    stt_provider: Optional[str] = None
+    tts_provider: Optional[str] = None
+    allow_cloud_fallback: Optional[bool] = None
+
+
+class ModelpackVerifyRequest(BaseModel):
+    file_path: str
+    expected_sha256: str = Field(..., min_length=64, max_length=64)
 
 class MemoryIngestRequest(BaseModel):
     content: str
@@ -424,6 +675,42 @@ class MemoryIngestRequest(BaseModel):
 class MemorySearchRequest(BaseModel):
     query: str
     top_k: int = 10
+
+
+class RuntimeToolOperationRequest(BaseModel):
+    request_id: str = ""
+    tool_name: str
+    command_text: str = ""
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PermissionResolveRequest(BaseModel):
+    approve: bool
+    actor: str = "operator"
+    note: str = ""
+
+
+class RuntimeTaskCreateRequest(BaseModel):
+    task_id: str = ""
+    parent_task_id: str = ""
+    permission_scope: Optional[List[str]] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RuntimeTaskCancelRequest(BaseModel):
+    reason: str = ""
+    propagate: bool = True
+
+
+class MemoryExtractionJobRequest(BaseModel):
+    limit: int = Field(500, ge=1, le=5000)
+    offset: int = Field(0, ge=0)
+    dry_run: bool = True
+
+
+class MemoryQualityEvaluateRequest(BaseModel):
+    queries: List[str] = Field(default_factory=list)
+    top_k: int = Field(5, ge=1, le=20)
 
 class ModelInfoResponse(BaseModel):
     """Detailed model information for the frontend."""
@@ -642,6 +929,14 @@ _SIMPLE_PERSONAL_FACT_TRIGGERS = [
     "where do i study", "my university", "my college", "my degree",
 ]
 
+_PERSONAL_QUALITY_DEFAULT_QUERIES = [
+    "What is my name?",
+    "What is my email?",
+    "What is my phone number?",
+    "Where do I study?",
+    "What projects have I built?",
+]
+
 
 def _is_personal_info_query(query: str) -> bool:
     q = (query or "").lower()
@@ -661,11 +956,74 @@ def _build_personal_augmented_query(query: str) -> str:
     return f"{_PERSONAL_QUERY_BASE} name email phone B.Tech"
 
 
+def _collect_ambient_terms() -> str:
+    """Collect compact ambient conversation terms for optional retrieval augmentation."""
+    try:
+        ambient = getattr(rag_engine, "ambient_service", None)
+        if not ambient or not getattr(ambient, "conversation", None):
+            return ""
+
+        current_turns = ambient.conversation.get_current_turns() or []
+        recent_conversations = ambient.conversation.get_conversations(limit=3, offset=0) or []
+        return build_ambient_terms(current_turns, recent_conversations)
+    except Exception:
+        return ""
+
+
+def _supplement_ambient_evidence(
+    user_message: str,
+    evidence: list,
+    search_fn=None,
+    min_score: float = 0.42,
+) -> list:
+    """Optionally augment evidence for context-dependent queries using ambient signals."""
+    if not is_context_dependent_query(user_message):
+        return evidence
+
+    ambient_terms = _collect_ambient_terms()
+    if not ambient_terms:
+        return evidence
+
+    search_fn = search_fn or rag_engine.search_memories
+    merged = list(evidence) if isinstance(evidence, list) else []
+    existing_previews = {
+        (item.get("content", "")[:80])
+        for item in merged
+        if isinstance(item, dict)
+    }
+
+    try:
+        supplements = search_fn(f"{user_message} {ambient_terms}".strip(), top_k=3) or []
+    except Exception:
+        return merged
+
+    for mem in supplements:
+        score = float(mem.get("score", 0) or 0)
+        content = (mem.get("content", "") or "").strip()
+        if not content or score <= min_score:
+            continue
+
+        preview = content[:80]
+        if preview in existing_previews:
+            continue
+
+        merged.insert(0, {
+            "content": content[:600],
+            "score": score,
+            "channel": "ambient_supplement",
+            "memory_type": mem.get("memory_type", "semantic"),
+        })
+        existing_previews.add(preview)
+
+    return merged
+
+
 def _supplement_personal_evidence(
     user_message: str,
     evidence: list,
     search_fn=None,
     min_score: float = 0.45,
+    ambient_terms: str = "",
 ) -> list:
     """Best-effort direct supplement for personal-info queries.
 
@@ -684,6 +1042,8 @@ def _supplement_personal_evidence(
 
     try:
         augmented_query = _build_personal_augmented_query(user_message)
+        if ambient_terms:
+            augmented_query = f"{augmented_query} {ambient_terms}"[:320]
         supplements = search_fn(augmented_query, top_k=3) or []
     except Exception:
         return merged
@@ -735,7 +1095,7 @@ def _answer_contains_extracted_fact(answer: str, extracted: str) -> bool:
     # Also capture direct email/phone values.
     for value in _re.findall(r'[\w.+-]+@[\w-]+\.[\w.]+', extracted or ""):
         tokens.append(value.strip().lower())
-    for value in _re.findall(r'\+?\d[\d\s-]{8,15}\d', extracted or ""):
+    for value in _re.findall(r'\+\d{1,3}[\s-]?\d[\d\s-]{8,14}\d', extracted or ""):
         tokens.append(value.strip().lower())
 
     # Deduplicate while preserving order.
@@ -754,8 +1114,15 @@ def _postprocess_non_stream_result(user_message: str, result: dict, search_fn=No
     if not isinstance(result, dict) or not _is_personal_info_query(user_message):
         return result
 
+    ambient_terms = _collect_ambient_terms()
     evidence = result.get("evidence", [])
-    evidence = _supplement_personal_evidence(user_message, evidence, search_fn=search_fn)
+    evidence = _supplement_personal_evidence(
+        user_message,
+        evidence,
+        search_fn=search_fn,
+        ambient_terms=ambient_terms,
+    )
+    evidence = _supplement_ambient_evidence(user_message, evidence, search_fn=search_fn)
     result["evidence"] = evidence
 
     evidence_texts = [
@@ -1114,21 +1481,153 @@ def _split_thinking(text: str):
 
 # ── LLM Provider Helpers ─────────────────────────────────────────────────────
 
+def _normalize_llm_provider(provider: str) -> str:
+    requested = str(provider or "local").strip().lower()
+    return _LLM_PROVIDER_ALIAS_TO_BACKEND.get(requested, requested)
+
+
+def _normalize_voice_provider(provider: str) -> str:
+    requested = str(provider or "traditional").strip().lower()
+    return _VOICE_PROVIDER_ALIAS_TO_BACKEND.get(requested, requested)
+
+
+def _llm_provider_availability() -> Dict[str, bool]:
+    local_available = (
+        rag_engine.initialized
+        and rag_engine.llm.local_llm is not None
+        and rag_engine.llm.local_llm.model is not None
+    )
+    gemini_available = (
+        rag_engine.initialized
+        and hasattr(rag_engine.llm, "has_gemini")
+        and rag_engine.llm.has_gemini
+    )
+    return {
+        "local": bool(local_available),
+        "gemma_local": bool(local_available),
+        "gemini": bool(gemini_available),
+    }
+
+
+def _runtime_provider_availability() -> Dict[str, Any]:
+    llm = _llm_provider_availability()
+    ambient = rag_engine.ambient_service if rag_engine.initialized else None
+
+    traditional_stt = bool(ambient is not None and ambient._traditional_stt is not None)
+    traditional_tts = bool(
+        ambient is not None
+        and ambient._traditional_tts is not None
+        and ambient._traditional_tts.is_available
+    )
+    gemini_stt = bool(ambient is not None and ambient._gemini_stt is not None)
+    gemini_tts = bool(ambient is not None and ambient._gemini_tts is not None)
+
+    return {
+        "llm": llm,
+        "stt": {
+            "traditional": traditional_stt,
+            "local": traditional_stt,
+            "gemini": gemini_stt,
+        },
+        "tts": {
+            "traditional": traditional_tts,
+            "local": traditional_tts,
+            "gemini": gemini_tts,
+        },
+        "ambient_available": ambient is not None,
+    }
+
+
+def _utc_now_iso() -> str:
+    return datetime.utcnow().isoformat() + "Z"
+
+
+def _runtime_selection_snapshot() -> Dict[str, Any]:
+    return {
+        "mode": _runtime_selection["mode"],
+        "llm_provider": _runtime_selection["llm_provider"],
+        "stt_provider": _runtime_selection["stt_provider"],
+        "tts_provider": _runtime_selection["tts_provider"],
+        "allow_cloud_fallback": bool(_runtime_selection["allow_cloud_fallback"]),
+        "updated_at": _runtime_selection["updated_at"],
+    }
+
+
+def _set_runtime_selection(
+    *,
+    mode: Optional[str] = None,
+    llm_provider: Optional[str] = None,
+    stt_provider: Optional[str] = None,
+    tts_provider: Optional[str] = None,
+    allow_cloud_fallback: Optional[bool] = None,
+) -> Dict[str, Any]:
+    if mode is not None:
+        _runtime_selection["mode"] = mode
+    if llm_provider is not None:
+        _runtime_selection["llm_provider"] = llm_provider
+    if stt_provider is not None:
+        _runtime_selection["stt_provider"] = stt_provider
+    if tts_provider is not None:
+        _runtime_selection["tts_provider"] = tts_provider
+    if allow_cloud_fallback is not None:
+        _runtime_selection["allow_cloud_fallback"] = bool(allow_cloud_fallback)
+    _runtime_selection["updated_at"] = _utc_now_iso()
+    return _runtime_selection_snapshot()
+
+
+def _apply_llm_provider_selection(provider: str) -> None:
+    requested = str(provider or "local").strip().lower()
+    if requested not in SUPPORTED_LLM_PROVIDERS:
+        raise HTTPException(400, f"Unsupported llm_provider '{requested}'")
+
+    availability = _llm_provider_availability()
+    if requested in ("local", "gemma_local") and not availability["local"]:
+        raise HTTPException(409, "Local LLM backend is unavailable for this provider selection.")
+    if requested == "gemini" and not availability["gemini"]:
+        raise HTTPException(409, "Gemini LLM backend is unavailable for this provider selection.")
+
+    if rag_engine.initialized and hasattr(rag_engine.llm, "set_provider"):
+        rag_engine.llm.set_provider(_normalize_llm_provider(requested))
+
+
+def _apply_voice_provider_selection(kind: str, provider: str) -> None:
+    requested = str(provider or "traditional").strip().lower()
+    if requested not in SUPPORTED_VOICE_PROVIDERS:
+        raise HTTPException(400, f"Unsupported {kind}_provider '{requested}'")
+
+    ambient = _get_ambient()
+    backend_provider = _normalize_voice_provider(requested)
+
+    if kind == "stt":
+        result = ambient.set_stt_provider(backend_provider)
+    elif kind == "tts":
+        result = ambient.set_tts_provider(backend_provider)
+    else:
+        raise HTTPException(500, f"Unknown voice provider kind '{kind}'")
+
+    if not result.get("success"):
+        raise HTTPException(409, result.get("error", f"Unable to set {kind}_provider"))
+
+
 def _set_request_provider(provider: str):
     """Set the LLM provider for this request. Raises ValueError if the
-    requested provider is genuinely unavailable (no silent fallback)."""
-    if rag_engine.initialized and hasattr(rag_engine.llm, "set_provider"):
-        local_available = (rag_engine.llm.local_llm is not None
-                           and rag_engine.llm.local_llm.model is not None)
-        gemini_available = rag_engine.llm.has_gemini
+    requested provider is unavailable (no silent fallback)."""
+    requested = str(provider or "local").strip().lower()
+    normalized = _normalize_llm_provider(requested)
 
-        if provider == "local" and not local_available:
+    if requested not in SUPPORTED_LLM_PROVIDERS:
+        raise ValueError("unsupported_provider")
+
+    if rag_engine.initialized and hasattr(rag_engine.llm, "set_provider"):
+        availability = _llm_provider_availability()
+
+        if requested in ("local", "gemma_local") and not availability["local"]:
             raise ValueError("local_unavailable")
 
-        if provider == "gemini" and not gemini_available:
+        if requested == "gemini" and not availability["gemini"]:
             raise ValueError("gemini_unavailable")
 
-        rag_engine.llm.set_provider(provider)
+        rag_engine.llm.set_provider(normalized)
 
 
 def _is_gemini_active() -> bool:
@@ -1139,6 +1638,15 @@ def _is_gemini_active() -> bool:
         and rag_engine.llm.provider == "gemini"
         and rag_engine.llm.has_gemini
     )
+
+
+def _effective_max_tokens(req, local_default: int = 8192) -> int:
+    """Apply token caps only for paid providers; local runtime uses full local budget."""
+    requested = int(getattr(req, "max_tokens", local_default) or local_default)
+    provider = str(getattr(req, "llm_provider", "local") or "local").lower()
+    if provider in ("local", "gemma_local"):
+        return local_default
+    return max(1, min(requested, local_default))
 
 
 async def _stream_gemini_generate(prompt: str, req):
@@ -1249,6 +1757,7 @@ async def health():
         model_info={
             **model_info,
             "llm_provider": rag_engine.llm.provider if rag_engine.initialized and hasattr(rag_engine.llm, "provider") else "local",
+            "runtime_llm_provider": _runtime_selection.get("llm_provider", "local"),
             "gemini_available": rag_engine.llm.has_gemini if rag_engine.initialized and hasattr(rag_engine.llm, "has_gemini") else False,
         },
     )
@@ -1284,50 +1793,291 @@ async def gpu_status():
 @app.get("/api/llm/provider")
 async def get_llm_provider():
     """Get current LLM provider and available providers."""
-    has_gemini = (
-        rag_engine.initialized
-        and hasattr(rag_engine, "llm")
-        and hasattr(rag_engine.llm, "has_gemini")
-        and rag_engine.llm.has_gemini
-    )
-    local_available = (
-        rag_engine.initialized
-        and rag_engine.llm.local_llm is not None
-        and rag_engine.llm.local_llm.model is not None
-    )
-    current = "local"
+    availability = _llm_provider_availability()
+    selected_provider = _runtime_selection.get("llm_provider", "local")
+    current_backend = "local"
     if rag_engine.initialized and hasattr(rag_engine.llm, "provider"):
-        current = rag_engine.llm.provider
-    available = []
-    if local_available:
-        available.append("local")
-    if has_gemini:
-        available.append("gemini")
+        current_backend = rag_engine.llm.provider
+
+    available = [
+        provider
+        for provider in SUPPORTED_LLM_PROVIDERS
+        if availability.get(provider, False)
+    ]
+
     return {
-        "provider": current,
+        "provider": selected_provider,
+        "active_backend": current_backend,
         "available": available,
-        "gemini_configured": has_gemini,
-        "local_model_loaded": local_available,
+        "gemini_configured": availability["gemini"],
+        "local_model_loaded": availability["local"],
     }
 
 
 @app.post("/api/llm/provider")
 async def set_llm_provider(body: dict):
-    """Switch the active LLM provider ('local' or 'gemini'). Strict isolation."""
-    provider = body.get("provider", "local")
-    if provider not in ("local", "gemini"):
-        raise HTTPException(400, "Provider must be 'local' or 'gemini'")
-    if provider == "gemini":
-        if not (rag_engine.initialized and rag_engine.llm.has_gemini):
-            raise HTTPException(400, "Gemini is not configured. Set GOOGLE_API_KEY in backend/.env")
-    if provider == "local":
-        local_available = (rag_engine.initialized
-                           and rag_engine.llm.local_llm is not None
-                           and rag_engine.llm.local_llm.model is not None)
-        if not local_available:
-            raise HTTPException(400, "Local model is not loaded. Start with SKIP_LOCAL_MODEL=false or load the model first.")
-    rag_engine.llm.set_provider(provider)
-    return {"provider": provider, "status": "switched"}
+    """Switch the active LLM provider (local | gemini | gemma_local)."""
+    provider = str(body.get("provider", "local") or "local").strip().lower()
+    _apply_llm_provider_selection(provider)
+    selection = _set_runtime_selection(llm_provider=provider)
+    return {
+        "provider": selection["llm_provider"],
+        "active_backend": _normalize_llm_provider(selection["llm_provider"]),
+        "status": "switched",
+    }
+
+
+@app.get("/api/runtime/mode")
+async def get_runtime_mode():
+    """Get runtime execution mode and fallback policy."""
+    return {
+        **_runtime_selection_snapshot(),
+        "supported_modes": list(SUPPORTED_RUNTIME_MODES),
+    }
+
+
+@app.post("/api/runtime/mode")
+async def set_runtime_mode(req: RuntimeModeRequest):
+    """Set runtime mode (cloud | hybrid | local_offline)."""
+    mode = str(req.mode or "cloud").strip().lower()
+    if mode not in SUPPORTED_RUNTIME_MODES:
+        raise HTTPException(400, f"Unsupported runtime mode '{mode}'")
+
+    allow_cloud_fallback = (
+        bool(req.allow_cloud_fallback)
+        if req.allow_cloud_fallback is not None
+        else bool(_runtime_selection["allow_cloud_fallback"])
+    )
+
+    if mode == "local_offline":
+        allow_cloud_fallback = False
+        availability = _runtime_provider_availability()
+        if not availability["llm"]["local"]:
+            raise HTTPException(
+                409,
+                "local_offline mode requires a local LLM backend (local/gemma_local).",
+            )
+
+        if _runtime_selection["llm_provider"] == "gemini":
+            _apply_llm_provider_selection("gemma_local")
+            _runtime_selection["llm_provider"] = "gemma_local"
+
+        if not availability["ambient_available"]:
+            _runtime_selection["stt_provider"] = "local"
+            _runtime_selection["tts_provider"] = "local"
+
+        if availability["ambient_available"]:
+            if _runtime_selection["stt_provider"] == "traditional" and availability["stt"]["local"]:
+                _apply_voice_provider_selection("stt", "local")
+                _runtime_selection["stt_provider"] = "local"
+
+            if _runtime_selection["tts_provider"] == "traditional" and availability["tts"]["local"]:
+                _apply_voice_provider_selection("tts", "local")
+                _runtime_selection["tts_provider"] = "local"
+
+            if _runtime_selection["stt_provider"] == "gemini":
+                if not availability["stt"]["local"]:
+                    raise HTTPException(409, "local_offline mode requires local STT availability.")
+                _apply_voice_provider_selection("stt", "local")
+                _runtime_selection["stt_provider"] = "local"
+
+            if _runtime_selection["tts_provider"] == "gemini":
+                if not availability["tts"]["local"]:
+                    raise HTTPException(409, "local_offline mode requires local TTS availability.")
+                _apply_voice_provider_selection("tts", "local")
+                _runtime_selection["tts_provider"] = "local"
+
+    selection = _set_runtime_selection(
+        mode=mode,
+        allow_cloud_fallback=allow_cloud_fallback,
+    )
+    return {
+        **selection,
+        "supported_modes": list(SUPPORTED_RUNTIME_MODES),
+    }
+
+
+@app.get("/api/runtime/providers")
+async def get_runtime_providers():
+    """Get runtime provider selection and availability matrix."""
+    availability = _runtime_provider_availability()
+    available = {
+        "llm": [p for p in SUPPORTED_LLM_PROVIDERS if availability["llm"].get(p, False)],
+        "stt": [p for p in SUPPORTED_VOICE_PROVIDERS if availability["stt"].get(p, False)],
+        "tts": [p for p in SUPPORTED_VOICE_PROVIDERS if availability["tts"].get(p, False)],
+    }
+
+    return {
+        "selection": _runtime_selection_snapshot(),
+        "available": available,
+        "availability": availability,
+        "supported": {
+            "llm": list(SUPPORTED_LLM_PROVIDERS),
+            "stt": list(SUPPORTED_VOICE_PROVIDERS),
+            "tts": list(SUPPORTED_VOICE_PROVIDERS),
+        },
+    }
+
+
+@app.post("/api/runtime/providers")
+async def set_runtime_providers(req: RuntimeProvidersRequest):
+    """Set runtime provider selection with mode-aware fallback policy."""
+    mode = _runtime_selection["mode"]
+    stt_requested = req.stt_provider is not None
+    tts_requested = req.tts_provider is not None
+    allow_cloud_fallback = (
+        bool(req.allow_cloud_fallback)
+        if req.allow_cloud_fallback is not None
+        else bool(_runtime_selection["allow_cloud_fallback"])
+    )
+
+    if mode == "local_offline":
+        allow_cloud_fallback = False
+
+    next_llm = str(req.llm_provider or _runtime_selection["llm_provider"]).strip().lower()
+    next_stt = str(req.stt_provider or _runtime_selection["stt_provider"]).strip().lower()
+    next_tts = str(req.tts_provider or _runtime_selection["tts_provider"]).strip().lower()
+
+    if next_llm not in SUPPORTED_LLM_PROVIDERS:
+        raise HTTPException(400, f"Unsupported llm_provider '{next_llm}'")
+    if next_stt not in SUPPORTED_VOICE_PROVIDERS:
+        raise HTTPException(400, f"Unsupported stt_provider '{next_stt}'")
+    if next_tts not in SUPPORTED_VOICE_PROVIDERS:
+        raise HTTPException(400, f"Unsupported tts_provider '{next_tts}'")
+
+    if mode == "local_offline":
+        if next_llm == "gemini":
+            raise HTTPException(409, "local_offline mode cannot use Gemini LLM provider.")
+        if next_stt == "gemini":
+            raise HTTPException(409, "local_offline mode cannot use Gemini STT provider.")
+        if next_tts == "gemini":
+            raise HTTPException(409, "local_offline mode cannot use Gemini TTS provider.")
+
+    availability = _runtime_provider_availability()
+    fallback_applied: List[Dict[str, str]] = []
+
+    if not availability["llm"].get(next_llm, False):
+        if mode == "hybrid" and allow_cloud_fallback and next_llm in ("local", "gemma_local") and availability["llm"]["gemini"]:
+            fallback_applied.append({"target": "llm_provider", "from": next_llm, "to": "gemini"})
+            next_llm = "gemini"
+        else:
+            raise HTTPException(409, f"Requested LLM provider '{next_llm}' is unavailable.")
+
+    if stt_requested or mode == "local_offline":
+        if not availability["stt"].get(next_stt, False):
+            if mode == "hybrid" and allow_cloud_fallback and next_stt in ("traditional", "local") and availability["stt"]["gemini"]:
+                fallback_applied.append({"target": "stt_provider", "from": next_stt, "to": "gemini"})
+                next_stt = "gemini"
+            else:
+                raise HTTPException(409, f"Requested STT provider '{next_stt}' is unavailable.")
+
+    if tts_requested or mode == "local_offline":
+        if not availability["tts"].get(next_tts, False):
+            if mode == "hybrid" and allow_cloud_fallback and next_tts in ("traditional", "local") and availability["tts"]["gemini"]:
+                fallback_applied.append({"target": "tts_provider", "from": next_tts, "to": "gemini"})
+                next_tts = "gemini"
+            else:
+                raise HTTPException(409, f"Requested TTS provider '{next_tts}' is unavailable.")
+
+    _apply_llm_provider_selection(next_llm)
+
+    if stt_requested:
+        _apply_voice_provider_selection("stt", next_stt)
+    if tts_requested:
+        _apply_voice_provider_selection("tts", next_tts)
+
+    selection = _set_runtime_selection(
+        llm_provider=next_llm,
+        stt_provider=next_stt if stt_requested else None,
+        tts_provider=next_tts if tts_requested else None,
+        allow_cloud_fallback=allow_cloud_fallback,
+    )
+
+    return {
+        "selection": selection,
+        "fallback_applied": fallback_applied,
+    }
+
+
+@app.get("/api/runtime/health")
+async def get_runtime_health():
+    """Runtime mode/provider health snapshot for orchestration surfaces."""
+    availability = _runtime_provider_availability()
+    task_snapshot = _runtime_task_manager.to_dict()
+    return {
+        "status": "ok",
+        "selection": _runtime_selection_snapshot(),
+        "provider_availability": availability,
+        "active_llm_backend": (
+            rag_engine.llm.provider
+            if rag_engine.initialized and hasattr(rag_engine.llm, "provider")
+            else "local"
+        ),
+        "model_loaded": model_loaded,
+        "runtime_tasks": task_snapshot.get("summary", {}),
+        "timestamp": _utc_now_iso(),
+    }
+
+
+@app.get("/api/modelpacks/manifest")
+async def get_modelpacks_manifest():
+    """Return model pack manifest with robust defaults for settings downloads."""
+    manifest = _default_modelpacks_manifest()
+    source = "builtin-default"
+
+    if os.path.exists(_MODELPACK_MANIFEST_PATH):
+        with open(_MODELPACK_MANIFEST_PATH, "r", encoding="utf-8") as handle:
+            from_file = json.load(handle)
+
+        if isinstance(from_file, dict):
+            source = "infra/modelpacks/release-manifest.json"
+            if isinstance(from_file.get("schema_version"), str):
+                manifest["schema_version"] = from_file["schema_version"]
+            if isinstance(from_file.get("generated_at"), str):
+                manifest["generated_at"] = from_file["generated_at"]
+            if isinstance(from_file.get("signature_required"), bool):
+                manifest["signature_required"] = from_file["signature_required"]
+            if isinstance(from_file.get("channels"), list):
+                manifest["channels"] = from_file["channels"]
+            if isinstance(from_file.get("docs_url"), str) and from_file["docs_url"].strip():
+                manifest["docs_url"] = from_file["docs_url"].strip()
+
+            packs = from_file.get("packs")
+            if isinstance(packs, list) and packs:
+                manifest["packs"] = packs
+
+    manifest["source"] = source
+    return manifest
+
+
+@app.post("/api/modelpacks/verify")
+async def verify_modelpack(req: ModelpackVerifyRequest):
+    """Verify a model-pack artifact with SHA-256 digest checking."""
+    file_path = os.path.abspath(os.path.expanduser(req.file_path))
+    if not os.path.exists(file_path):
+        raise HTTPException(404, f"Modelpack file not found: {file_path}")
+    if not os.path.isfile(file_path):
+        raise HTTPException(400, f"Modelpack path must be a file: {file_path}")
+
+    digest = hashlib.sha256()
+    with open(file_path, "rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+
+    actual = digest.hexdigest().lower()
+    expected = req.expected_sha256.lower()
+
+    return {
+        "verified": actual == expected,
+        "algorithm": "sha256",
+        "file_path": file_path,
+        "file_size_bytes": os.path.getsize(file_path),
+        "expected_sha256": expected,
+        "actual_sha256": actual,
+    }
 
 
 @app.post("/api/chat")
@@ -1336,6 +2086,11 @@ async def chat(req: ChatRequest):
     try:
         _set_request_provider(req.llm_provider)
     except ValueError as e:
+        if "unsupported_provider" in str(e):
+            raise HTTPException(
+                400,
+                f"Unsupported LLM provider '{req.llm_provider}'. Supported providers: {', '.join(SUPPORTED_LLM_PROVIDERS)}",
+            )
         if "local_unavailable" in str(e):
             raise HTTPException(
                 503,
@@ -1410,7 +2165,7 @@ async def chat(req: ChatRequest):
     with torch.no_grad():
         out = model.generate(
             **inputs,
-            max_new_tokens=min(req.max_tokens, 8192),
+            max_new_tokens=_effective_max_tokens(req),
             temperature=max(req.temperature, 0.01),
             top_p=req.top_p,
             do_sample=req.temperature > 0,
@@ -1470,7 +2225,7 @@ async def _stream_generate(prompt: str, req: ChatRequest):
 
     gen_kwargs = {
         **inputs,
-        "max_new_tokens": min(req.max_tokens, 8192),
+        "max_new_tokens": _effective_max_tokens(req),
         "temperature": max(req.temperature, 0.01),
         "top_p": req.top_p,
         "do_sample": req.temperature > 0,
@@ -1580,6 +2335,11 @@ async def rag_chat(req: RAGChatRequest):
     try:
         _set_request_provider(req.llm_provider)
     except ValueError as e:
+        if "unsupported_provider" in str(e):
+            raise HTTPException(
+                400,
+                f"Unsupported LLM provider '{req.llm_provider}'. Supported providers: {', '.join(SUPPORTED_LLM_PROVIDERS)}",
+            )
         if "local_unavailable" in str(e):
             raise HTTPException(
                 503,
@@ -1618,6 +2378,7 @@ async def rag_chat(req: RAGChatRequest):
 
             # Store trace for observability history
             _store_trace(result.get("pipeline_trace"))
+            runtime_tasks = _build_runtime_task_refs(result.get("pipeline_trace"))
 
             return {
                 "id": f"rag-{uuid.uuid4().hex[:12]}",
@@ -1632,6 +2393,7 @@ async def rag_chat(req: RAGChatRequest):
                 "processing_time_ms": result.get("processing_time_ms", 0),
                 "cache_hit": result.get("cache_hit", False),
                 "pipeline_trace": result.get("pipeline_trace", None),
+                "runtime_tasks": runtime_tasks,
             }
         except asyncio.TimeoutError:
             raise HTTPException(504, "Request timed out after 180 seconds")
@@ -1662,92 +2424,41 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
         confidence = rag_result.get("confidence", 0)
         query_analysis = rag_result.get("query_analysis", {})
         thinking = rag_result.get("thinking", "")
+        runtime_tasks = _build_runtime_task_refs(rag_result.get("pipeline_trace"))
 
-        # Send metadata first
-        meta_chunk = {
-            "id": msg_id,
-            "delta": "",
-            "rag_meta": {
-                "evidence": evidence,
-                "agents_used": agents_used,
-                "confidence": confidence,
-                "query_analysis": query_analysis,
-                "thinking": thinking,
-                "pipeline_trace": rag_result.get("pipeline_trace", None),
-            }
-        }
-        yield f"data: {json.dumps(meta_chunk)}\n\n"
-
-        # Store trace for observability history
-        _store_trace(rag_result.get("pipeline_trace"))
+        # Metadata chunk is emitted after prompt-evidence shaping so it can
+        # include memory budget and quality instrumentation.
 
         # Step 2: Build prompt with evidence context for streaming generation
 
-        # Supplement personal-info evidence with direct semantic search to
-        # recover high-signal resume facts that fusion may downrank.
-        evidence = _supplement_personal_evidence(user_message, evidence)
-
-        # PageIndex evidence gets priority — document content should always appear
-        # when the user is asking about uploaded documents
-        evidence_texts = []
-        has_pageindex_evidence = False
-        pageindex_evidence_count = 0
-
-        # ── Query-adaptive evidence limits ──
-        # Complex/synthesis queries need more context for comprehensive answers.
-        # For local 9B model, limit evidence to avoid extremely slow generation.
         _query_complexity = query_analysis.get("complexity", 0.5) if isinstance(query_analysis, dict) else 0.5
         _query_intent = query_analysis.get("intent", "") if isinstance(query_analysis, dict) else ""
         _is_synthesis = _query_complexity >= 0.6 or _query_intent in ("reflective", "comparative", "causal")
         _is_local_model = not _is_gemini_active()
-        if _is_local_model:
-            # Local 9B model: keep evidence compact for faster generation
-            _max_evidence_chars = 600 if _is_synthesis else 350
-            _max_evidence_items = 7 if _is_synthesis else 5
-        else:
-            _max_evidence_chars = 1500 if _is_synthesis else 500
-            _max_evidence_items = 12 if _is_synthesis else 7
 
-        # First pass: collect PageIndex evidence (from uploaded documents)
-        for e in evidence[:20]:
-            channel = e.get("channel", "")
-            if "pageindex" in channel:
-                content = e.get("content", "").strip()
-                if len(content) >= 20:
-                    evidence_texts.append(content[:2000])  # Full doc answer
-                    has_pageindex_evidence = True
-                    pageindex_evidence_count += 1
-                    if pageindex_evidence_count >= 3:  # Max 3 PageIndex chunks
-                        break
+        ambient_terms = _collect_ambient_terms()
 
-        # Second pass: fill remaining slots with local memory evidence
-        for e in evidence[:16]:
-            channel = e.get("channel", "")
-            if "pageindex" in channel:
-                continue  # Already handled above
-            content = e.get("content", "").strip()
-            lower = content.lower()
-            # Skip short question-like evidence
-            if len(content) < 50:
-                continue
-            if (lower.endswith("?") and len(content) < 120
-                    and not any(k in lower for k in ["[source:", "**", "project", "built"])):
-                continue
-            # Skip repetitive/spam content
-            words = lower.split()
-            if len(words) > 10:
-                trigrams = [' '.join(words[i:i+3]) for i in range(len(words)-2)]
-                from collections import Counter
-                trigram_counts = Counter(trigrams)
-                if trigram_counts and max(trigram_counts.values()) > 3:
-                    continue
-            # Skip stored user queries (but allow long source docs)
-            if re.match(r'^(tell me|what is|what are|who is|where is|how is|list|describe|explain)\b', lower):
-                if len(content) < 200 and "[source:" not in lower:
-                    continue
-            evidence_texts.append(content[:_max_evidence_chars])
-            if len(evidence_texts) >= _max_evidence_items:
-                break
+        # Personal and ambient supplements run before bounded evidence shaping.
+        evidence = _supplement_personal_evidence(
+            user_message,
+            evidence,
+            ambient_terms=ambient_terms,
+        )
+        evidence = _supplement_ambient_evidence(user_message, evidence)
+
+        prompt_selection = select_prompt_evidence(
+            evidence,
+            query_analysis=query_analysis if isinstance(query_analysis, dict) else {},
+            is_local_model=_is_local_model,
+        )
+        evidence_texts = prompt_selection.get("texts", [])
+        has_pageindex_evidence = bool(prompt_selection.get("has_pageindex_evidence", False))
+        pageindex_evidence_count = int(prompt_selection.get("pageindex_evidence_count", 0) or 0)
+        prompt_metrics = dict(prompt_selection.get("metrics", {}))
+
+        if ambient_terms:
+            prompt_metrics["ambient_terms_used"] = ambient_terms
+
         evidence_block = "\n".join(f"[{i+1}] {e}" for i, e in enumerate(evidence_texts))
 
         # Check if evidence is actually meaningful (not just greetings)
@@ -1809,6 +2520,48 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
                 for e in evidence_texts
             )
             evidence_block = "\n".join(f"[{i+1}] {e}" for i, e in enumerate(evidence_texts))
+
+        # Personal-context quality instrumentation for Phase 4 memory evaluation.
+        personal_quality = None
+        if _is_personal_info_query(user_message):
+            extracted = _try_extract_factual(user_message, evidence_texts)
+            personal_quality = evaluate_personal_memory_quality(
+                query=user_message,
+                evidence_texts=evidence_texts,
+                extracted_answer=extracted,
+            )
+            personal_quality["source"] = "live_stream"
+            _store_memory_quality_snapshot(personal_quality)
+
+        # Attach memory prompt and quality metrics into trace generation details.
+        trace_payload = rag_result.get("pipeline_trace")
+        if isinstance(trace_payload, dict):
+            generation_details = trace_payload.setdefault("generation_details", {})
+            generation_details["memory_prompt"] = prompt_metrics
+            if personal_quality:
+                generation_details["personal_memory_quality"] = personal_quality
+            rag_result["pipeline_trace"] = trace_payload
+
+        # Send metadata after prompt shaping so diagnostics are included.
+        meta_chunk = {
+            "id": msg_id,
+            "delta": "",
+            "rag_meta": {
+                "evidence": evidence,
+                "agents_used": agents_used,
+                "confidence": confidence,
+                "query_analysis": query_analysis,
+                "thinking": thinking,
+                "pipeline_trace": rag_result.get("pipeline_trace", None),
+                "runtime_tasks": runtime_tasks,
+                "memory_prompt": prompt_metrics,
+                "personal_memory_quality": personal_quality,
+            },
+        }
+        yield f"data: {json.dumps(meta_chunk)}\n\n"
+
+        # Store trace for observability history
+        _store_trace(rag_result.get("pipeline_trace"))
 
         # ── Pre-generation: Check for false premises / no-data queries ──
         no_info_response = _check_no_info_streaming(user_message, evidence_texts)
@@ -1879,7 +2632,7 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
 
         gen_kwargs = {
             **inputs,
-            "max_new_tokens": min(req.max_tokens, 8192),
+            "max_new_tokens": _effective_max_tokens(req),
             "temperature": max(req.temperature, 0.01),
             "top_p": req.top_p,
             "do_sample": req.temperature > 0,
@@ -2047,6 +2800,42 @@ async def ingest_memory(req: MemoryIngestRequest):
     """Manually ingest a memory into the RAG system."""
     if not rag_engine.initialized:
         raise HTTPException(503, "RAG engine not ready.")
+
+    request_id = f"ingest-{uuid.uuid4().hex[:12]}"
+    try:
+        evaluation = rag_engine.evaluate_tool_operation(
+            request_id=request_id,
+            tool_name="ingest_memory",
+            command_text=req.content[:300],
+            metadata={
+                "content": req.content,
+                "source": req.source,
+                "session_id": req.session_id,
+                "entrypoint": "api.memories.ingest",
+            },
+        )
+    except RuntimeError as e:
+        if "safe_tool_runtime_unavailable" in str(e):
+            raise HTTPException(503, "Safe tool runtime is not available.")
+        raise
+
+    effect = ((evaluation.get("decision") or {}).get("effect") or "").lower()
+    if effect == "deny":
+        reason = ((evaluation.get("decision") or {}).get("reason") or "Blocked by policy")
+        raise HTTPException(403, reason)
+
+    if effect == "require_approval":
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "pending_approval",
+                "request_id": request_id,
+                "decision": evaluation.get("decision", {}),
+                "permission_request": evaluation.get("permission_request"),
+                "next": "Approve via /api/runtime/safety/permissions/{permission_id}/resolve. The approval worker executes approved requests automatically.",
+            },
+        )
+
     try:
         result = await rag_engine.ingest_memory(
             content=req.content, source=req.source, session_id=req.session_id
@@ -2101,10 +2890,100 @@ async def purge_chat_query_memories():
 
 
 @app.delete("/api/memories/{memory_id}")
-async def delete_memory(memory_id: str):
-    """Delete a memory."""
+async def delete_memory(memory_id: str, permission_id: str = ""):
+    """Delete a memory with SafeToolRuntime approval enforcement."""
     if not rag_engine.initialized:
         raise HTTPException(503, "RAG engine not ready.")
+
+    if permission_id:
+        try:
+            permission = rag_engine.get_permission_request(permission_id)
+        except RuntimeError as e:
+            if "safe_tool_runtime_unavailable" in str(e):
+                raise HTTPException(503, "Safe tool runtime is not available.")
+            raise
+
+        if not permission:
+            raise HTTPException(404, f"Permission request not found: {permission_id}")
+        if permission.get("tool_name") != "delete_memory":
+            raise HTTPException(400, "Permission is not valid for delete_memory")
+        if permission.get("status") != "approved":
+            raise HTTPException(409, "Permission request is not approved")
+
+        expected_memory = str((permission.get("metadata") or {}).get("memory_id", "")).strip()
+        if expected_memory and expected_memory != memory_id:
+            raise HTTPException(400, "Permission request does not match memory_id")
+
+        execution = (permission.get("metadata") or {}).get("_execution")
+        execution_status = ""
+        if isinstance(execution, dict):
+            execution_status = str(execution.get("status", "")).strip().lower()
+
+        if execution_status == "completed":
+            result = execution.get("result") if isinstance(execution, dict) else {}
+            result_status = "ok"
+            if isinstance(result, dict) and str(result.get("status", "")).lower() == "not_found":
+                result_status = "not_found"
+            return {
+                "status": result_status,
+                "approved_execution": True,
+                "permission_id": permission_id,
+                "already_executed": True,
+            }
+
+        if execution_status == "running":
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "status": "pending_execution",
+                    "permission_id": permission_id,
+                    "next": "Approved operation is executing in the background worker.",
+                },
+            )
+
+        if execution_status == "failed":
+            raise HTTPException(409, "Approved execution failed in background worker; inspect runtime safety audit.")
+
+        success = rag_engine.delete_memory(memory_id)
+        return {
+            "status": "ok" if success else "not_found",
+            "approved_execution": True,
+            "permission_id": permission_id,
+        }
+
+    request_id = f"delete-{memory_id}-{uuid.uuid4().hex[:8]}"
+    try:
+        evaluation = rag_engine.evaluate_tool_operation(
+            request_id=request_id,
+            tool_name="delete_memory",
+            command_text=f"memory_id={memory_id}",
+            metadata={
+                "memory_id": memory_id,
+                "entrypoint": "api.memories.delete",
+            },
+        )
+    except RuntimeError as e:
+        if "safe_tool_runtime_unavailable" in str(e):
+            raise HTTPException(503, "Safe tool runtime is not available.")
+        raise
+
+    effect = ((evaluation.get("decision") or {}).get("effect") or "").lower()
+    if effect == "deny":
+        reason = ((evaluation.get("decision") or {}).get("reason") or "Blocked by policy")
+        raise HTTPException(403, reason)
+
+    if effect == "require_approval":
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "pending_approval",
+                "request_id": request_id,
+                "decision": evaluation.get("decision", {}),
+                "permission_request": evaluation.get("permission_request"),
+                "next": "Approve via /api/runtime/safety/permissions/{permission_id}/resolve. The approval worker executes approved deletes automatically.",
+            },
+        )
+
     success = rag_engine.delete_memory(memory_id)
     return {"status": "ok" if success else "not_found"}
 
@@ -2156,6 +3035,107 @@ async def consolidate_memories(body: dict = None):
     return {"status": "ok", "memories_consolidated": count}
 
 
+@app.post("/api/runtime/memory-extraction/jobs")
+async def create_memory_extraction_job(req: MemoryExtractionJobRequest):
+    """Create a bounded background job to extract compact memory profiles."""
+    if not rag_engine.initialized:
+        raise HTTPException(503, "RAG engine not ready.")
+
+    job_id = f"memext-{uuid.uuid4().hex[:10]}"
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "created_at": datetime.now().isoformat(),
+        "finished_at": None,
+        "limit": req.limit,
+        "offset": req.offset,
+        "dry_run": req.dry_run,
+        "total": 0,
+        "processed": 0,
+        "updated": 0,
+        "failures": 0,
+        "duration_ms": 0.0,
+        "error": "",
+    }
+    _memory_extraction_jobs[job_id] = job
+
+    # Keep registry bounded to avoid unbounded in-memory growth.
+    if len(_memory_extraction_jobs) > 200:
+        ordered = sorted(
+            _memory_extraction_jobs.items(),
+            key=lambda item: item[1].get("created_at", ""),
+        )
+        for stale_id, _stale_job in ordered[: max(len(_memory_extraction_jobs) - 200, 0)]:
+            _memory_extraction_jobs.pop(stale_id, None)
+
+    asyncio.create_task(
+        _run_memory_extraction_job(
+            job_id,
+            limit=req.limit,
+            offset=req.offset,
+            dry_run=req.dry_run,
+        )
+    )
+
+    return JSONResponse(status_code=202, content=job)
+
+
+@app.get("/api/runtime/memory-extraction/jobs")
+async def list_memory_extraction_jobs(limit: int = Query(20, ge=1, le=200)):
+    """List recent memory extraction jobs."""
+    jobs = list(_memory_extraction_jobs.values())
+    jobs.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+    return {
+        "count": len(jobs),
+        "jobs": jobs[:limit],
+    }
+
+
+@app.get("/api/runtime/memory-extraction/jobs/{job_id}")
+async def get_memory_extraction_job(job_id: str):
+    """Get memory extraction job status by ID."""
+    job = _memory_extraction_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, f"Memory extraction job not found: {job_id}")
+    return job
+
+
+@app.post("/api/runtime/memory-quality/evaluate")
+async def evaluate_memory_quality(req: MemoryQualityEvaluateRequest):
+    """Evaluate personal-context memory precision/recall-style quality metrics."""
+    if not rag_engine.initialized:
+        raise HTTPException(503, "RAG engine not ready.")
+
+    queries = [q for q in req.queries if q and q.strip()]
+    if not queries:
+        queries = list(_PERSONAL_QUALITY_DEFAULT_QUERIES)
+
+    report = _evaluate_memory_quality_batch(queries=queries, top_k=req.top_k)
+    report["top_k"] = req.top_k
+    _store_memory_quality_snapshot(
+        {
+            "source": "manual_eval",
+            "top_k": req.top_k,
+            "avg_precision_at_k": report.get("avg_precision_at_k", 0.0),
+            "recall_proxy_rate": report.get("recall_proxy_rate", 0.0),
+            "extraction_hit_rate": report.get("extraction_hit_rate", 0.0),
+            "sample_count": report.get("sample_count", 0),
+        }
+    )
+    return report
+
+
+@app.get("/api/runtime/memory-quality/history")
+async def get_memory_quality_history(limit: int = Query(50, ge=1, le=500)):
+    """Return memory-quality snapshot history for observability dashboards."""
+    history = list(_memory_quality_history[-limit:])
+    history.reverse()
+    return {
+        "count": len(history),
+        "history": history,
+    }
+
+
 # ── Knowledge Graph Endpoints ────────────────────────────────────────────────
 
 @app.get("/api/graph")
@@ -2198,6 +3178,270 @@ async def rag_stats():
     return rag_engine.get_rag_stats()
 
 
+@app.get("/api/runtime/tool-contracts")
+async def runtime_tool_contracts():
+    """Get Phase 0 core tool contracts for autonomous runtime governance."""
+    contracts = rag_engine.get_tool_contracts()
+    return {
+        "count": len(contracts),
+        "contracts": contracts,
+    }
+
+
+@app.get("/api/runtime/interfaces")
+async def runtime_interfaces():
+    """Get machine-readable runtime interface snapshot (Phase 0 baseline)."""
+    from src.runtime.contracts import phase0_interface_snapshot
+
+    return phase0_interface_snapshot()
+
+
+def _normalize_permission_scope(scope_values: Optional[List[str]]) -> Optional[set[str]]:
+    if scope_values is None:
+        return None
+    normalized = {value.strip() for value in scope_values if value and value.strip()}
+    return normalized
+
+
+def _build_runtime_task_refs(pipeline_trace: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Derive coordinator/subagent task references from a pipeline trace payload."""
+    if not isinstance(pipeline_trace, dict):
+        return None
+
+    coordinator_task_id = str(pipeline_trace.get("coordinator_task_id", "") or "").strip()
+    subagent_task_ids: List[str] = []
+
+    spawn_records = pipeline_trace.get("subagent_spawn_records")
+    if isinstance(spawn_records, list):
+        for record in spawn_records:
+            if not isinstance(record, dict):
+                continue
+
+            task_id = str(record.get("task_id", "") or "").strip()
+            if task_id and task_id not in subagent_task_ids:
+                subagent_task_ids.append(task_id)
+
+            if not coordinator_task_id:
+                parent_task_id = str(record.get("parent_task_id", "") or "").strip()
+                if parent_task_id:
+                    coordinator_task_id = parent_task_id
+
+    trace_id = str(pipeline_trace.get("trace_id", "") or "").strip()
+    coordinator_plan = pipeline_trace.get("coordinator_plan")
+    has_coordination = bool(subagent_task_ids) or (isinstance(coordinator_plan, dict) and len(coordinator_plan) > 0)
+    if not coordinator_task_id and trace_id and has_coordination:
+        coordinator_task_id = f"coord-{trace_id}"
+
+    if not coordinator_task_id and not subagent_task_ids:
+        return None
+
+    all_task_ids: List[str] = []
+    if coordinator_task_id:
+        all_task_ids.append(coordinator_task_id)
+    for task_id in subagent_task_ids:
+        if task_id not in all_task_ids:
+            all_task_ids.append(task_id)
+
+    api: Dict[str, Any] = {
+        "list": "/api/runtime/tasks",
+        "subagents": [
+            {
+                "task_id": task_id,
+                "get": f"/api/runtime/tasks/{task_id}",
+                "cancel": f"/api/runtime/tasks/{task_id}/cancel",
+            }
+            for task_id in subagent_task_ids
+        ],
+    }
+    if coordinator_task_id:
+        api.update(
+            {
+                "coordinator": f"/api/runtime/tasks/{coordinator_task_id}",
+                "cancel_coordinator": f"/api/runtime/tasks/{coordinator_task_id}/cancel",
+            }
+        )
+
+    return {
+        "trace_id": trace_id,
+        "coordinator_task_id": coordinator_task_id,
+        "subagent_task_ids": subagent_task_ids,
+        "all_task_ids": all_task_ids,
+        "api": api,
+    }
+
+
+@app.get("/api/runtime/tasks")
+async def runtime_tasks_list():
+    """List runtime tasks for Phase 3 coordinator/subagent lifecycle tracking."""
+    return _runtime_task_manager.to_dict()
+
+
+@app.get("/api/runtime/tasks/events")
+async def runtime_task_events(request: Request):
+    """SSE stream for runtime task lifecycle transitions."""
+    subscriber_id = f"runtime-task-sub-{uuid.uuid4().hex[:8]}"
+
+    async def event_generator():
+        queue = _runtime_task_manager.subscribe(subscriber_id)
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            _runtime_task_manager.unsubscribe(subscriber_id)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/runtime/tasks/{task_id}")
+async def runtime_task_get(task_id: str):
+    """Fetch one runtime task snapshot by task id."""
+    try:
+        task = _runtime_task_manager.get_task(task_id)
+        return {"task": task.to_dict()}
+    except KeyError:
+        raise HTTPException(404, f"Task not found: {task_id}")
+
+
+@app.post("/api/runtime/tasks")
+async def runtime_task_create(req: RuntimeTaskCreateRequest):
+    """Create a runtime task with optional parent link and scoped permissions."""
+    try:
+        task = _runtime_task_manager.create_task(
+            task_id=req.task_id.strip() or None,
+            parent_task_id=req.parent_task_id.strip() or None,
+            permission_scope=_normalize_permission_scope(req.permission_scope),
+            metadata=req.metadata,
+        )
+        return {"task": task.to_dict()}
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/runtime/tasks/{task_id}/cancel")
+async def runtime_task_cancel(task_id: str, req: RuntimeTaskCancelRequest):
+    """Cancel one runtime task and optionally propagate cancellation to its descendants."""
+    try:
+        cancelled = _runtime_task_manager.cancel_task(
+            task_id=task_id,
+            reason=req.reason,
+            propagate=req.propagate,
+        )
+        return {"cancelled_task_ids": cancelled}
+    except KeyError:
+        raise HTTPException(404, f"Task not found: {task_id}")
+
+
+@app.post("/api/runtime/safety/evaluate")
+async def runtime_safety_evaluate(req: RuntimeToolOperationRequest):
+    """Evaluate one tool operation via Phase 1 safe runtime baseline."""
+    request_id = req.request_id or f"tool-{uuid.uuid4().hex[:12]}"
+
+    try:
+        return rag_engine.evaluate_tool_operation(
+            request_id=request_id,
+            tool_name=req.tool_name,
+            command_text=req.command_text,
+            metadata=req.metadata,
+        )
+    except RuntimeError as e:
+        if "safe_tool_runtime_unavailable" in str(e):
+            raise HTTPException(503, "Safe tool runtime is not available.")
+        raise
+
+
+@app.get("/api/runtime/safety/permissions")
+async def runtime_safety_permissions():
+    """List pending permission requests for risky tool operations."""
+    try:
+        expired = rag_engine.expire_permission_requests()
+        pending = rag_engine.get_pending_permissions()
+        return {
+            "count": len(pending),
+            "pending": pending,
+            "expired_count": len(expired),
+        }
+    except RuntimeError as e:
+        if "safe_tool_runtime_unavailable" in str(e):
+            raise HTTPException(503, "Safe tool runtime is not available.")
+        raise
+
+
+@app.get("/api/runtime/safety/executor")
+async def runtime_safety_executor_status():
+    """Expose runtime approval-worker health and execution summary."""
+    if _approval_execution_worker is None:
+        return {
+            "enabled": False,
+            "running": False,
+            "summary": {
+                "approved_total": 0,
+                "pending_total": 0,
+                "running": 0,
+                "waiting_retry": 0,
+                "completed": 0,
+                "failed": 0,
+                "unsupported": 0,
+                "idle": 0,
+            },
+        }
+
+    status = _approval_execution_worker.get_status()
+    return {"enabled": True, **status}
+
+
+@app.post("/api/runtime/safety/permissions/{permission_id}/resolve")
+async def runtime_safety_resolve_permission(permission_id: str, req: PermissionResolveRequest):
+    """Resolve a pending approval request by approving or denying it."""
+    try:
+        resolved = rag_engine.resolve_permission_request(
+            permission_id=permission_id,
+            approve=req.approve,
+            actor=req.actor,
+            note=req.note,
+        )
+
+        if req.approve and _approval_execution_worker is not None:
+            await _approval_execution_worker.run_once()
+
+        return {"resolved": resolved}
+    except RuntimeError as e:
+        if "safe_tool_runtime_unavailable" in str(e):
+            raise HTTPException(503, "Safe tool runtime is not available.")
+        raise
+    except KeyError:
+        raise HTTPException(404, f"Permission request not found: {permission_id}")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/runtime/safety/audit")
+async def runtime_safety_audit(limit: int = Query(100, ge=1, le=500)):
+    """Return recent safe-runtime policy audit events."""
+    try:
+        events = rag_engine.get_policy_audit_events(limit=limit)
+        return {"count": len(events), "events": events}
+    except RuntimeError as e:
+        if "safe_tool_runtime_unavailable" in str(e):
+            raise HTTPException(503, "Safe tool runtime is not available.")
+        raise
+
+
 @app.get("/api/rag/health")
 async def rag_health():
     """RAG system health check."""
@@ -2212,6 +3456,151 @@ async def rag_health():
 # In-memory ring buffer for recent pipeline traces (last 100)
 _trace_history: List[dict] = []
 _TRACE_MAX_HISTORY = 100
+
+# In-memory registries for Phase 4 memory personalization telemetry.
+_memory_extraction_jobs: Dict[str, Dict[str, Any]] = {}
+_memory_quality_history: List[Dict[str, Any]] = []
+_MEMORY_QUALITY_MAX_HISTORY = 200
+
+
+def _store_memory_quality_snapshot(snapshot: Optional[Dict[str, Any]]) -> None:
+    """Store one memory-quality metric snapshot in a bounded in-memory history."""
+    if not snapshot:
+        return
+    payload = dict(snapshot)
+    payload["timestamp"] = datetime.now().isoformat()
+    _memory_quality_history.append(payload)
+    if len(_memory_quality_history) > _MEMORY_QUALITY_MAX_HISTORY:
+        _memory_quality_history.pop(0)
+
+
+def _evaluate_memory_quality_batch(queries: List[str], top_k: int) -> Dict[str, Any]:
+    """Run lightweight personal-context precision/recall-style evaluation."""
+    per_query: List[Dict[str, Any]] = []
+
+    for query in queries:
+        try:
+            base_evidence = rag_engine.search_memories(query, top_k=top_k)
+            ambient_terms = _collect_ambient_terms()
+            merged = _supplement_personal_evidence(
+                query,
+                base_evidence,
+                ambient_terms=ambient_terms,
+                min_score=0.0,
+            )
+            merged = _supplement_ambient_evidence(query, merged, min_score=0.0)
+
+            selected = select_prompt_evidence(
+                merged,
+                query_analysis={"intent": "factual", "complexity": 0.35},
+                is_local_model=not _is_gemini_active(),
+            )
+            evidence_texts = selected.get("texts", [])
+            extracted = _try_extract_factual(query, evidence_texts)
+
+            metrics = evaluate_personal_memory_quality(
+                query=query,
+                evidence_texts=evidence_texts,
+                extracted_answer=extracted,
+            )
+            metrics["selected_count"] = len(evidence_texts)
+            metrics["memory_prompt"] = selected.get("metrics", {})
+            per_query.append(metrics)
+        except Exception as e:
+            per_query.append(
+                {
+                    "query": query,
+                    "facet": "error",
+                    "precision_at_k": 0.0,
+                    "recall_proxy": 0.0,
+                    "evidence_count": 0,
+                    "relevant_count": 0,
+                    "extraction_hit": False,
+                    "error": str(e),
+                }
+            )
+
+    avg_precision = (
+        sum(float(item.get("precision_at_k", 0.0) or 0.0) for item in per_query) / max(len(per_query), 1)
+    )
+    recall_rate = (
+        sum(float(item.get("recall_proxy", 0.0) or 0.0) for item in per_query) / max(len(per_query), 1)
+    )
+    extraction_rate = (
+        sum(1 for item in per_query if item.get("extraction_hit")) / max(len(per_query), 1)
+    )
+
+    return {
+        "sample_count": len(per_query),
+        "avg_precision_at_k": round(avg_precision, 3),
+        "recall_proxy_rate": round(recall_rate, 3),
+        "extraction_hit_rate": round(extraction_rate, 3),
+        "queries": per_query,
+    }
+
+
+async def _run_memory_extraction_job(
+    job_id: str,
+    *,
+    limit: int,
+    offset: int,
+    dry_run: bool,
+) -> None:
+    """Background extraction job for bounded memory profiles (Phase 4)."""
+    job = _memory_extraction_jobs.get(job_id)
+    if not job:
+        return
+
+    job["status"] = "running"
+    started_at = time.time()
+
+    processed = 0
+    updated = 0
+    failures = 0
+
+    try:
+        if not rag_engine.metadata_store:
+            raise RuntimeError("metadata_store_unavailable")
+
+        memories = rag_engine.metadata_store.get_all_memories(limit=limit, offset=offset)
+        job["total"] = len(memories)
+
+        for memory in memories:
+            processed += 1
+            try:
+                profile = build_memory_extraction_profile(memory.content)
+                if not dry_run:
+                    metadata_update = {
+                        "memory_extraction_profile": profile,
+                        "memory_extraction_updated_at": datetime.now().isoformat(),
+                    }
+                    success = rag_engine.metadata_store.update_memory_metadata(
+                        memory.id,
+                        metadata_update,
+                        merge=True,
+                    )
+                    if success:
+                        updated += 1
+                else:
+                    updated += 1
+            except Exception:
+                failures += 1
+
+            job["processed"] = processed
+            job["updated"] = updated
+            job["failures"] = failures
+
+            # Yield control periodically for cooperative scheduling under load.
+            if processed % 50 == 0:
+                await asyncio.sleep(0)
+
+        job["status"] = "completed"
+    except Exception as e:
+        job["status"] = "failed"
+        job["error"] = str(e)
+    finally:
+        job["duration_ms"] = round((time.time() - started_at) * 1000, 1)
+        job["finished_at"] = datetime.now().isoformat()
 
 def _sanitize_floats(obj):
     """Recursively replace NaN/Inf floats with 0 so JSON serialization won't fail."""
@@ -2244,64 +3633,9 @@ async def get_pipeline_traces(limit: int = Query(20, ge=1, le=100)):
     traces = _trace_history[-limit:]
     traces.reverse()  # Most recent first
 
-    # Compute aggregate analytics
-    if traces:
-        total_durations = [t.get("total_duration_ms", 0) for t in traces]
-        avg_duration = sum(total_durations) / len(total_durations)
-        avg_confidence = sum(t.get("final_confidence", 0) for t in traces) / len(traces)
-        avg_evidence = sum(t.get("evidence_count", 0) for t in traces) / len(traces)
+    from src.runtime.trace_analytics import build_trace_analytics
 
-        # Channel usage breakdown across all traces
-        channel_totals: dict = {}
-        for t in traces:
-            for ch in t.get("retrieval_channels", []):
-                name = ch.get("channel", "unknown")
-                if name not in channel_totals:
-                    channel_totals[name] = {"total_results": 0, "total_duration_ms": 0.0, "usage_count": 0}
-                channel_totals[name]["total_results"] += ch.get("result_count", 0)
-                channel_totals[name]["total_duration_ms"] += ch.get("duration_ms", 0)
-                channel_totals[name]["usage_count"] += 1 if ch.get("result_count", 0) > 0 else 0
-
-        # Step frequency analysis
-        step_stats: dict = {}
-        for t in traces:
-            for step in t.get("steps", []):
-                stype = step.get("step_type", "unknown")
-                if stype not in step_stats:
-                    step_stats[stype] = {"completed": 0, "skipped": 0, "total_duration_ms": 0.0}
-                if step.get("status") == "completed":
-                    step_stats[stype]["completed"] += 1
-                    step_stats[stype]["total_duration_ms"] += step.get("duration_ms", 0)
-                elif step.get("status") == "skipped":
-                    step_stats[stype]["skipped"] += 1
-
-        # CRAG/Self-RAG/FLARE activation rates
-        crag_activated = sum(1 for t in traces if t.get("crag_evaluation") is not None)
-        selfrag_activated = sum(1 for t in traces if t.get("self_rag_critique") is not None)
-        flare_activated = sum(1 for t in traces if t.get("flare_trace") is not None)
-        cache_hits = sum(1 for t in traces if t.get("cache_status", {}).get("hit", False))
-
-        analytics = {
-            "total_traces": len(_trace_history),
-            "showing": len(traces),
-            "avg_duration_ms": round(avg_duration, 1),
-            "avg_confidence": round(avg_confidence, 3),
-            "avg_evidence_count": round(avg_evidence, 1),
-            "channel_usage": channel_totals,
-            "step_stats": step_stats,
-            "crag_activation_rate": round(crag_activated / len(traces), 3) if traces else 0,
-            "selfrag_activation_rate": round(selfrag_activated / len(traces), 3) if traces else 0,
-            "flare_activation_rate": round(flare_activated / len(traces), 3) if traces else 0,
-            "cache_hit_rate": round(cache_hits / len(traces), 3) if traces else 0,
-        }
-    else:
-        analytics = {
-            "total_traces": 0, "showing": 0,
-            "avg_duration_ms": 0, "avg_confidence": 0, "avg_evidence_count": 0,
-            "channel_usage": {}, "step_stats": {},
-            "crag_activation_rate": 0, "selfrag_activation_rate": 0,
-            "flare_activation_rate": 0, "cache_hit_rate": 0,
-        }
+    analytics = build_trace_analytics(traces=traces, total_history_count=len(_trace_history))
 
     return {"traces": traces, "analytics": analytics}
 
@@ -2374,6 +3708,44 @@ async def observability_metrics():
     if rag_engine.initialized and rag_engine.cache:
         metrics["cache"] = rag_engine.cache.get_stats()
 
+    # Add Phase 4 memory-quality snapshots
+    if _memory_quality_history:
+        latest = _memory_quality_history[-1]
+        window = _memory_quality_history[-20:]
+        metrics["memory_quality"] = {
+            "latest": latest,
+            "samples": len(_memory_quality_history),
+            "rolling_avg_precision_at_k": round(
+                sum(
+                    float(
+                        x.get("avg_precision_at_k", x.get("precision_at_k", 0.0))
+                        or 0.0
+                    )
+                    for x in window
+                )
+                / max(len(window), 1),
+                3,
+            ),
+            "rolling_recall_proxy_rate": round(
+                sum(
+                    float(
+                        x.get("recall_proxy_rate", x.get("recall_proxy", 0.0))
+                        or 0.0
+                    )
+                    for x in window
+                )
+                / max(len(window), 1),
+                3,
+            ),
+        }
+    else:
+        metrics["memory_quality"] = {
+            "latest": None,
+            "samples": 0,
+            "rolling_avg_precision_at_k": 0.0,
+            "rolling_recall_proxy_rate": 0.0,
+        }
+
     return metrics
 
 
@@ -2393,8 +3765,8 @@ class AmbientConfigUpdate(BaseModel):
     whisper_device: Optional[str] = None
     whisper_language: Optional[str] = None
     record_raw_audio: Optional[bool] = None
-    stt_provider: Optional[str] = None       # "traditional" or "gemini"
-    tts_provider: Optional[str] = None       # "traditional" or "gemini"
+    stt_provider: Optional[str] = None       # "traditional" | "local" | "gemini"
+    tts_provider: Optional[str] = None       # "traditional" | "local" | "gemini"
     gemini_tts_voice: Optional[str] = None   # Gemini voice name
     wake_word_enabled: Optional[bool] = None  # Enable wake word detection
     wake_word_threshold: Optional[float] = None  # Wake word confidence threshold
@@ -2483,21 +3855,29 @@ async def update_ambient_config(req: AmbientConfigUpdate):
 # ── Voice Provider Management ────────────────────────────────────────────────
 
 class VoiceProviderRequest(BaseModel):
-    provider: str  # "traditional" or "gemini"
+    provider: str  # "traditional" | "local" | "gemini"
 
 @app.get("/api/ambient/voice-providers")
 async def get_voice_providers():
     """Get available voice providers and current selection."""
     ambient = _get_ambient()
+    traditional_stt_available = ambient._traditional_stt is not None
+    traditional_tts_available = (
+        ambient._traditional_tts is not None
+        and ambient._traditional_tts.is_available
+    )
     return {
         "stt_provider": ambient.get_stt_provider(),
         "tts_provider": ambient.get_tts_provider(),
         "gemini_available": ambient._gemini_api_key is not None,
-        "traditional_stt_available": ambient._traditional_stt is not None,
-        "traditional_tts_available": (ambient._traditional_tts is not None
-                                      and ambient._traditional_tts.is_available),
+        "traditional_stt_available": traditional_stt_available,
+        "traditional_tts_available": traditional_tts_available,
+        "local_stt_available": traditional_stt_available,
+        "local_tts_available": traditional_tts_available,
         "gemini_stt_available": ambient._gemini_stt is not None,
         "gemini_tts_available": ambient._gemini_tts is not None,
+        "supported_stt_providers": list(SUPPORTED_VOICE_PROVIDERS),
+        "supported_tts_providers": list(SUPPORTED_VOICE_PROVIDERS),
         "gemini_tts_voices": ["Aoede", "Charon", "Fenrir", "Kore",
                               "Puck", "Leda", "Orus", "Zephyr"],
     }
@@ -2526,18 +3906,26 @@ async def get_wake_word_status():
 
 @app.post("/api/ambient/stt-provider")
 async def set_stt_provider(req: VoiceProviderRequest):
-    """Switch STT provider between traditional and Gemini."""
+    """Switch STT provider between traditional/local and Gemini."""
     ambient = _get_ambient()
-    result = ambient.set_stt_provider(req.provider)
+    provider = str(req.provider or "").strip().lower()
+    if provider not in SUPPORTED_VOICE_PROVIDERS:
+        raise HTTPException(400, f"Provider must be one of: {', '.join(SUPPORTED_VOICE_PROVIDERS)}")
+
+    result = ambient.set_stt_provider(provider)
     if not result["success"]:
         raise HTTPException(400, result["error"])
     return result
 
 @app.post("/api/ambient/tts-provider")
 async def set_tts_provider(req: VoiceProviderRequest):
-    """Switch TTS provider between traditional and Gemini."""
+    """Switch TTS provider between traditional/local and Gemini."""
     ambient = _get_ambient()
-    result = ambient.set_tts_provider(req.provider)
+    provider = str(req.provider or "").strip().lower()
+    if provider not in SUPPORTED_VOICE_PROVIDERS:
+        raise HTTPException(400, f"Provider must be one of: {', '.join(SUPPORTED_VOICE_PROVIDERS)}")
+
+    result = ambient.set_tts_provider(provider)
     if not result["success"]:
         raise HTTPException(400, result["error"])
     return result

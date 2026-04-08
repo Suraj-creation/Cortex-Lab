@@ -1,6 +1,44 @@
 """Agents layer init."""
 from src.agents.orchestrator import AgentOrchestrator
 from src.agents.specialized import (
-    TimelineAgent, CausalAgent, ReflectionAgent,
-    PlanningAgent, ArbitrationAgent
+    AcademicIntelligenceAgent,
+    ArbitrationAgent,
+    BaseAgent,
+    BehavioralHabitsAgent,
+    build_specialized_agents,
+    CausalAgent,
+    CognitivePatternsAgent,
+    DecisionLogAgent,
+    DomainSpecializedAgent,
+    EmotionalIntelligenceAgent,
+    GoalVisionAgent,
+    MetaLearningAgent,
+    PersonalJournalingAgent,
+    PersonalWellbeingAgent,
+    PlanningAgent,
+    ReflectionAgent,
+    SocialIntelligenceAgent,
+    TimelineAgent,
 )
+
+__all__ = [
+    "AgentOrchestrator",
+    "BaseAgent",
+    "DomainSpecializedAgent",
+    "TimelineAgent",
+    "CausalAgent",
+    "ReflectionAgent",
+    "PlanningAgent",
+    "ArbitrationAgent",
+    "AcademicIntelligenceAgent",
+    "PersonalJournalingAgent",
+    "PersonalWellbeingAgent",
+    "CognitivePatternsAgent",
+    "DecisionLogAgent",
+    "EmotionalIntelligenceAgent",
+    "BehavioralHabitsAgent",
+    "SocialIntelligenceAgent",
+    "GoalVisionAgent",
+    "MetaLearningAgent",
+    "build_specialized_agents",
+]

@@ -244,13 +244,18 @@ export interface ModelStatus {
   };
 }
 
+export type InferenceMode = "cloud" | "hybrid" | "local_offline";
+export type LLMProviderType = "local" | "gemini" | "gemma_local";
+
 export interface ChatSettings {
   temperature: number;
   topP: number;
   maxTokens: number;
   stream: boolean;
   useRAG: boolean;
-  llmProvider: "local" | "gemini";
+  llmProvider: LLMProviderType;
+  inferenceMode?: InferenceMode;
+  allowCloudFallback?: boolean;
 }
 
 export const DEFAULT_SETTINGS: ChatSettings = {
@@ -260,7 +265,51 @@ export const DEFAULT_SETTINGS: ChatSettings = {
   stream: true,
   useRAG: true,
   llmProvider: "local",
+  inferenceMode: "cloud",
+  allowCloudFallback: true,
 };
+
+export interface RuntimeSelection {
+  mode: InferenceMode;
+  llmProvider: LLMProviderType;
+  sttProvider: VoiceProviderType;
+  ttsProvider: VoiceProviderType;
+  allowCloudFallback: boolean;
+}
+
+export type ModelpackAvailability = "available" | "coming_soon";
+
+export interface ModelpackFileEntry {
+  path: string;
+  size_bytes: number;
+  sha256: string;
+}
+
+export interface ModelpackEntry {
+  id: string;
+  display_name: string;
+  version: string;
+  target?: string;
+  family?: string;
+  quantization?: string;
+  summary?: string;
+  availability?: ModelpackAvailability;
+  download_url?: string;
+  cta_label?: string;
+  docs_url?: string;
+  requires?: string[];
+  files: ModelpackFileEntry[];
+}
+
+export interface ModelpackManifest {
+  schema_version: string;
+  generated_at: string;
+  signature_required: boolean;
+  source?: string;
+  docs_url?: string;
+  channels?: string[];
+  packs: ModelpackEntry[];
+}
 
 export type AmbientStatusType =
   | "idle"
@@ -271,7 +320,7 @@ export type AmbientStatusType =
   | "paused"
   | "error";
 
-export type VoiceProviderType = "traditional" | "gemini";
+export type VoiceProviderType = "traditional" | "gemini" | "local";
 
 export interface VoiceProviders {
   stt_provider: VoiceProviderType;
@@ -279,8 +328,12 @@ export interface VoiceProviders {
   gemini_available: boolean;
   traditional_stt_available: boolean;
   traditional_tts_available: boolean;
+  local_stt_available?: boolean;
+  local_tts_available?: boolean;
   gemini_stt_available: boolean;
   gemini_tts_available: boolean;
+  supported_stt_providers?: VoiceProviderType[];
+  supported_tts_providers?: VoiceProviderType[];
   gemini_tts_voices: string[];
 }
 

@@ -22,6 +22,7 @@ export interface ChatMessage {
   cacheHit?: boolean;
   // Pipeline observability
   pipelineTrace?: PipelineTrace;
+  runtimeTasks?: RuntimeTaskReferences;
 }
 
 export interface EvidenceCard {
@@ -136,11 +137,48 @@ export interface PipelineTrace {
   flare_trace?: FLARETrace | null;
   routing_decision: string;
   agents_invoked: { agent: string; is_primary: boolean }[];
+  coordinator_task_id?: string;
+  coordinator_plan?: Record<string, unknown>;
+  subagent_spawn_records?: Array<{
+    parent_task_id: string;
+    task_id: string;
+    agent: string;
+    role: string;
+    spawned_at: string;
+  }>;
+  sidechain_transcript?: Array<{
+    event: string;
+    agent?: string;
+    task_id?: string;
+    trace_id?: string;
+    timestamp: string;
+    confidence?: number;
+    answer_preview?: string;
+    error?: string;
+  }>;
   generation_details: Record<string, unknown>;
   cache_status: { hit: boolean; level: string | null };
   final_confidence: number;
   evidence_count: number;
   token_usage: Record<string, number>;
+  runtime_loop_state?: {
+    request_id?: string;
+    session_id?: string;
+    started_at?: string;
+    budget?: {
+      max_iterations: number;
+      max_tool_calls_per_window: number;
+      window_seconds: number;
+      max_input_tokens: number;
+      max_output_tokens: number;
+      max_wall_time_seconds: number;
+    };
+    iterations_executed: number;
+    tool_calls_executed: number;
+    stop_reason?: string | null;
+    stop_note?: string;
+  };
+  stop_reason?: string;
 }
 
 export interface MemoryObject {
@@ -243,13 +281,18 @@ export interface ModelStatus {
   };
 }
 
+export type InferenceMode = "cloud" | "hybrid" | "local_offline";
+export type LLMProviderType = "local" | "gemini" | "gemma_local";
+
 export interface ChatSettings {
   temperature: number;
   topP: number;
   maxTokens: number;
   stream: boolean;
   useRAG: boolean;
-  llmProvider: "local" | "gemini";
+  llmProvider: LLMProviderType;
+  inferenceMode?: InferenceMode;
+  allowCloudFallback?: boolean;
   thinkingMode: boolean;
 }
 
@@ -260,8 +303,52 @@ export const DEFAULT_SETTINGS: ChatSettings = {
   stream: true,
   useRAG: true,
   llmProvider: "local",
+  inferenceMode: "cloud",
+  allowCloudFallback: true,
   thinkingMode: true,
 };
+
+export interface RuntimeSelection {
+  mode: InferenceMode;
+  llmProvider: LLMProviderType;
+  sttProvider: VoiceProviderType;
+  ttsProvider: VoiceProviderType;
+  allowCloudFallback: boolean;
+}
+
+export type ModelpackAvailability = "available" | "coming_soon";
+
+export interface ModelpackFileEntry {
+  path: string;
+  size_bytes: number;
+  sha256: string;
+}
+
+export interface ModelpackEntry {
+  id: string;
+  display_name: string;
+  version: string;
+  target?: string;
+  family?: string;
+  quantization?: string;
+  summary?: string;
+  availability?: ModelpackAvailability;
+  download_url?: string;
+  cta_label?: string;
+  docs_url?: string;
+  requires?: string[];
+  files: ModelpackFileEntry[];
+}
+
+export interface ModelpackManifest {
+  schema_version: string;
+  generated_at: string;
+  signature_required: boolean;
+  source?: string;
+  docs_url?: string;
+  channels?: string[];
+  packs: ModelpackEntry[];
+}
 
 // ── Ambient Voice Types ─────────────────────────────────────────
 
@@ -274,7 +361,7 @@ export type AmbientStatusType =
   | "paused"
   | "error";
 
-export type VoiceProviderType = "traditional" | "gemini";
+export type VoiceProviderType = "traditional" | "gemini" | "local";
 
 export interface VoiceProviders {
   stt_provider: VoiceProviderType;
@@ -282,8 +369,12 @@ export interface VoiceProviders {
   gemini_available: boolean;
   traditional_stt_available: boolean;
   traditional_tts_available: boolean;
+  local_stt_available?: boolean;
+  local_tts_available?: boolean;
   gemini_stt_available: boolean;
   gemini_tts_available: boolean;
+  supported_stt_providers?: VoiceProviderType[];
+  supported_tts_providers?: VoiceProviderType[];
   gemini_tts_voices: string[];
 }
 
@@ -404,9 +495,99 @@ export interface TraceAnalytics {
   selfrag_activation_rate: number;
   flare_activation_rate: number;
   cache_hit_rate: number;
+  stop_reason_distribution: Record<string, number>;
+  runtime_loop: {
+    avg_iterations: number;
+    avg_tool_calls: number;
+  };
 }
 
 export interface TracesResponse {
   traces: PipelineTrace[];
   analytics: TraceAnalytics;
+}
+
+export type RuntimePermissionStatus = "pending" | "approved" | "denied" | "expired";
+
+export type RuntimeTaskState =
+  | "queued"
+  | "running"
+  | "waiting_approval"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface RuntimeTaskSnapshot {
+  task_id: string;
+  parent_task_id: string | null;
+  state: RuntimeTaskState;
+  permission_scope: string[] | null;
+  child_task_ids: string[];
+  created_at: string;
+  updated_at: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface RuntimeTaskListResponse {
+  count: number;
+  tasks: RuntimeTaskSnapshot[];
+}
+
+export interface RuntimeTaskReferences {
+  trace_id?: string;
+  coordinator_task_id?: string;
+  subagent_task_ids: string[];
+  all_task_ids: string[];
+  api: {
+    list: string;
+    coordinator?: string;
+    cancel_coordinator?: string;
+    subagents: Array<{
+      task_id: string;
+      get: string;
+      cancel: string;
+    }>;
+  };
+}
+
+export type RuntimeTaskEventType =
+  | "task_created"
+  | "task_transition"
+  | "task_attached";
+
+export interface RuntimeTaskEvent {
+  event_id: string;
+  sequence: number;
+  event_type: RuntimeTaskEventType;
+  timestamp: string;
+  task: RuntimeTaskSnapshot;
+  previous_state?: RuntimeTaskState | null;
+  state: RuntimeTaskState;
+  note?: string;
+}
+
+export interface RuntimePermissionRequest {
+  permission_id: string;
+  request_id: string;
+  tool_name: string;
+  command_text: string;
+  reason: string;
+  status: RuntimePermissionStatus;
+  created_at: string;
+  expires_at: string;
+  decided_at: string | null;
+  decided_by: string;
+  decision_note: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface RuntimeApprovalSummary {
+  pending: number;
+  expired: number;
+  approved_total: number;
+  running: number;
+  waiting_retry: number;
+  failed: number;
+  completed: number;
 }

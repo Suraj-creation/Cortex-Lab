@@ -145,6 +145,17 @@ class MemoryIngestionPipeline:
             timestamp=datetime.now(),
         )
 
+        # Phase 4: Store a compact extraction profile for personalization
+        # and prompt relevance diagnostics. Non-fatal if profile generation fails.
+        try:
+            from src.runtime.memory_personalization import build_memory_extraction_profile
+
+            memory.metadata = dict(memory.metadata or {})
+            memory.metadata["memory_extraction_profile"] = build_memory_extraction_profile(content)
+            memory.metadata["memory_extraction_updated_at"] = datetime.now().isoformat()
+        except Exception:
+            pass
+
         # 2. Classify memory type (keyword-first, LLM fallback)
         memory.memory_type = self._classify_memory_type(content)
 

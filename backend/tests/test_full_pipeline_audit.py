@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
-Cortex Lab — Full Pipeline Audit & Gemini vs Local Comparison
+Cortex Lab â€” Full Pipeline Audit & Gemini vs Local Comparison
 ==============================================================
 Tests EVERY RAG pipeline stage against the running server.
 Compares responses between Gemini and Local LLM providers.
@@ -33,6 +33,8 @@ import os
 import re
 from datetime import datetime
 
+import pytest
+
 BASE = os.environ.get("CORTEX_TEST_URL", "http://localhost:8000")
 RESULTS = []
 PASS_COUNT = 0
@@ -41,7 +43,21 @@ SKIP_COUNT = 0
 WARNINGS = []
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+def _pytest_server_ready() -> bool:
+    try:
+        response = requests.get(f"{BASE}/api/health", timeout=2)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _pytest_server_ready(),
+    reason="Live pipeline audit requires backend server at CORTEX_TEST_URL",
+)
+
+
+# â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def log(msg, indent=0):
     prefix = "  " * indent
@@ -50,14 +66,14 @@ def log(msg, indent=0):
 
 def check_server():
     """Wait for server to be ready (up to 60s)."""
-    log("⏳ Connecting to server...")
+    log("â³ Connecting to server...")
     for i in range(30):
         try:
             r = requests.get(f"{BASE}/api/health", timeout=3)
             if r.status_code == 200:
                 data = r.json()
                 if data.get("status") == "ok":
-                    log(f"✅ Server ready (waited {i*2}s)")
+                    log(f"âœ… Server ready (waited {i*2}s)")
                     return data
         except Exception:
             pass
@@ -94,22 +110,22 @@ def rag_stats():
     return {}
 
 
-def test(section, name, query_or_fn, checks, provider="gemini"):
+def run_case(section, name, query_or_fn, checks, provider="gemini"):
     """Run a single test case."""
     global PASS_COUNT, FAIL_COUNT, SKIP_COUNT
     full_name = f"[{section}] {name}"
-    print(f"\n{'─'*70}")
-    log(f"🧪 {full_name}")
+    print(f"\n{'â”€'*70}")
+    log(f"ðŸ§ª {full_name}")
 
     try:
         if callable(query_or_fn):
             data = query_or_fn()
         else:
-            log(f"📝 Query: {query_or_fn[:80]}", 1)
+            log(f"ðŸ“ Query: {query_or_fn[:80]}", 1)
             data = rag_query(query_or_fn, provider=provider)
 
         if "error" in data:
-            log(f"❌ {data['error']}", 1)
+            log(f"âŒ {data['error']}", 1)
             FAIL_COUNT += 1
             RESULTS.append((section, name, "FAIL", data["error"]))
             return data
@@ -123,22 +139,22 @@ def test(section, name, query_or_fn, checks, provider="gemini"):
         qa = data.get("query_analysis", {})
         cache_hit = data.get("cache_hit", False)
 
-        log(f"⏱  {elapsed:.1f}s | Conf: {conf:.2f} | Evidence: {evidence_count} | Agents: {agents}", 1)
+        log(f"â±  {elapsed:.1f}s | Conf: {conf:.2f} | Evidence: {evidence_count} | Agents: {agents}", 1)
         if qa:
-            log(f"🔍 Intent: {qa.get('intent','?')} | Routing: {qa.get('routing','?')} | Complexity: {qa.get('complexity','?')}", 1)
-        log(f"💬 Answer ({len(answer)} chars): {answer[:200]}{'...' if len(answer) > 200 else ''}", 1)
+            log(f"ðŸ” Intent: {qa.get('intent','?')} | Routing: {qa.get('routing','?')} | Complexity: {qa.get('complexity','?')}", 1)
+        log(f"ðŸ’¬ Answer ({len(answer)} chars): {answer[:200]}{'...' if len(answer) > 200 else ''}", 1)
 
         # Run check functions
         failures = []
         for ck_name, ck_fn in checks.items():
             try:
                 result = ck_fn(data)
-                icon = "✅" if result else "❌"
+                icon = "âœ…" if result else "âŒ"
                 log(f"{icon} {ck_name}", 2)
                 if not result:
                     failures.append(ck_name)
             except Exception as e:
-                log(f"⚠️  {ck_name}: {e}", 2)
+                log(f"âš ï¸  {ck_name}: {e}", 2)
                 failures.append(f"{ck_name} (exception)")
 
         if failures:
@@ -153,26 +169,26 @@ def test(section, name, query_or_fn, checks, provider="gemini"):
     except Exception as e:
         FAIL_COUNT += 1
         RESULTS.append((section, name, "FAIL", str(e)[:80]))
-        log(f"❌ Exception: {e}", 1)
+        log(f"âŒ Exception: {e}", 1)
         return {}
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # SECTION 1: Health & System Checks
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def test_section_1_health():
-    log("\n" + "═"*70)
-    log("📋 SECTION 1: Health & System Checks")
-    log("═"*70)
+    log("\n" + "â•"*70)
+    log("ðŸ“‹ SECTION 1: Health & System Checks")
+    log("â•"*70)
 
-    test("Health", "Server Health", lambda: requests.get(f"{BASE}/api/health", timeout=5).json(), {
+    run_case("Health", "Server Health", lambda: requests.get(f"{BASE}/api/health", timeout=5).json(), {
         "status_ok": lambda d: d.get("status") == "ok",
         "model_info_present": lambda d: "model_info" in d or "model_loaded" in d,
     })
 
     stats = rag_stats()
-    test("Health", "RAG Stats Available", lambda: stats, {
+    run_case("Health", "RAG Stats Available", lambda: stats, {
         "has_memory_count": lambda d: "total_memories" in d or "memories" in d or isinstance(d, dict),
         "has_vector_count": lambda d: isinstance(d, dict),
     })
@@ -182,49 +198,49 @@ def test_section_1_health():
         r = requests.get(f"{BASE}/api/model-info", timeout=5)
         if r.status_code == 200:
             model_data = r.json()
-            test("Health", "Model Info Endpoint", lambda: model_data, {
+            run_case("Health", "Model Info Endpoint", lambda: model_data, {
                 "has_name": lambda d: bool(d.get("name")),
                 "has_device": lambda d: bool(d.get("device")),
             })
     except Exception:
-        log("  ⚠️  /api/model-info endpoint not available", 1)
+        log("  âš ï¸  /api/model-info endpoint not available", 1)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # SECTION 2: Query Intelligence
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def test_section_2_query_intelligence():
-    log("\n" + "═"*70)
-    log("📋 SECTION 2: Query Intelligence (Intent Detection & Routing)")
-    log("═"*70)
+    log("\n" + "â•"*70)
+    log("ðŸ“‹ SECTION 2: Query Intelligence (Intent Detection & Routing)")
+    log("â•"*70)
 
-    # 2a. Temporal query → should detect temporal intent
-    test("QueryIntel", "Temporal Intent Detection",
+    # 2a. Temporal query â†’ should detect temporal intent
+    run_case("QueryIntel", "Temporal Intent Detection",
          "When did I start working on Cortex Lab?",
          {
              "detected_temporal": lambda d: d.get("query_analysis", {}).get("intent") in ["temporal", "factual"],
              "has_answer": lambda d: len(d.get("content", "")) > 15,
          })
 
-    # 2b. Causal query → should detect causal intent
-    test("QueryIntel", "Causal Intent Detection",
+    # 2b. Causal query â†’ should detect causal intent
+    run_case("QueryIntel", "Causal Intent Detection",
          "Why did I decide to build an AI memory system?",
          {
              "detected_causal_or_reflective": lambda d: d.get("query_analysis", {}).get("intent") in ["causal", "reflective", "exploratory"],
              "has_answer": lambda d: len(d.get("content", "")) > 15,
          })
 
-    # 2c. Factual query → simple, low complexity
-    test("QueryIntel", "Factual Query (Low Complexity)",
+    # 2c. Factual query â†’ simple, low complexity
+    run_case("QueryIntel", "Factual Query (Low Complexity)",
          "What is my name?",
          {
              "low_complexity": lambda d: d.get("query_analysis", {}).get("complexity", 1.0) <= 0.6,
              "has_answer": lambda d: len(d.get("content", "")) > 5,
          })
 
-    # 2d. Complex multi-step query → should detect high complexity
-    test("QueryIntel", "Complex Query (High Complexity)",
+    # 2d. Complex multi-step query â†’ should detect high complexity
+    run_case("QueryIntel", "Complex Query (High Complexity)",
          "Compare all my AI projects, analyze which skills they used, and trace how my technical abilities evolved over time",
          {
              "higher_complexity": lambda d: d.get("query_analysis", {}).get("complexity", 0) >= 0.4,
@@ -233,17 +249,17 @@ def test_section_2_query_intelligence():
          })
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # SECTION 3: Hybrid Retrieval (all channels)
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def test_section_3_retrieval():
-    log("\n" + "═"*70)
-    log("📋 SECTION 3: Hybrid Retrieval (Multi-Channel)")
-    log("═"*70)
+    log("\n" + "â•"*70)
+    log("ðŸ“‹ SECTION 3: Hybrid Retrieval (Multi-Channel)")
+    log("â•"*70)
 
     # 3a. Dense retrieval (semantic similarity)
-    test("Retrieval", "Dense Channel (Semantic)",
+    run_case("Retrieval", "Dense Channel (Semantic)",
          "Tell me about my programming skills and experience",
          {
              "has_evidence": lambda d: len(d.get("evidence", [])) > 0,
@@ -254,7 +270,7 @@ def test_section_3_retrieval():
          })
 
     # 3b. Graph retrieval (entity-based)
-    test("Retrieval", "Graph Channel (Entity-Based)",
+    run_case("Retrieval", "Graph Channel (Entity-Based)",
          "Tell me everything about Cortex Lab project",
          {
              "has_evidence": lambda d: len(d.get("evidence", [])) > 0,
@@ -262,7 +278,7 @@ def test_section_3_retrieval():
          })
 
     # 3c. Temporal retrieval
-    test("Retrieval", "Temporal Channel (Time-Based)",
+    run_case("Retrieval", "Temporal Channel (Time-Based)",
          "What did I work on recently?",
          {
              "has_evidence": lambda d: len(d.get("evidence", [])) > 0,
@@ -270,17 +286,17 @@ def test_section_3_retrieval():
          })
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # SECTION 4: Agent Orchestration (all 5 agents)
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def test_section_4_agents():
-    log("\n" + "═"*70)
-    log("📋 SECTION 4: Agent Orchestration (5 Specialized Agents)")
-    log("═"*70)
+    log("\n" + "â•"*70)
+    log("ðŸ“‹ SECTION 4: Agent Orchestration (5 Specialized Agents)")
+    log("â•"*70)
 
     # 4a. TimelineAgent
-    test("Agents", "TimelineAgent — Chronological Query",
+    run_case("Agents", "TimelineAgent â€” Chronological Query",
          "Give me a timeline of my projects and when I built them",
          {
              "has_answer": lambda d: len(d.get("content", "")) > 30,
@@ -288,21 +304,21 @@ def test_section_4_agents():
          })
 
     # 4b. CausalAgent
-    test("Agents", "CausalAgent — Cause-Effect",
+    run_case("Agents", "CausalAgent â€” Cause-Effect",
          "What caused me to become interested in AI and deep learning?",
          {
              "has_answer": lambda d: len(d.get("content", "")) > 30,
          })
 
     # 4c. ReflectionAgent
-    test("Agents", "ReflectionAgent — Belief Evolution",
+    run_case("Agents", "ReflectionAgent â€” Belief Evolution",
          "How has my thinking about education and technology evolved?",
          {
              "has_answer": lambda d: len(d.get("content", "")) > 30,
          })
 
     # 4d. PlanningAgent
-    test("Agents", "PlanningAgent — Multi-Step Decomposition",
+    run_case("Agents", "PlanningAgent â€” Multi-Step Decomposition",
          "List all my projects, group them by technology used, and identify the common themes",
          {
              "has_answer": lambda d: len(d.get("content", "")) > 50,
@@ -310,24 +326,24 @@ def test_section_4_agents():
          })
 
     # 4e. ArbitrationAgent (comparative/conflict)
-    test("Agents", "ArbitrationAgent — Comparative Query",
+    run_case("Agents", "ArbitrationAgent â€” Comparative Query",
          "Compare my web development projects with my AI/ML projects",
          {
              "has_answer": lambda d: len(d.get("content", "")) > 30,
          })
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # SECTION 5: Quality Assurance (CRAG, Self-RAG, FLARE)
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def test_section_5_quality():
-    log("\n" + "═"*70)
-    log("📋 SECTION 5: Quality Assurance (CRAG/Self-RAG/FLARE)")
-    log("═"*70)
+    log("\n" + "â•"*70)
+    log("ðŸ“‹ SECTION 5: Quality Assurance (CRAG/Self-RAG/FLARE)")
+    log("â•"*70)
 
     # 5a. Well-supported query (should get high confidence via CRAG)
-    test("Quality", "CRAG — High Confidence (Known Data)",
+    run_case("Quality", "CRAG â€” High Confidence (Known Data)",
          "What is my name and email address?",
          {
              "confidence_exists": lambda d: d.get("confidence", 0) > 0,
@@ -338,7 +354,7 @@ def test_section_5_quality():
          })
 
     # 5b. Pipeline trace present
-    test("Quality", "Pipeline Trace Present",
+    run_case("Quality", "Pipeline Trace Present",
          "Tell me about my education",
          {
              "has_trace": lambda d: bool(d.get("pipeline_trace")) or bool(d.get("thinking")),
@@ -346,32 +362,32 @@ def test_section_5_quality():
          })
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # SECTION 6: Ingestion Pipeline
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def test_section_6_ingestion():
-    log("\n" + "═"*70)
-    log("📋 SECTION 6: Ingestion Pipeline")
-    log("═"*70)
+    log("\n" + "â•"*70)
+    log("ðŸ“‹ SECTION 6: Ingestion Pipeline")
+    log("â•"*70)
 
     # 6a. Ingest a test memory
     test_content = f"Test memory for audit: I completed a Kubernetes certification on {datetime.now().strftime('%Y-%m-%d')}. The certification covered container orchestration, pod management, and service mesh."
 
-    test("Ingestion", "Ingest New Memory", lambda: _ingest_memory(test_content), {
+    run_case("Ingestion", "Ingest New Memory", lambda: _ingest_memory(test_content), {
         "ingestion_success": lambda d: d.get("status") in ["ok", "success", "ingested"] or d.get("id") or "id" in d or d.get("memory_id"),
     })
 
     # 6b. Verify the ingested memory is retrievable
     time.sleep(2)  # Wait for indexing
-    test("Ingestion", "Retrieve Ingested Memory",
+    run_case("Ingestion", "Retrieve Ingested Memory",
          "Tell me about my Kubernetes certification",
          {
              "mentions_kubernetes": lambda d: "kubernetes" in d.get("content", "").lower() or "container" in d.get("content", "").lower(),
          })
 
     # 6c. Test that questions are NOT ingested
-    test("Ingestion", "Question NOT Stored as Memory", lambda: _check_question_not_ingested(), {
+    run_case("Ingestion", "Question NOT Stored as Memory", lambda: _check_question_not_ingested(), {
         "filter_works": lambda d: d.get("filtered", False),
     })
 
@@ -407,26 +423,26 @@ def _check_question_not_ingested():
         return {"filtered": False, "error": str(e)}
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # SECTION 7: Entity Extraction (Tech Terms Dictionary)
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def test_section_7_entities():
-    log("\n" + "═"*70)
-    log("📋 SECTION 7: Entity Extraction (Tech Terms Dictionary)")
-    log("═"*70)
+    log("\n" + "â•"*70)
+    log("ðŸ“‹ SECTION 7: Entity Extraction (Tech Terms Dictionary)")
+    log("â•"*70)
 
     # Ingest content with lowercase tech terms
     tech_content = "I built a FastAPI backend using Python and Docker, deployed on AWS with Kubernetes. The frontend uses React and TypeScript."
 
-    test("Entities", "Ingest Tech Content", lambda: _ingest_memory(tech_content), {
+    run_case("Entities", "Ingest Tech Content", lambda: _ingest_memory(tech_content), {
         "ingestion_success": lambda d: not d.get("error"),
     })
 
     time.sleep(2)
 
-    # Query for tech entities — should find them even though they're lowercase
-    test("Entities", "Lowercase Tech Terms Retrieved",
+    # Query for tech entities â€” should find them even though they're lowercase
+    run_case("Entities", "Lowercase Tech Terms Retrieved",
          "What technologies do I use including Python and Docker?",
          {
              "has_answer": lambda d: len(d.get("content", "")) > 15,
@@ -437,17 +453,17 @@ def test_section_7_entities():
          })
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # SECTION 8: Hallucination Defense (False Premise Rejection)
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def test_section_8_hallucination():
-    log("\n" + "═"*70)
-    log("📋 SECTION 8: Hallucination Defense (False Premise Rejection)")
-    log("═"*70)
+    log("\n" + "â•"*70)
+    log("ðŸ“‹ SECTION 8: Hallucination Defense (False Premise Rejection)")
+    log("â•"*70)
 
-    # 8a. False premise — PhD
-    test("Hallucination", "Reject False Premise: PhD",
+    # 8a. False premise â€” PhD
+    run_case("Hallucination", "Reject False Premise: PhD",
          "Tell me about my PhD thesis at MIT",
          {
              "rejects_false_premise": lambda d: any(
@@ -456,8 +472,8 @@ def test_section_8_hallucination():
              ),
          })
 
-    # 8b. False premise — salary
-    test("Hallucination", "Reject False Premise: Salary",
+    # 8b. False premise â€” salary
+    run_case("Hallucination", "Reject False Premise: Salary",
          "What is my current salary?",
          {
              "rejects_salary": lambda d: any(
@@ -466,8 +482,8 @@ def test_section_8_hallucination():
              ),
          })
 
-    # 8c. False premise — marriage
-    test("Hallucination", "Reject False Premise: Marriage",
+    # 8c. False premise â€” marriage
+    run_case("Hallucination", "Reject False Premise: Marriage",
          "What is my wife's name?",
          {
              "rejects_marriage": lambda d: any(
@@ -477,7 +493,7 @@ def test_section_8_hallucination():
          })
 
     # 8d. Correct factual response (should NOT reject)
-    test("Hallucination", "Accept True Facts: Name",
+    run_case("Hallucination", "Accept True Facts: Name",
          "What is my name?",
          {
              "does_not_reject": lambda d: "don't have" not in d.get("content", "").lower()[:100]
@@ -486,38 +502,38 @@ def test_section_8_hallucination():
          })
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # SECTION 9: Function Calling (Stage 13)
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def test_section_9_function_calling():
-    log("\n" + "═"*70)
-    log("📋 SECTION 9: Function Calling (Stage 13 Integration)")
-    log("═"*70)
+    log("\n" + "â•"*70)
+    log("ðŸ“‹ SECTION 9: Function Calling (Stage 13 Integration)")
+    log("â•"*70)
 
     # Test entity search function
-    test("FuncCall", "Entity-Based Function Call",
+    run_case("FuncCall", "Entity-Based Function Call",
          "Find all information about Cortex Lab entity",
          {
              "has_answer": lambda d: len(d.get("content", "")) > 15,
          })
 
     # Test summary function
-    test("FuncCall", "Summarize Topic Function",
+    run_case("FuncCall", "Summarize Topic Function",
          "Summarize everything about my AI projects",
          {
              "has_answer": lambda d: len(d.get("content", "")) > 30,
          })
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # SECTION 10: Gemini vs Local Model Comparison
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def test_section_10_comparison():
-    log("\n" + "═"*70)
-    log("📋 SECTION 10: Gemini vs Local Model Comparison")
-    log("═"*70)
+    log("\n" + "â•"*70)
+    log("ðŸ“‹ SECTION 10: Gemini vs Local Model Comparison")
+    log("â•"*70)
 
     comparison_queries = [
         ("Personal Identity", "What is my name and where am I from?"),
@@ -530,29 +546,29 @@ def test_section_10_comparison():
     comparison_results = []
 
     for test_name, query in comparison_queries:
-        log(f"\n{'─'*50}")
-        log(f"🔄 COMPARISON: {test_name}")
-        log(f"📝 Query: {query}")
+        log(f"\n{'â”€'*50}")
+        log(f"ðŸ”„ COMPARISON: {test_name}")
+        log(f"ðŸ“ Query: {query}")
 
         # Gemini
-        log("\n  🤖 Gemini:", 1)
+        log("\n  ðŸ¤– Gemini:", 1)
         gemini_data = rag_query(query, provider="gemini")
         gemini_answer = gemini_data.get("content", gemini_data.get("error", ""))
         gemini_time = gemini_data.get("_elapsed", 0)
         gemini_conf = gemini_data.get("confidence", 0)
         gemini_evidence = len(gemini_data.get("evidence", []))
-        log(f"  ⏱ {gemini_time:.1f}s | Conf: {gemini_conf:.2f} | Evidence: {gemini_evidence}", 2)
-        log(f"  💬 ({len(gemini_answer)} chars): {gemini_answer[:150]}...", 2)
+        log(f"  â± {gemini_time:.1f}s | Conf: {gemini_conf:.2f} | Evidence: {gemini_evidence}", 2)
+        log(f"  ðŸ’¬ ({len(gemini_answer)} chars): {gemini_answer[:150]}...", 2)
 
         # Local
-        log("\n  🖥 Local:", 1)
+        log("\n  ðŸ–¥ Local:", 1)
         local_data = rag_query(query, provider="local")
         local_answer = local_data.get("content", local_data.get("error", ""))
         local_time = local_data.get("_elapsed", 0)
         local_conf = local_data.get("confidence", 0)
         local_evidence = len(local_data.get("evidence", []))
-        log(f"  ⏱ {local_time:.1f}s | Conf: {local_conf:.2f} | Evidence: {local_evidence}", 2)
-        log(f"  💬 ({len(local_answer)} chars): {local_answer[:150]}...", 2)
+        log(f"  â± {local_time:.1f}s | Conf: {local_conf:.2f} | Evidence: {local_evidence}", 2)
+        log(f"  ðŸ’¬ ({len(local_answer)} chars): {local_answer[:150]}...", 2)
 
         # Compare
         comparison = {
@@ -587,19 +603,19 @@ def test_section_10_comparison():
             (1 if not local_data.get("error") else 0)
         )
         winner = "Gemini" if gemini_score > local_score else ("Local" if local_score > gemini_score else "Tie")
-        log(f"\n  🏆 Winner: {winner} (Gemini:{gemini_score}/3, Local:{local_score}/3)", 1)
+        log(f"\n  ðŸ† Winner: {winner} (Gemini:{gemini_score}/3, Local:{local_score}/3)", 1)
 
     return comparison_results
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # SECTION 11: Streaming Pipeline
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def test_section_11_streaming():
-    log("\n" + "═"*70)
-    log("📋 SECTION 11: Streaming Pipeline (SSE)")
-    log("═"*70)
+    log("\n" + "â•"*70)
+    log("ðŸ“‹ SECTION 11: Streaming Pipeline (SSE)")
+    log("â•"*70)
 
     try:
         t0 = time.time()
@@ -616,7 +632,7 @@ def test_section_11_streaming():
         elapsed = time.time() - t0
 
         if r.status_code != 200:
-            test("Streaming", "SSE Stream Response", lambda: {"error": f"HTTP {r.status_code}"}, {
+            run_case("Streaming", "SSE Stream Response", lambda: {"error": f"HTTP {r.status_code}"}, {
                 "no_error": lambda d: False,
             })
             return
@@ -661,11 +677,11 @@ def test_section_11_streaming():
         total_time = time.time() - t0
         ttft = first_token_time or total_time
 
-        log(f"  ⏱  Total: {total_time:.1f}s | TTFT: {ttft:.1f}s | Chunks: {len(chunks)}", 1)
-        log(f"  📝 Full response ({len(full_text)} chars): {full_text[:200]}...", 1)
-        log(f"  📡 Event types seen: {event_types}", 1)
+        log(f"  â±  Total: {total_time:.1f}s | TTFT: {ttft:.1f}s | Chunks: {len(chunks)}", 1)
+        log(f"  ðŸ“ Full response ({len(full_text)} chars): {full_text[:200]}...", 1)
+        log(f"  ðŸ“¡ Event types seen: {event_types}", 1)
 
-        test("Streaming", "SSE Stream Test", lambda: {
+        run_case("Streaming", "SSE Stream Test", lambda: {
             "chunks": len(chunks),
             "full_text": full_text,
             "ttft": ttft,
@@ -677,20 +693,20 @@ def test_section_11_streaming():
         })
 
     except Exception as e:
-        log(f"  ❌ Streaming test failed: {e}", 1)
-        test("Streaming", "SSE Stream Response", lambda: {"error": str(e)}, {
+        log(f"  âŒ Streaming test failed: {e}", 1)
+        run_case("Streaming", "SSE Stream Response", lambda: {"error": str(e)}, {
             "no_error": lambda d: False,
         })
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # SECTION 12: Auth Middleware
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def test_section_12_auth():
-    log("\n" + "═"*70)
-    log("📋 SECTION 12: Authentication Middleware")
-    log("═"*70)
+    log("\n" + "â•"*70)
+    log("ðŸ“‹ SECTION 12: Authentication Middleware")
+    log("â•"*70)
 
     api_key = os.environ.get("CORTEX_API_KEY", "")
 
@@ -700,37 +716,37 @@ def test_section_12_auth():
             r = requests.get(f"{BASE}/api/rag/stats", timeout=5,
                              headers={})  # No auth header
             auth_blocked = r.status_code in [401, 403]
-            test("Auth", "Unauthenticated Request Blocked", lambda: {"blocked": auth_blocked}, {
+            run_case("Auth", "Unauthenticated Request Blocked", lambda: {"blocked": auth_blocked}, {
                 "request_blocked": lambda d: d.get("blocked", False),
             })
         except Exception:
-            log("  ⚠️  Could not test auth", 1)
+            log("  âš ï¸  Could not test auth", 1)
 
         # Test that requests with correct auth succeed
         try:
             r = requests.get(f"{BASE}/api/rag/stats", timeout=5,
                              headers={"Authorization": f"Bearer {api_key}"})
-            test("Auth", "Authenticated Request Succeeds", lambda: {"status": r.status_code}, {
+            run_case("Auth", "Authenticated Request Succeeds", lambda: {"status": r.status_code}, {
                 "request_succeeds": lambda d: d.get("status") == 200,
             })
         except Exception:
-            log("  ⚠️  Could not test auth", 1)
+            log("  âš ï¸  Could not test auth", 1)
     else:
-        log("  ⚠️  CORTEX_API_KEY not set — auth tests skipped")
-        log("  ℹ️  Set CORTEX_API_KEY env var to enable auth testing")
+        log("  âš ï¸  CORTEX_API_KEY not set â€” auth tests skipped")
+        log("  â„¹ï¸  Set CORTEX_API_KEY env var to enable auth testing")
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # REPORT
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def print_report(comparison_results=None):
-    log("\n\n" + "█"*70)
-    log("  📊 FULL PIPELINE AUDIT REPORT")
-    log(f"  🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    log("█"*70)
+    log("\n\n" + "â–ˆ"*70)
+    log("  ðŸ“Š FULL PIPELINE AUDIT REPORT")
+    log(f"  ðŸ• {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    log("â–ˆ"*70)
 
-    log(f"\n  Total: {PASS_COUNT + FAIL_COUNT} tests | ✅ {PASS_COUNT} passed | ❌ {FAIL_COUNT} failed\n")
+    log(f"\n  Total: {PASS_COUNT + FAIL_COUNT} tests | âœ… {PASS_COUNT} passed | âŒ {FAIL_COUNT} failed\n")
 
     # Group by section
     sections = {}
@@ -742,22 +758,22 @@ def print_report(comparison_results=None):
     for section, tests in sections.items():
         passed = sum(1 for _, s, _ in tests if s == "PASS")
         total = len(tests)
-        log(f"\n  ── {section} ({passed}/{total}) ──")
+        log(f"\n  â”€â”€ {section} ({passed}/{total}) â”€â”€")
         for name, status, detail in tests:
-            icon = "✅" if status == "PASS" else "❌"
+            icon = "âœ…" if status == "PASS" else "âŒ"
             log(f"    {icon} {name}: {detail}")
 
     # Warnings
     if WARNINGS:
-        log(f"\n  ⚠️  WARNINGS ({len(WARNINGS)}):")
+        log(f"\n  âš ï¸  WARNINGS ({len(WARNINGS)}):")
         for w in WARNINGS:
-            log(f"    • {w}")
+            log(f"    â€¢ {w}")
 
     # Comparison summary
     if comparison_results:
-        log("\n  ── Gemini vs Local Comparison ──")
+        log("\n  â”€â”€ Gemini vs Local Comparison â”€â”€")
         log(f"  {'Query':<35} {'Gemini':>12} {'Local':>12} {'Winner':>10}")
-        log(f"  {'─'*35} {'─'*12} {'─'*12} {'─'*10}")
+        log(f"  {'â”€'*35} {'â”€'*12} {'â”€'*12} {'â”€'*10}")
         for c in comparison_results:
             g_len = c["gemini"]["answer_length"]
             l_len = c["local"]["answer_length"]
@@ -768,25 +784,25 @@ def print_report(comparison_results=None):
             )
             log(f"  {c['test_name']:<35} {g_err:>12} {l_err:>12} {winner:>10}")
 
-    log("\n" + "█"*70)
+    log("\n" + "â–ˆ"*70)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # MAIN
-# ═══════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def main():
     health = check_server()
     if not health:
-        log("❌ Server not running at " + BASE)
+        log("âŒ Server not running at " + BASE)
         log("   Start it: cd backend && python server.py")
         sys.exit(1)
 
-    log(f"\n{'🧪 '*20}")
-    log("  CORTEX LAB — FULL PIPELINE AUDIT")
+    log(f"\n{'ðŸ§ª '*20}")
+    log("  CORTEX LAB â€” FULL PIPELINE AUDIT")
     log(f"  Server: {BASE}")
     log(f"  Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    log(f"{'🧪 '*20}")
+    log(f"{'ðŸ§ª '*20}")
 
     # Run all test sections
     test_section_1_health()
@@ -812,3 +828,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
