@@ -19,8 +19,11 @@ import {
   BarChart3,
   Eye,
   Target,
+  Loader2,
+  X,
 } from "lucide-react";
 import type { PipelineTrace, PipelineStep } from "@/lib/types";
+import { cancelRuntimeTask } from "@/lib/api";
 
 interface Props {
   trace: PipelineTrace;
@@ -29,6 +32,8 @@ interface Props {
 export function PipelineTracePanel({ trace }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [expandedSteps, setExpandedSteps] = useState<Set<number>>(new Set());
+  const [cancellingCoordinator, setCancellingCoordinator] = useState(false);
+  const [runtimeTaskActionMessage, setRuntimeTaskActionMessage] = useState("");
 
   const toggleStep = (idx: number) => {
     setExpandedSteps((prev) => {
@@ -105,6 +110,26 @@ export function PipelineTracePanel({ trace }: Props) {
   // Calculate timing percentages for the waterfall
   const totalMs = trace.total_duration_ms || 1;
   const completedSteps = trace.steps.filter((s) => s.status === "completed");
+  const coordinatorTaskId =
+    trace.coordinator_task_id
+    || trace.subagent_spawn_records?.[0]?.parent_task_id
+    || "";
+  const subagentTaskIds = Array.from(new Set((trace.subagent_spawn_records || [])
+    .map((record) => record.task_id)
+    .filter((taskId) => Boolean(taskId))));
+
+  const handleCancelCoordinator = async () => {
+    if (!coordinatorTaskId) return;
+    setCancellingCoordinator(true);
+    try {
+      await cancelRuntimeTask(coordinatorTaskId, "Cancelled from pipeline trace panel", true);
+      setRuntimeTaskActionMessage("Coordinator cancellation submitted.");
+    } catch (err) {
+      setRuntimeTaskActionMessage(err instanceof Error ? err.message : "Failed to cancel coordinator task");
+    } finally {
+      setCancellingCoordinator(false);
+    }
+  };
 
   return (
     <div className="mt-2 rounded-2xl border border-slate-200 bg-white overflow-hidden transition-all duration-300">
@@ -243,6 +268,64 @@ export function PipelineTracePanel({ trace }: Props) {
               })}
             </div>
           </div>
+
+          {/* ── Runtime Task Links ─────────────────────────── */}
+          {(coordinatorTaskId || subagentTaskIds.length > 0) && (
+            <div>
+              <h4 className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                <Activity size={10} />
+                Runtime Task Actions
+              </h4>
+              <div className="rounded-xl border border-slate-100 bg-slate-50/80 p-2.5 space-y-1.5">
+                {coordinatorTaskId ? (
+                  <div className="text-[10px] text-slate-600 break-all">
+                    <span className="font-semibold text-slate-700">Coordinator:</span>{" "}
+                    <span className="font-mono text-slate-700">{coordinatorTaskId}</span>
+                    <a
+                      href={`/api/runtime/tasks/${encodeURIComponent(coordinatorTaskId)}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="ml-2 text-indigo-600 hover:text-indigo-700 underline"
+                    >
+                      view api
+                    </a>
+                    <button
+                      onClick={handleCancelCoordinator}
+                      disabled={cancellingCoordinator}
+                      className="ml-2 inline-flex items-center gap-1 rounded-md border border-red-300 bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold text-red-700 hover:bg-red-100 disabled:opacity-60"
+                    >
+                      {cancellingCoordinator ? <Loader2 size={9} className="animate-spin" /> : <X size={9} />}
+                      cancel
+                    </button>
+                  </div>
+                ) : null}
+
+                {subagentTaskIds.length > 0 ? (
+                  <div className="text-[10px] text-slate-600 break-all">
+                    <span className="font-semibold text-slate-700">Subagents:</span>{" "}
+                    {subagentTaskIds.map((taskId) => (
+                      <span key={taskId} className="mr-2">
+                        <a
+                          href={`/api/runtime/tasks/${encodeURIComponent(taskId)}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="font-mono text-indigo-600 hover:text-indigo-700 underline"
+                        >
+                          {taskId}
+                        </a>
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+
+                {runtimeTaskActionMessage ? (
+                  <div className="rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-[10px] text-indigo-700">
+                    {runtimeTaskActionMessage}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          )}
 
           {/* ── Retrieval Channels Breakdown ──────────────────── */}
           {trace.retrieval_channels.length > 0 && (

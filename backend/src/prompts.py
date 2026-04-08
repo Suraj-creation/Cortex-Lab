@@ -73,7 +73,7 @@ class PromptBuilder:
     def faithful_generation(query: str, evidence_text: str,
                             session_context: str = "") -> str:
         """Stage 1: Grounded generation with inline citations."""
-        ctx_line = f"\nSession context: {sanitize(session_context[:200])}" if session_context else ""
+        ctx_line = f"\nSession context: {sanitize(session_context[:1200])}" if session_context else ""
         system = (
             "You are Cortex Lab, an intelligent personal AI assistant who knows the user well.\n"
             "Answer their question naturally using the information below.\n\n"
@@ -183,7 +183,7 @@ class PromptBuilder:
             "Available agents: timeline, causal, reflection, planning, arbitration\n"
             "Complexity: low (0.0-0.3), medium (0.3-0.6), high (0.6-1.0)"
         )
-        ctx = f"Session context: {sanitize(session_context[:200])}\n" if session_context else ""
+        ctx = f"Session context: {sanitize(session_context[:500])}\n" if session_context else ""
         user = f"{ctx}Query: {sanitize(query)}\n\nOutput routing decision as JSON:"
         return _format_chat(system, user)
 

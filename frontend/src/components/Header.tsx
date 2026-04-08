@@ -1,6 +1,6 @@
 "use client";
 
-import { PanelLeftOpen, Cpu, Loader2, WifiOff, CheckCircle2, FlaskConical } from "lucide-react";
+import { PanelLeftOpen, Cpu, FlaskConical } from "lucide-react";
 import { ModelStatus } from "@/lib/types";
 
 interface Props {
@@ -27,12 +27,6 @@ export function Header({ modelStatus, sidebarOpen, onToggleSidebar }: Props) {
     : modelStatus.status === "loading"
       ? "bg-amber-500"
       : "bg-red-500";
-
-  const StatusIcon = modelStatus.model_loaded
-    ? CheckCircle2
-    : modelStatus.status === "loading"
-      ? Loader2
-      : WifiOff;
 
   const isFT = modelStatus.model_info.fine_tuned;
   const stages = modelStatus.model_info.training_stages_completed ?? 0;

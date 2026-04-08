@@ -9,7 +9,7 @@ import asyncio
 import os
 import time
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     import torch
@@ -30,6 +30,7 @@ from src.retrieval.hybrid_retriever import HybridRetriever
 from src.agents.orchestrator import AgentOrchestrator
 from src.ingestion import MemoryIngestionPipeline
 from src.cache import MultiLevelCache
+from src.runtime.task_manager import RuntimeTaskManager
 
 
 class CortexRAGEngine:
@@ -77,6 +78,8 @@ class CortexRAGEngine:
         self.ingestion: Optional[MemoryIngestionPipeline] = None
         self.cache: Optional[MultiLevelCache] = None
         self.pageindex_store = None  # PageIndex cloud document retrieval (optional)
+        self.safe_tool_runtime = None
+        self.runtime_task_manager: Optional[RuntimeTaskManager] = None
 
         # Ambient Voice Service (lazy-initialized after RAG init)
         self.ambient_service = None
@@ -84,6 +87,15 @@ class CortexRAGEngine:
         # Session tracking
         self._current_session_id = ""
         self._session_context = ""
+
+        # Phase 1 safe tool runtime baseline (policy + classifier + approvals)
+        try:
+            from src.runtime.safety import SafeToolRuntime
+
+            self.safe_tool_runtime = SafeToolRuntime.default()
+        except Exception as e:
+            print(f"  ⚠ Safe tool runtime init skipped: {e}")
+            self.safe_tool_runtime = None
 
     def init(self, model=None, tokenizer=None):
         """
@@ -188,7 +200,9 @@ class CortexRAGEngine:
         try:
             self.orchestrator = AgentOrchestrator(
                 self.llm, self.hybrid_retriever,
-                self.query_analyzer, self.query_transformer
+                self.query_analyzer, self.query_transformer,
+                safe_tool_runtime=self.safe_tool_runtime,
+                runtime_task_manager=self.runtime_task_manager,
             )
         except Exception as e:
             print(f"  ⚠ Orchestrator failed: {e}")
@@ -812,6 +826,109 @@ class CortexRAGEngine:
             "cache": self.cache.get_stats() if self.cache else {},
             "llm": self.llm.get_stats() if self.llm else {},
         }
+
+    def get_tool_contracts(self) -> List[Dict]:
+        """Return Phase 0 core tool contracts for runtime governance.
+
+        This accessor allows runtime and API layers to inspect which existing
+        engine operations are represented as typed tool contracts.
+        """
+        from src.runtime.tool_catalog import build_core_tool_catalog_dicts
+
+        return build_core_tool_catalog_dicts()
+
+    def evaluate_tool_operation(
+        self,
+        request_id: str,
+        tool_name: str,
+        command_text: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Evaluate a tool operation against safe runtime policy and queue rules."""
+        if self.safe_tool_runtime is None:
+            raise RuntimeError("safe_tool_runtime_unavailable")
+
+        result = self.safe_tool_runtime.evaluate_tool_operation(
+            request_id=request_id,
+            tool_name=tool_name,
+            command_text=command_text,
+            metadata=metadata,
+        )
+
+        return {
+            "request_id": request_id,
+            "tool_name": tool_name,
+            "decision": {
+                "effect": result.decision.effect.value,
+                "reason": result.decision.reason,
+                "rule_id": result.decision.rule_id,
+                "requires_human_approval": result.decision.requires_human_approval,
+            },
+            "stop_reason": result.stop_reason.value if result.stop_reason else None,
+            "dangerous_signals": [
+                {
+                    "tool_name": signal.tool_name,
+                    "matched_pattern": signal.matched_pattern,
+                    "severity": signal.severity.value,
+                }
+                for signal in result.dangerous_signals
+            ],
+            "permission_request": result.permission_request.to_dict() if result.permission_request else None,
+            "audit_event": result.audit_event.to_dict(),
+        }
+
+    def get_pending_permissions(self) -> List[Dict[str, Any]]:
+        if self.safe_tool_runtime is None:
+            raise RuntimeError("safe_tool_runtime_unavailable")
+        return [
+            request.to_dict()
+            for request in self.safe_tool_runtime.list_pending_permissions()
+        ]
+
+    def get_permission_request(self, permission_id: str) -> Optional[Dict[str, Any]]:
+        if self.safe_tool_runtime is None:
+            raise RuntimeError("safe_tool_runtime_unavailable")
+        request = self.safe_tool_runtime.permission_queue.get(permission_id)
+        return request.to_dict() if request else None
+
+    def expire_permission_requests(self) -> List[Dict[str, Any]]:
+        if self.safe_tool_runtime is None:
+            raise RuntimeError("safe_tool_runtime_unavailable")
+        return [
+            request.to_dict()
+            for request in self.safe_tool_runtime.expire_permission_requests()
+        ]
+
+    def resolve_permission_request(
+        self,
+        permission_id: str,
+        approve: bool,
+        actor: str,
+        note: str = "",
+    ) -> Dict[str, Any]:
+        if self.safe_tool_runtime is None:
+            raise RuntimeError("safe_tool_runtime_unavailable")
+        request = self.safe_tool_runtime.resolve_permission_request(
+            permission_id=permission_id,
+            approve=approve,
+            actor=actor,
+            note=note,
+        )
+        return request.to_dict()
+
+    def get_policy_audit_events(self, limit: int = 100) -> List[Dict[str, Any]]:
+        if self.safe_tool_runtime is None:
+            raise RuntimeError("safe_tool_runtime_unavailable")
+        return [
+            event.to_dict()
+            for event in self.safe_tool_runtime.list_audit_events(limit=limit)
+        ]
+
+    def set_runtime_task_manager(self, runtime_task_manager: RuntimeTaskManager) -> None:
+        """Attach shared runtime task manager used for coordinator/subagent tracking."""
+        self.runtime_task_manager = runtime_task_manager
+        if self.orchestrator is not None:
+            self.orchestrator.runtime_task_manager = runtime_task_manager
 
     # ─── Persistence ─────────────────────────────────────────────────────
 

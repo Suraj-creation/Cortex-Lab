@@ -27,7 +27,7 @@ class AmbientConfig:
     # Speaker ID
     similarity_threshold: float = 0.70
 
-    # STT provider: "traditional" (faster-whisper) or "gemini"
+    # STT provider: "traditional"/"local" (faster-whisper) or "gemini"
     stt_provider: str = "traditional"
 
     # Whisper (traditional STT)
@@ -35,7 +35,7 @@ class AmbientConfig:
     whisper_device: str = "auto"       # auto, cuda, cpu
     whisper_language: Optional[str] = None  # None = auto-detect
 
-    # TTS provider: "traditional" (Piper) or "gemini"
+    # TTS provider: "traditional"/"local" (Piper) or "gemini"
     tts_provider: str = "traditional"
 
     # TTS

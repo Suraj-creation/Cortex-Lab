@@ -1,4 +1,30 @@
-import { ChatSettings, DEFAULT_SETTINGS, MemoryObject, GraphData, RAGStats, EvidenceCard, AmbientState, AmbientConfig, ConversationRecord, VoiceQueryResult, ConversationTurn, PipelineTrace, TracesResponse, VoiceProviders, VoiceProviderType, LivePipelineEvent } from "./types";
+import {
+  ChatSettings,
+  DEFAULT_SETTINGS,
+  InferenceMode,
+  LLMProviderType,
+  MemoryObject,
+  GraphData,
+  RAGStats,
+  EvidenceCard,
+  ModelpackManifest,
+  AmbientState,
+  AmbientConfig,
+  ConversationRecord,
+  VoiceQueryResult,
+  ConversationTurn,
+  PipelineTrace,
+  TracesResponse,
+  VoiceProviders,
+  VoiceProviderType,
+  LivePipelineEvent,
+  RuntimePermissionRequest,
+  RuntimeTaskEvent,
+  RuntimeTaskListResponse,
+  RuntimeTaskReferences,
+  RuntimeTaskSnapshot,
+  RuntimeSelection,
+} from "./types";
 
 const API_BASE = "/api";
 
@@ -46,6 +72,8 @@ export async function sendMessage(
       max_tokens: settings.maxTokens,
       stream: false,
       llm_provider: settings.llmProvider || "local",
+      inference_mode: settings.inferenceMode,
+      allow_cloud_fallback: settings.allowCloudFallback,
       thinking_mode: settings.thinkingMode ?? true,
     }),
   });
@@ -78,6 +106,8 @@ export async function streamMessage(
         max_tokens: settings.maxTokens,
         stream: true,
         llm_provider: settings.llmProvider || "local",
+        inference_mode: settings.inferenceMode,
+        allow_cloud_fallback: settings.allowCloudFallback,
         thinking_mode: settings.thinkingMode ?? true,
       }),
     });
@@ -144,6 +174,7 @@ export async function ragChat(
   processing_time_ms?: number;
   cache_hit?: boolean;
   pipeline_trace?: PipelineTrace;
+  runtime_tasks?: RuntimeTaskReferences;
 }> {
   // Use direct backend URL to bypass Next.js proxy timeout
   const res = await fetch(`${BACKEND_DIRECT}/rag/chat`, {
@@ -158,6 +189,8 @@ export async function ragChat(
       use_rag: true,
       session_id: sessionId,
       llm_provider: settings.llmProvider || "local",
+      inference_mode: settings.inferenceMode,
+      allow_cloud_fallback: settings.allowCloudFallback,
       thinking_mode: settings.thinkingMode ?? true,
     }),
   });
@@ -179,6 +212,7 @@ export interface RAGStreamMeta {
   query_analysis?: { intent: string; complexity: number; routing: string };
   thinking?: string;
   pipeline_trace?: PipelineTrace;
+  runtime_tasks?: RuntimeTaskReferences;
 }
 
 export async function streamRAGMessage(
@@ -206,6 +240,8 @@ export async function streamRAGMessage(
         use_rag: true,
         session_id: sessionId,
         llm_provider: settings.llmProvider || "local",
+        inference_mode: settings.inferenceMode,
+        allow_cloud_fallback: settings.allowCloudFallback,
         thinking_mode: settings.thinkingMode ?? true,
       }),
     });
@@ -268,7 +304,8 @@ export async function streamRAGMessage(
 // ── LLM Provider Toggle ────────────────────────────────────────
 
 export async function getLLMProvider(): Promise<{
-  provider: string;
+  provider: LLMProviderType;
+  active_backend?: "local" | "gemini";
   available: string[];
   gemini_configured: boolean;
   local_model_loaded: boolean;
@@ -279,7 +316,7 @@ export async function getLLMProvider(): Promise<{
 }
 
 export async function setLLMProvider(
-  provider: "local" | "gemini",
+  provider: LLMProviderType,
 ): Promise<{ provider: string; status: string }> {
   const res = await fetch(`${API_BASE}/llm/provider`, {
     method: "POST",
@@ -289,6 +326,127 @@ export async function setLLMProvider(
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || `Failed to switch provider: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function getRuntimeMode(): Promise<{
+  mode: InferenceMode;
+  allow_cloud_fallback: boolean;
+  supported_modes: InferenceMode[];
+}> {
+  const res = await fetch(`${API_BASE}/runtime/mode`);
+  if (!res.ok) throw new Error(`Failed to fetch runtime mode: ${res.status}`);
+  return res.json();
+}
+
+export async function setRuntimeMode(
+  mode: InferenceMode,
+  allowCloudFallback?: boolean,
+): Promise<{
+  mode: InferenceMode;
+  allow_cloud_fallback: boolean;
+  supported_modes: InferenceMode[];
+}> {
+  const res = await fetch(`${API_BASE}/runtime/mode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode, allow_cloud_fallback: allowCloudFallback }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to set runtime mode: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function getRuntimeProviders(): Promise<{
+  selection: {
+    mode: InferenceMode;
+    llm_provider: LLMProviderType;
+    stt_provider: VoiceProviderType;
+    tts_provider: VoiceProviderType;
+    allow_cloud_fallback: boolean;
+    updated_at: string;
+  };
+  available: {
+    llm: LLMProviderType[];
+    stt: VoiceProviderType[];
+    tts: VoiceProviderType[];
+  };
+  availability: {
+    llm: Record<string, boolean>;
+    stt: Record<string, boolean>;
+    tts: Record<string, boolean>;
+    ambient_available: boolean;
+  };
+}> {
+  const res = await fetch(`${API_BASE}/runtime/providers`);
+  if (!res.ok) throw new Error(`Failed to fetch runtime providers: ${res.status}`);
+  return res.json();
+}
+
+export async function setRuntimeProviders(
+  selection: Partial<RuntimeSelection>,
+): Promise<{
+  selection: {
+    mode: InferenceMode;
+    llm_provider: LLMProviderType;
+    stt_provider: VoiceProviderType;
+    tts_provider: VoiceProviderType;
+    allow_cloud_fallback: boolean;
+    updated_at: string;
+  };
+  fallback_applied: Array<{ target: string; from: string; to: string }>;
+}> {
+  const res = await fetch(`${API_BASE}/runtime/providers`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      llm_provider: selection.llmProvider,
+      stt_provider: selection.sttProvider,
+      tts_provider: selection.ttsProvider,
+      allow_cloud_fallback: selection.allowCloudFallback,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to set runtime providers: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function getRuntimeHealth(): Promise<Record<string, unknown>> {
+  const res = await fetch(`${API_BASE}/runtime/health`);
+  if (!res.ok) throw new Error(`Failed to fetch runtime health: ${res.status}`);
+  return res.json();
+}
+
+export async function getModelpackManifest(): Promise<ModelpackManifest> {
+  const res = await fetch(`${API_BASE}/modelpacks/manifest`);
+  if (!res.ok) throw new Error(`Failed to fetch modelpack manifest: ${res.status}`);
+  return res.json();
+}
+
+export async function verifyModelpack(
+  filePath: string,
+  expectedSha256: string,
+): Promise<{
+  verified: boolean;
+  algorithm: string;
+  file_path: string;
+  file_size_bytes: number;
+  expected_sha256: string;
+  actual_sha256: string;
+}> {
+  const res = await fetch(`${API_BASE}/modelpacks/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file_path: filePath, expected_sha256: expectedSha256 }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to verify modelpack: ${res.status}`);
   }
   return res.json();
 }
@@ -307,13 +465,31 @@ export async function getMemories(
 export async function ingestMemory(
   content: string,
   source: string = "manual",
-): Promise<{ status: string; memory: MemoryObject }> {
+): Promise<
+  | { status: "ok"; memory: MemoryObject }
+  | {
+      status: "pending_approval";
+      request_id: string;
+      decision: Record<string, unknown>;
+      permission_request: RuntimePermissionRequest;
+      next: string;
+    }
+> {
   const res = await fetch(`${API_BASE}/memories/ingest`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content, source }),
   });
-  if (!res.ok) throw new Error(`Failed to ingest memory: ${res.status}`);
+
+  if (res.status === 202) {
+    return res.json();
+  }
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to ingest memory: ${res.status}`);
+  }
+
   return res.json();
 }
 
@@ -330,9 +506,33 @@ export async function searchMemories(
   return res.json();
 }
 
-export async function deleteMemory(memoryId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/memories/${memoryId}`, { method: "DELETE" });
-  if (!res.ok) throw new Error(`Failed to delete memory: ${res.status}`);
+export async function deleteMemory(
+  memoryId: string,
+  permissionId?: string,
+): Promise<
+  | { status: "ok" | "not_found"; approved_execution?: boolean; permission_id?: string }
+  | { status: "pending_execution"; permission_id: string; next: string }
+  | {
+      status: "pending_approval";
+      request_id: string;
+      decision: Record<string, unknown>;
+      permission_request: RuntimePermissionRequest;
+      next: string;
+    }
+> {
+  const query = permissionId ? `?permission_id=${encodeURIComponent(permissionId)}` : "";
+  const res = await fetch(`${API_BASE}/memories/${memoryId}${query}`, { method: "DELETE" });
+
+  if (res.status === 202) {
+    return res.json();
+  }
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to delete memory: ${res.status}`);
+  }
+
+  return res.json();
 }
 
 // ── Knowledge Graph ─────────────────────────────────────────────
@@ -640,6 +840,140 @@ export async function getObservabilityMetrics(): Promise<Record<string, unknown>
   const res = await fetch(`${BACKEND_DIRECT}/rag/observability/metrics`);
   if (!res.ok) throw new Error(`Failed to fetch metrics: ${res.status}`);
   return res.json();
+}
+
+// ── Runtime Safety / Approval Queue ───────────────────────────
+
+export async function getRuntimeSafetyPermissions(): Promise<{
+  count: number;
+  pending: RuntimePermissionRequest[];
+  expired_count?: number;
+}> {
+  const res = await fetch(`${API_BASE}/runtime/safety/permissions`);
+  if (!res.ok) throw new Error(`Failed to fetch runtime permissions: ${res.status}`);
+  return res.json();
+}
+
+export async function getRuntimeSafetyExecutorStatus(): Promise<{
+  enabled: boolean;
+  running: boolean;
+  poll_interval_seconds?: number;
+  execution_timeout_seconds?: number;
+  max_attempts?: number;
+  summary: {
+    approved_total: number;
+    pending_total: number;
+    running: number;
+    waiting_retry: number;
+    completed: number;
+    failed: number;
+    unsupported: number;
+    idle: number;
+  };
+}> {
+  const res = await fetch(`${API_BASE}/runtime/safety/executor`);
+  if (!res.ok) throw new Error(`Failed to fetch runtime executor status: ${res.status}`);
+  return res.json();
+}
+
+export async function resolveRuntimeSafetyPermission(
+  permissionId: string,
+  approve: boolean,
+  actor = "frontend-operator",
+  note = "",
+): Promise<{ resolved: RuntimePermissionRequest }> {
+  const res = await fetch(`${API_BASE}/runtime/safety/permissions/${encodeURIComponent(permissionId)}/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ approve, actor, note }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to resolve permission: ${res.status}`);
+  }
+
+  return res.json();
+}
+
+export async function getRuntimeTasks(): Promise<RuntimeTaskListResponse> {
+  const res = await fetch(`${API_BASE}/runtime/tasks`);
+  if (!res.ok) throw new Error(`Failed to fetch runtime tasks: ${res.status}`);
+  return res.json();
+}
+
+export async function getRuntimeTask(taskId: string): Promise<{ task: RuntimeTaskSnapshot }> {
+  const res = await fetch(`${API_BASE}/runtime/tasks/${encodeURIComponent(taskId)}`);
+  if (!res.ok) throw new Error(`Failed to fetch runtime task: ${res.status}`);
+  return res.json();
+}
+
+export async function cancelRuntimeTask(
+  taskId: string,
+  reason = "Cancelled from observability dashboard",
+  propagate = true,
+): Promise<{ cancelled_task_ids: string[] }> {
+  const res = await fetch(`${API_BASE}/runtime/tasks/${encodeURIComponent(taskId)}/cancel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason, propagate }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to cancel runtime task: ${res.status}`);
+  }
+
+  return res.json();
+}
+
+export function subscribeRuntimeTaskEvents(
+  onEvent: (event: RuntimeTaskEvent) => void,
+  onError?: (err: Error) => void,
+): AbortController {
+  const controller = new AbortController();
+
+  (async () => {
+    try {
+      const res = await fetch(`${BACKEND_DIRECT}/runtime/tasks/events`, {
+        signal: controller.signal,
+        headers: { Accept: "text/event-stream" },
+      });
+
+      if (!res.ok || !res.body) {
+        onError?.(new Error(`Runtime task SSE connect failed: ${res.status}`));
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const payload = JSON.parse(line.slice(6));
+            onEvent(payload as RuntimeTaskEvent);
+          } catch {
+            // Skip malformed events.
+          }
+        }
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      onError?.(err instanceof Error ? err : new Error(String(err)));
+    }
+  })();
+
+  return controller;
 }
 
 // ── PageIndex Document Management ───────────────────────────────

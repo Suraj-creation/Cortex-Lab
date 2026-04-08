@@ -29,6 +29,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
+import pytest
+
 # Add backend to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -143,6 +145,43 @@ class TestReport:
 
         lines.append("\n" + "=" * 80)
         return "\n".join(lines)
+
+
+# These are utility containers, not pytest test classes.
+TestResult.__test__ = False
+TestReport.__test__ = False
+
+
+@pytest.fixture(autouse=True)
+def _ensure_event_loop():
+    """Ensure tests relying on get_event_loop() have an active loop on Python 3.14+."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("event loop closed")
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    yield
+
+
+@pytest.fixture
+def report() -> TestReport:
+    """Per-test report collector used by this diagnostic suite."""
+    return TestReport()
+
+
+@pytest.fixture
+def engine():
+    """Optional live engine fixture (returns None when not available)."""
+    try:
+        from src.engine import rag_engine
+
+        if getattr(rag_engine, "initialized", False):
+            return rag_engine
+    except Exception:
+        pass
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════

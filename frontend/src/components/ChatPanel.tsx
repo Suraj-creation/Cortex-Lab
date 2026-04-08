@@ -1,9 +1,27 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Square, Settings2, Sparkles, Brain, Zap, Lightbulb } from "lucide-react";
-import { ChatMessage as ChatMessageType, ModelStatus, ChatSettings, DEFAULT_SETTINGS, VoiceQueryResult } from "@/lib/types";
-import { sendMessage, streamMessage, ragChat, streamRAGMessage, RAGStreamMeta, getLLMProvider } from "@/lib/api";
+import { Send, Square, Settings2, Sparkles, Brain, Zap, Lightbulb, Activity, Loader2, X } from "lucide-react";
+import {
+  ChatMessage as ChatMessageType,
+  ModelStatus,
+  ChatSettings,
+  DEFAULT_SETTINGS,
+  VoiceQueryResult,
+  RuntimeTaskReferences,
+  RuntimeTaskSnapshot,
+} from "@/lib/types";
+import {
+  cancelRuntimeTask,
+  getLLMProvider,
+  getRuntimeTasks,
+  ragChat,
+  RAGStreamMeta,
+  sendMessage,
+  streamMessage,
+  streamRAGMessage,
+  subscribeRuntimeTaskEvents,
+} from "@/lib/api";
 import { MessageBubble } from "./MessageBubble";
 import { SettingsPanel } from "./SettingsPanel";
 import { EmptyState } from "./EmptyState";
@@ -37,6 +55,12 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
   const [showLivePipeline, setShowLivePipeline] = useState(false);
   // Keep SSE pre-connected when RAG is on so events are never missed
   const [pipelineConnected, setPipelineConnected] = useState(false);
+  const [runtimeTasks, setRuntimeTasks] = useState<RuntimeTaskSnapshot[]>([]);
+  const [runtimeTaskRefs, setRuntimeTaskRefs] = useState<RuntimeTaskReferences | null>(null);
+  const [runtimeTaskStreamConnected, setRuntimeTaskStreamConnected] = useState(false);
+  const [runtimeTaskError, setRuntimeTaskError] = useState<string | null>(null);
+  const [cancellingTaskIds, setCancellingTaskIds] = useState<Record<string, boolean>>({});
+  const isLocalProvider = settings.llmProvider === "local" || settings.llmProvider === "gemma_local";
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -62,6 +86,78 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
   useEffect(() => {
     setPipelineConnected(settings.useRAG);
   }, [settings.useRAG]);
+
+  const upsertRuntimeTask = useCallback((task: RuntimeTaskSnapshot) => {
+    setRuntimeTasks((prev) => {
+      const idx = prev.findIndex((existing) => existing.task_id === task.task_id);
+      if (idx < 0) {
+        return [task, ...prev].slice(0, 64);
+      }
+      const next = [...prev];
+      next[idx] = task;
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const hydrateRuntimeTasks = async () => {
+      try {
+        const snapshot = await getRuntimeTasks();
+        if (!mounted) return;
+        setRuntimeTasks(snapshot.tasks || []);
+      } catch {
+        // Ignore hydration errors — SSE stream may still connect.
+      }
+    };
+
+    hydrateRuntimeTasks();
+
+    const controller = subscribeRuntimeTaskEvents(
+      (event) => {
+        if (!mounted) return;
+        setRuntimeTaskStreamConnected(true);
+        setRuntimeTaskError(null);
+        upsertRuntimeTask(event.task);
+      },
+      (err) => {
+        if (!mounted) return;
+        setRuntimeTaskStreamConnected(false);
+        setRuntimeTaskError(err.message);
+      },
+    );
+
+    const fallbackPoll = setInterval(() => {
+      getRuntimeTasks()
+        .then((snapshot) => {
+          if (!mounted) return;
+          setRuntimeTasks(snapshot.tasks || []);
+        })
+        .catch(() => {
+          // Keep SSE as the primary path; polling is best-effort fallback.
+        });
+    }, 15000);
+
+    return () => {
+      mounted = false;
+      controller.abort();
+      clearInterval(fallbackPoll);
+    };
+  }, [upsertRuntimeTask]);
+
+  const handleCancelRuntimeTask = useCallback(async (taskId: string) => {
+    setCancellingTaskIds((prev) => ({ ...prev, [taskId]: true }));
+    try {
+      await cancelRuntimeTask(taskId, "Cancelled from main chat runtime strip", true);
+      setRuntimeTaskError(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to cancel runtime task";
+      setRuntimeTaskError(message);
+    } finally {
+      setCancellingTaskIds((prev) => ({ ...prev, [taskId]: false }));
+    }
+  }, []);
 
   // ── Batched streaming buffer (§10.1) ──
   // Accumulate tokens in a ref and flush to state every 50ms to reduce re-renders
@@ -123,6 +219,7 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
 
     setError(null);
     abortRef.current = false;
+    setRuntimeTaskRefs(null);
 
     // Add user message
     const userMsg: ChatMessageType = {
@@ -180,6 +277,9 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
           conversationId, // session_id
           (meta: RAGStreamMeta) => {
             // Update message with RAG metadata (evidence, agents, etc.)
+            if (meta.runtime_tasks) {
+              setRuntimeTaskRefs(meta.runtime_tasks);
+            }
             setMessages((prev) =>
               prev.map((m) =>
                 m.id === assistantId
@@ -191,6 +291,7 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
                       confidence: meta.confidence ?? m.confidence,
                       queryAnalysis: meta.query_analysis || m.queryAnalysis,
                       pipelineTrace: meta.pipeline_trace || m.pipelineTrace,
+                      runtimeTasks: meta.runtime_tasks || m.runtimeTasks,
                     }
                   : m,
               ),
@@ -277,8 +378,12 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
             processingTimeMs: res.processing_time_ms,
             cacheHit: res.cache_hit,
             pipelineTrace: res.pipeline_trace,
+            runtimeTasks: res.runtime_tasks,
           };
           setMessages((prev) => [...prev, assistantMsg]);
+          if (res.runtime_tasks) {
+            setRuntimeTaskRefs(res.runtime_tasks);
+          }
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : "Unknown error";
           setError(message);
@@ -363,7 +468,7 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
         setIsGenerating(false);
       }
     }
-  }, [input, isGenerating, messages, settings, onTitleUpdate, conversationId]);
+  }, [input, isGenerating, messages, settings, onTitleUpdate, conversationId, appendToken]);
 
   const handleStop = () => {
     abortRef.current = true;
@@ -425,6 +530,44 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
   }, [messages.length, onTitleUpdate]);
 
   const isOnline = modelStatus.model_loaded || modelStatus.model_info?.gemini_available === true;
+  const activeTaskStates = new Set(["queued", "running", "waiting_approval", "blocked"]);
+  const runtimeTaskById = new Map(runtimeTasks.map((task) => [task.task_id, task]));
+  const referencedTaskIds = runtimeTaskRefs?.all_task_ids || [];
+  const referencedTasks = referencedTaskIds
+    .map((taskId) => runtimeTaskById.get(taskId))
+    .filter((task): task is RuntimeTaskSnapshot => task !== undefined);
+  const activeReferencedTasks = referencedTasks.filter((task) => activeTaskStates.has(task.state));
+  const fallbackActiveTasks = runtimeTasks.filter((task) => activeTaskStates.has(task.state));
+  const visibleRuntimeTasks = activeReferencedTasks.length > 0
+    ? activeReferencedTasks
+    : (isGenerating ? fallbackActiveTasks.slice(0, 4) : []);
+
+  const runtimeTaskStateClass = (state: string): string => {
+    switch (state) {
+      case "running":
+        return "border-blue-200 bg-blue-50 text-blue-700";
+      case "queued":
+        return "border-slate-200 bg-slate-100 text-slate-600";
+      case "waiting_approval":
+        return "border-amber-200 bg-amber-50 text-amber-700";
+      case "blocked":
+        return "border-violet-200 bg-violet-50 text-violet-700";
+      case "completed":
+        return "border-emerald-200 bg-emerald-50 text-emerald-700";
+      case "failed":
+        return "border-red-200 bg-red-50 text-red-700";
+      case "cancelled":
+        return "border-rose-200 bg-rose-50 text-rose-700";
+      default:
+        return "border-slate-200 bg-slate-50 text-slate-600";
+    }
+  };
+
+  const showRuntimeTaskStrip = settings.useRAG && (
+    visibleRuntimeTasks.length > 0
+    || (Boolean(runtimeTaskRefs?.coordinator_task_id) && isGenerating)
+    || runtimeTaskError !== null
+  );
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden relative">
@@ -500,6 +643,86 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
       {/* Input area */}
       <div className="border-t border-slate-200/80 bg-white/90 backdrop-blur-2xl px-4 py-4">
         <div className="mx-auto max-w-3xl">
+          {showRuntimeTaskStrip ? (
+            <div
+              data-testid="chat-runtime-task-strip"
+              className="mb-2 rounded-xl border border-indigo-200 bg-indigo-50/60 px-3 py-2.5"
+            >
+              <div className="flex items-center gap-2 text-[11px] text-indigo-700">
+                <Activity size={12} />
+                <span className="font-semibold">Runtime Task Control</span>
+                <span className={`ml-auto rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                  runtimeTaskStreamConnected
+                    ? "bg-emerald-100 text-emerald-700 border border-emerald-200"
+                    : "bg-slate-100 text-slate-600 border border-slate-200"
+                }`}>
+                  {runtimeTaskStreamConnected ? "LIVE" : "SYNC"}
+                </span>
+              </div>
+
+              {runtimeTaskRefs?.coordinator_task_id ? (
+                <div className="mt-1.5 text-[11px] text-slate-600 break-all">
+                  Coordinator: <span className="font-mono text-slate-700">{runtimeTaskRefs.coordinator_task_id}</span>
+                  <a
+                    href={`/api/runtime/tasks/${encodeURIComponent(runtimeTaskRefs.coordinator_task_id)}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="ml-2 text-indigo-600 hover:text-indigo-700 underline"
+                  >
+                    open
+                  </a>
+                </div>
+              ) : null}
+
+              {visibleRuntimeTasks.length > 0 ? (
+                <div className="mt-2 space-y-1.5">
+                  {visibleRuntimeTasks.map((task) => {
+                    const cancelling = !!cancellingTaskIds[task.task_id];
+                    return (
+                      <div
+                        key={task.task_id}
+                        data-testid={`chat-runtime-task-row-${task.task_id}`}
+                        className="rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-[11px]"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-slate-700 break-all">{task.task_id}</span>
+                          <span className={`ml-auto rounded-md border px-1.5 py-0.5 text-[10px] font-semibold ${runtimeTaskStateClass(task.state)}`}>
+                            {task.state}
+                          </span>
+                        </div>
+                        <div className="mt-1 flex items-center gap-2 text-[10px] text-slate-500">
+                          <a
+                            href={`/api/runtime/tasks/${encodeURIComponent(task.task_id)}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-indigo-600 hover:text-indigo-700 underline"
+                          >
+                            view task
+                          </a>
+                          <button
+                            onClick={() => handleCancelRuntimeTask(task.task_id)}
+                            disabled={cancelling}
+                            data-testid={`chat-runtime-task-cancel-${task.task_id}`}
+                            className="inline-flex items-center gap-1 rounded-md border border-red-300 bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold text-red-700 hover:bg-red-100 disabled:opacity-60"
+                          >
+                            {cancelling ? <Loader2 size={10} className="animate-spin" /> : <X size={10} />}
+                            cancel
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
+
+              {runtimeTaskError ? (
+                <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] text-amber-700">
+                  {runtimeTaskError}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
           <div className="glow-border rounded-2xl bg-white transition-all duration-300 border border-slate-200">
             <div className="flex items-end gap-2 p-3">
               {/* Settings button */}
@@ -563,26 +786,54 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
             <div className="flex items-center justify-between border-t border-slate-100 px-4 py-2 text-[11px] text-slate-400">
               <div className="flex items-center gap-3">
                 <div className="flex items-center gap-1.5">
-                  <Sparkles size={11} className={settings.llmProvider === "gemini" ? "text-blue-500/60" : "text-indigo-500/60"} />
-                  <span>{settings.llmProvider === "gemini" ? "Gemini 2.5 Flash" : "Qwen3.5-9B Opus"}</span>
+                  <Sparkles
+                    size={11}
+                    className={
+                      settings.llmProvider === "gemini"
+                        ? "text-blue-500/60"
+                        : settings.llmProvider === "gemma_local"
+                          ? "text-emerald-500/60"
+                          : "text-indigo-500/60"
+                    }
+                  />
+                  <span>
+                    {settings.llmProvider === "gemini"
+                      ? "Gemini 2.5 Flash"
+                      : settings.llmProvider === "gemma_local"
+                        ? "Gemma Local"
+                        : "Qwen3.5-9B Opus"}
+                  </span>
                 </div>
                 <button
                   onClick={() => {
                     if (!localModelAvailable && settings.llmProvider === "gemini") return;
-                    setSettings((prev) => ({
-                      ...prev,
-                      llmProvider: prev.llmProvider === "local" ? "gemini" : "local",
-                    }));
+                    setSettings((prev) => {
+                      const order: ChatSettings["llmProvider"][] = localModelAvailable
+                        ? ["local", "gemma_local", "gemini"]
+                        : ["gemini"];
+                      const idx = order.indexOf(prev.llmProvider);
+                      const next = order[(idx >= 0 ? idx + 1 : 0) % order.length];
+                      return {
+                        ...prev,
+                        llmProvider: next,
+                      };
+                    });
                   }}
                   title={!localModelAvailable ? "Local model not loaded — Gemini only" : "Toggle LLM provider"}
                   className={`flex items-center gap-1 px-2 py-0.5 rounded-md transition-all text-[10px] font-medium ${
                     settings.llmProvider === "gemini"
                       ? "bg-blue-50 text-blue-600 border border-blue-200"
-                      : "bg-violet-50 text-violet-600 border border-violet-200"
+                      : settings.llmProvider === "gemma_local"
+                        ? "bg-emerald-50 text-emerald-600 border border-emerald-200"
+                        : "bg-violet-50 text-violet-600 border border-violet-200"
                   } ${!localModelAvailable ? "opacity-60 cursor-not-allowed" : ""}`}
                 >
                   <Zap size={10} />
-                  {settings.llmProvider === "gemini" ? "GEMINI" : "LOCAL"}
+                  {settings.llmProvider === "gemini"
+                    ? "GEMINI"
+                    : settings.llmProvider === "gemma_local"
+                      ? "GEMMA"
+                      : "LOCAL"}
                 </button>
                 <button
                   onClick={() => setSettings((prev) => ({ ...prev, useRAG: !prev.useRAG }))}
@@ -610,7 +861,7 @@ export function ChatPanel({ modelStatus, conversationId, onTitleUpdate }: Props)
               </div>
               <span className="text-slate-400">
                 Temp {settings.temperature} · Top-P {settings.topP} · Max{" "}
-                {settings.maxTokens}
+                {isLocalProvider ? "local-unlimited" : settings.maxTokens}
               </span>
             </div>
           </div>

@@ -10,7 +10,12 @@ import {
   Mic,
   Activity,
   FileText,
+  AlertTriangle,
+  Loader2,
+  CheckCircle2,
+  Clock,
 } from "lucide-react";
+import { RuntimeApprovalSummary } from "@/lib/types";
 
 interface Conversation {
   id: string;
@@ -29,6 +34,7 @@ interface Props {
   onToggle: () => void;
   activeView?: ActiveView;
   onNavigate?: (view: ActiveView) => void;
+  approvalSummary?: RuntimeApprovalSummary;
 }
 
 export function Sidebar({
@@ -40,6 +46,7 @@ export function Sidebar({
   onToggle,
   activeView = "chat",
   onNavigate,
+  approvalSummary,
 }: Props) {
   if (!open) return null;
 
@@ -51,6 +58,11 @@ export function Sidebar({
     { view: "ambient", icon: Mic, label: "Ambient Listening" },
     { view: "documents", icon: FileText, label: "PageIndex Documents" },
   ];
+
+  const hasPendingApprovals = (approvalSummary?.pending || 0) > 0;
+  const hasFailedExecutions = (approvalSummary?.failed || 0) > 0;
+  const runningExecutions = approvalSummary?.running || 0;
+  const waitingRetryExecutions = approvalSummary?.waiting_retry || 0;
 
   return (
     <aside className="sidebar-enter flex w-72 flex-col border-r border-slate-300/80 bg-white relative">
@@ -158,9 +170,49 @@ export function Sidebar({
                   }
                 />
                 <span>{label}</span>
+                {view === "observability" && hasPendingApprovals && (
+                  <span className="ml-auto rounded-full border border-amber-300 bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+                    {approvalSummary?.pending}
+                  </span>
+                )}
               </button>
             ))}
           </div>
+
+          {(hasPendingApprovals || hasFailedExecutions || runningExecutions > 0 || waitingRetryExecutions > 0) && (
+            <div className="mt-2 rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-2 text-[11px] text-slate-600">
+              {hasPendingApprovals && (
+                <div className="flex items-center gap-1.5 text-amber-700">
+                  <AlertTriangle size={11} />
+                  <span>{approvalSummary?.pending} approval(s) waiting</span>
+                </div>
+              )}
+              {runningExecutions > 0 && (
+                <div className="mt-1 flex items-center gap-1.5 text-blue-700">
+                  <Loader2 size={11} className="animate-spin" />
+                  <span>{runningExecutions} approved action(s) executing</span>
+                </div>
+              )}
+              {waitingRetryExecutions > 0 && (
+                <div className="mt-1 flex items-center gap-1.5 text-indigo-700">
+                  <Clock size={11} />
+                  <span>{waitingRetryExecutions} approved action(s) waiting retry</span>
+                </div>
+              )}
+              {hasFailedExecutions && (
+                <div className="mt-1 flex items-center gap-1.5 text-red-700">
+                  <AlertTriangle size={11} />
+                  <span>{approvalSummary?.failed} execution failure(s)</span>
+                </div>
+              )}
+              {!hasFailedExecutions && !hasPendingApprovals && runningExecutions === 0 && waitingRetryExecutions === 0 && (
+                <div className="mt-1 flex items-center gap-1.5 text-emerald-700">
+                  <CheckCircle2 size={11} />
+                  <span>Approvals and executions are healthy</span>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 

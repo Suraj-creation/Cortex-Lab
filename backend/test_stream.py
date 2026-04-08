@@ -4,6 +4,10 @@ import json
 import sys
 import time
 
+import pytest
+
+pytestmark = pytest.mark.skip(reason="Standalone streaming audit script; run directly with python backend/test_stream.py")
+
 BASE = "http://localhost:8000"
 
 queries = [
@@ -19,7 +23,7 @@ queries = [
     ("How has my thinking about AI evolved?", ["AI", "evolve", "change", "think"]),
 ]
 
-def test_query(query, expected_keywords, verbose=False):
+def run_query_case(query, expected_keywords, verbose=False):
     for attempt in range(3):
         try:
             r = requests.post(f"{BASE}/api/rag/chat", json={
@@ -68,21 +72,27 @@ def test_query(query, expected_keywords, verbose=False):
         print(f"         Expected one of: {expected_keywords}")
     return passed
 
-print("=" * 70)
-print("  COMPREHENSIVE RAG STREAMING TEST")
-print("=" * 70)
 
-passed = 0
-total = len(queries)
-for i, (q, kw) in enumerate(queries):
-    # First query (education vision) gets verbose output
-    if test_query(q, kw, verbose=(i == 0)):
-        passed += 1
-    print()
-    if i < total - 1:
-        time.sleep(2)  # Brief pause between queries
+def main() -> int:
+    print("=" * 70)
+    print("  COMPREHENSIVE RAG STREAMING TEST")
+    print("=" * 70)
 
-print("=" * 70)
-print(f"  RESULT: {passed}/{total} passed")
-print("=" * 70)
-sys.exit(0 if passed == total else 1)
+    passed = 0
+    total = len(queries)
+    for i, (q, kw) in enumerate(queries):
+        # First query (education vision) gets verbose output
+        if run_query_case(q, kw, verbose=(i == 0)):
+            passed += 1
+        print()
+        if i < total - 1:
+            time.sleep(2)  # Brief pause between queries
+
+    print("=" * 70)
+    print(f"  RESULT: {passed}/{total} passed")
+    print("=" * 70)
+    return 0 if passed == total else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

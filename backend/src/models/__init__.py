@@ -170,6 +170,7 @@ class MemoryQuery:
     embedding: Optional[List[float]] = None
 
     confidence: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -416,6 +417,10 @@ class PipelineTrace:
     # Agent routing
     routing_decision: str = ""  # no_retrieval, single_step, multi_step
     agents_invoked: List[Dict[str, Any]] = field(default_factory=list)
+    coordinator_task_id: str = ""
+    coordinator_plan: Dict[str, Any] = field(default_factory=dict)
+    subagent_spawn_records: List[Dict[str, Any]] = field(default_factory=list)
+    sidechain_transcript: List[Dict[str, Any]] = field(default_factory=list)
 
     # Generation
     generation_details: Dict[str, Any] = field(default_factory=dict)
@@ -427,6 +432,10 @@ class PipelineTrace:
     final_confidence: float = 0.0
     evidence_count: int = 0
     token_usage: Dict[str, int] = field(default_factory=dict)
+
+    # Runtime loop controls (Phase 1+ telemetry)
+    runtime_loop_state: Dict[str, Any] = field(default_factory=dict)
+    stop_reason: str = ""
 
     def add_step(self, step: PipelineStep):
         self.steps.append(step)
@@ -447,9 +456,15 @@ class PipelineTrace:
             "flare_trace": self.flare_trace.to_dict() if self.flare_trace else None,
             "routing_decision": self.routing_decision,
             "agents_invoked": self.agents_invoked,
+            "coordinator_task_id": self.coordinator_task_id,
+            "coordinator_plan": self.coordinator_plan,
+            "subagent_spawn_records": self.subagent_spawn_records,
+            "sidechain_transcript": self.sidechain_transcript,
             "generation_details": self.generation_details,
             "cache_status": self.cache_status,
             "final_confidence": round(self.final_confidence, 3),
             "evidence_count": self.evidence_count,
             "token_usage": self.token_usage,
+            "runtime_loop_state": self.runtime_loop_state,
+            "stop_reason": self.stop_reason,
         }

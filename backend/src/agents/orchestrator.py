@@ -12,9 +12,12 @@ Implements:
 """
 
 import asyncio
+import hashlib
+import json
 import time
 import re
-from typing import Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 from src.models import (
     AgentResponse, MemoryQuery, OrchestratorResponse, QueryIntent,
@@ -26,10 +29,24 @@ from src.llm import LocalLLM
 from src.retrieval.query_engine import QueryAnalyzer, QueryTransformer
 from src.retrieval.hybrid_retriever import HybridRetriever
 from src.agents.specialized import (
-    TimelineAgent, CausalAgent, ReflectionAgent, PlanningAgent, ArbitrationAgent
+    SPECIALIZED_AGENT_ORDER,
+    build_specialized_agents,
 )
 from src.observability import pipeline_events
 from src.compression import ContextCompressor
+from src.runtime.contracts import (
+    ConflictResolutionPath,
+    L1ExecutionPlan,
+    PlanConfirmationGate,
+    PlanConfirmationStatus,
+    RuntimeExecutionMode,
+    RuntimeLoopState,
+    RuntimeRequestEnvelope,
+    StopReason,
+    TaskState,
+)
+from src.runtime.safety import PermissionStatus, SafeToolRuntime
+from src.runtime.task_manager import RuntimeTaskManager
 
 
 # ─── Tool Registry for Function Calling (Stage 13) ──────────────────────────
@@ -65,6 +82,14 @@ AVAILABLE_TOOLS = [
         "description": "Get a summary of all memories related to a topic",
         "parameters": {"topic": "str"},
     },
+    {
+        "name": "delete_memory",
+        "description": "Delete one memory by ID (high-risk, approval required).",
+        "parameters": {
+            "memory_id": "str",
+            "permission_id": "str (required after approval)",
+        },
+    },
 ]
 
 
@@ -82,23 +107,43 @@ class AgentOrchestrator:
     7. RAFT: Distractor-aware final generation (Stage 12)
     """
 
-    def __init__(self, llm: LocalLLM, retriever: HybridRetriever,
-                 analyzer: QueryAnalyzer, transformer: QueryTransformer):
+    def __init__(
+        self,
+        llm: LocalLLM,
+        retriever: HybridRetriever,
+        analyzer: QueryAnalyzer,
+        transformer: QueryTransformer,
+        safe_tool_runtime: Optional[SafeToolRuntime] = None,
+        runtime_task_manager: Optional[RuntimeTaskManager] = None,
+    ):
         self.llm = llm
         self.retriever = retriever
         self.analyzer = analyzer
         self.transformer = transformer
+        self.safe_tool_runtime = safe_tool_runtime
+        self.runtime_task_manager = runtime_task_manager
+        self.max_multi_agent_dispatch = 5
+        self._response_cache: Dict[str, Dict[str, Any]] = {}
+        self._cache_max_entries = 256
 
         # Context compression for evidence (Gap 2.3: LLMLingua-style)
         self.compressor = ContextCompressor(target_ratio=0.5, min_sentences=2)
 
         # Initialize specialized agents
-        self.agents = {
-            "timeline": TimelineAgent(llm, retriever),
-            "causal": CausalAgent(llm, retriever),
-            "reflection": ReflectionAgent(llm, retriever),
-            "planning": PlanningAgent(llm, retriever),
-            "arbitration": ArbitrationAgent(llm, retriever),
+        self.agents = build_specialized_agents(llm, retriever)
+
+        # Domain-specialist keyword signals (used to select secondary agents)
+        self.domain_signal_map: Dict[str, List[str]] = {
+            "academic": ["exam", "study", "course", "assignment", "syllabus", "grade", "learning"],
+            "journaling": ["journal", "diary", "reflection", "write", "entry", "day log"],
+            "wellbeing": ["stress", "sleep", "wellbeing", "well-being", "burnout", "energy", "health"],
+            "cognitive": ["thinking", "bias", "focus", "attention", "mental model", "cognitive"],
+            "decisions": ["decision", "decide", "choice", "tradeoff", "option", "outcome"],
+            "emotional": ["emotion", "emotional", "mood", "feeling", "anxiety", "recovery", "trigger"],
+            "behavioral": ["habit", "routine", "pattern", "discipline", "consistency", "adherence"],
+            "social": ["team", "friend", "family", "relationship", "communication", "conflict", "social"],
+            "goals": ["goal", "vision", "target", "milestone", "objective", "roadmap"],
+            "meta_learning": ["meta", "learn how", "improve learning", "strategy", "feedback loop", "iteration"],
         }
 
         # Intent → Agent mapping
@@ -112,6 +157,408 @@ class AgentOrchestrator:
             QueryIntent.EXPLORATORY: "planning",
         }
 
+    def _new_runtime_loop_state(self, raw_query: str, session_context: str, trace_id: str) -> RuntimeLoopState:
+        envelope = RuntimeRequestEnvelope(
+            query=raw_query,
+            request_id=trace_id,
+            metadata={"session_context_chars": len(session_context or "")},
+        )
+        return RuntimeLoopState(envelope=envelope)
+
+    @staticmethod
+    def _format_tool_command(tool_name: str, arguments: Dict) -> str:
+        try:
+            args = json.dumps(arguments, sort_keys=True)
+        except Exception:
+            args = str(arguments)
+        return f"{tool_name}({args})"[:1000]
+
+    def _authorize_tool_execution(
+        self,
+        query: MemoryQuery,
+        trace: PipelineTrace,
+        tool_name: str,
+        arguments: Dict,
+    ) -> Optional[OrchestratorResponse]:
+        if self.safe_tool_runtime is None:
+            return None
+
+        permission_id = str(arguments.get("permission_id", "")).strip()
+        if permission_id:
+            approved = self.safe_tool_runtime.permission_queue.get(permission_id)
+            if approved and approved.status == PermissionStatus.APPROVED:
+                if approved.tool_name == tool_name:
+                    expected_memory = str((approved.metadata or {}).get("memory_id", "")).strip()
+                    provided_memory = str(arguments.get("memory_id", "")).strip()
+                    if not expected_memory or expected_memory == provided_memory:
+                        trace.add_step(PipelineStep(
+                            step_name=f"Tool Safety ({tool_name})",
+                            step_type="tool_policy",
+                            status="completed",
+                            duration_ms=0,
+                            details={
+                                "decision": "approved",
+                                "permission_id": permission_id,
+                                "source": "human_approval",
+                            },
+                        ))
+                        return None
+
+        command_text = self._format_tool_command(tool_name, arguments)
+        evaluation = self.safe_tool_runtime.evaluate_tool_operation(
+            request_id=f"{trace.trace_id}:{tool_name}",
+            tool_name=tool_name,
+            command_text=command_text,
+            metadata={
+                "query": query.raw_query,
+                "tool_name": tool_name,
+                "arguments": arguments,
+                "memory_id": arguments.get("memory_id", ""),
+            },
+        )
+
+        effect = evaluation.decision.effect.value
+        details = {
+            "decision": effect,
+            "rule_id": evaluation.decision.rule_id,
+            "reason": evaluation.decision.reason,
+            "signal_count": len(evaluation.dangerous_signals),
+            "permission_id": evaluation.permission_request.permission_id if evaluation.permission_request else None,
+        }
+        trace.add_step(PipelineStep(
+            step_name=f"Tool Safety ({tool_name})",
+            step_type="tool_policy",
+            status="completed" if effect == "allow" else "error",
+            duration_ms=0,
+            details=details,
+        ))
+
+        if effect == "allow":
+            return None
+
+        if effect == "require_approval" and evaluation.permission_request is not None:
+            permission = evaluation.permission_request
+            return OrchestratorResponse(
+                answer=(
+                    "This action is queued for approval before execution. "
+                    f"Permission ID: {permission.permission_id}."
+                ),
+                thinking="Tool execution paused by SafeToolRuntime pending explicit approval.",
+                agents_used=["function_calling", "safe_runtime_block"],
+                confidence=0.25,
+                reasoning_trace=(
+                    f"Function call blocked pending approval: {tool_name} "
+                    f"(permission_id={permission.permission_id})"
+                ),
+            )
+
+        return OrchestratorResponse(
+            answer=(
+                "I blocked that action due to runtime safety policy. "
+                f"Reason: {evaluation.decision.reason}"
+            ),
+            thinking="Tool execution denied by SafeToolRuntime policy.",
+            agents_used=["function_calling", "safe_runtime_block"],
+            confidence=0.2,
+            reasoning_trace=f"Function call denied by policy: {tool_name}",
+        )
+
+    @staticmethod
+    def _finalize_runtime_loop(
+        trace: PipelineTrace,
+        runtime_loop: RuntimeLoopState,
+        reason: StopReason = StopReason.COMPLETED,
+        note: str = "pipeline finished",
+    ) -> None:
+        if runtime_loop.stop_reason is None:
+            runtime_loop.mark_stop(reason, note)
+        trace.runtime_loop_state = runtime_loop.to_dict()
+        trace.stop_reason = runtime_loop.stop_reason.value if runtime_loop.stop_reason else reason.value
+
+    @staticmethod
+    def _coordinator_task_id(trace_id: str) -> str:
+        return f"coord-{trace_id}"
+
+    @staticmethod
+    def _subagent_task_id(trace_id: str, index: int, agent_name: str) -> str:
+        safe_agent = re.sub(r"[^a-z0-9_-]", "_", agent_name.lower())
+        return f"subagent-{trace_id}-{index:02d}-{safe_agent}"
+
+    def _safe_transition_task(self, task_id: str, target_state: TaskState, note: str = "") -> None:
+        if self.runtime_task_manager is None:
+            return
+        try:
+            task = self.runtime_task_manager.get_task(task_id)
+        except KeyError:
+            return
+
+        current = task.lifecycle.state
+        if current == target_state:
+            return
+        if current in {TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED}:
+            return
+        if task.lifecycle.can_transition_to(target_state):
+            task.lifecycle.transition_to(target_state, note=note)
+
+    @staticmethod
+    def _tokenize_claim_text(text: str) -> set:
+        tokens = re.findall(r"[a-z]{3,}", (text or "").lower())
+        stopwords = {
+            "the", "and", "for", "with", "that", "this", "from", "into", "about",
+            "your", "have", "has", "had", "were", "was", "are", "not", "but", "can",
+            "will", "should", "would", "could", "there", "their", "them", "they", "because",
+        }
+        return {token for token in tokens if token not in stopwords}
+
+    @staticmethod
+    def _contains_negation(text: str) -> bool:
+        normalized = f" {(text or '').lower()} "
+        markers = (" not ", " no ", " never ", " cannot ", " can't ", " won't ", "n\'t")
+        return any(marker in normalized for marker in markers)
+
+    def _detect_inter_agent_conflicts(self, payloads: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        conflicts: List[Dict[str, Any]] = []
+        if len(payloads) < 2:
+            return conflicts
+
+        for left_index in range(len(payloads) - 1):
+            left = payloads[left_index]
+            left_text = str(getattr(left.get("response"), "answer", "") or "")
+            left_tokens = self._tokenize_claim_text(left_text)
+            if not left_tokens:
+                continue
+
+            for right in payloads[left_index + 1 :]:
+                right_text = str(getattr(right.get("response"), "answer", "") or "")
+                right_tokens = self._tokenize_claim_text(right_text)
+                if not right_tokens:
+                    continue
+
+                union = left_tokens | right_tokens
+                overlap = (len(left_tokens & right_tokens) / len(union)) if union else 0.0
+                polarity_mismatch = self._contains_negation(left_text) != self._contains_negation(right_text)
+                explicit_conflict_signal = any(
+                    marker in (left_text + " " + right_text).lower()
+                    for marker in ("contradict", "conflict", "opposite", "inconsistent")
+                )
+
+                if overlap >= 0.24 and (polarity_mismatch or explicit_conflict_signal):
+                    conflicts.append(
+                        {
+                            "agent_a": left.get("agent", ""),
+                            "agent_b": right.get("agent", ""),
+                            "overlap": round(overlap, 3),
+                            "reason": "polarity_mismatch" if polarity_mismatch else "explicit_conflict_signal",
+                            "answer_a_preview": left_text[:220],
+                            "answer_b_preview": right_text[:220],
+                        }
+                    )
+
+        return conflicts
+
+    def _should_require_plan_confirmation(self, query: MemoryQuery, agent_names: List[str]) -> bool:
+        metadata = dict(getattr(query, "metadata", {}) or {})
+        if "plan_confirmation_required" in metadata:
+            return bool(metadata.get("plan_confirmation_required"))
+
+        high_risk_phrases = (
+            "delete memory",
+            "erase memory",
+            "remove memory",
+            "overwrite memory",
+            "bulk update",
+            "rewrite my profile",
+            "store this permanently",
+        )
+        query_lower = (query.raw_query or "").lower()
+        if any(phrase in query_lower for phrase in high_risk_phrases):
+            return True
+
+        if metadata.get("high_stakes_inference") and len(agent_names) >= 3:
+            return True
+
+        return False
+
+    def _build_plan_confirmation_gate(self, query: MemoryQuery, agent_names: List[str]) -> PlanConfirmationGate:
+        metadata = dict(getattr(query, "metadata", {}) or {})
+        requires_confirmation = self._should_require_plan_confirmation(query, agent_names)
+
+        reasons: List[str] = []
+        if requires_confirmation:
+            reasons.append("Plan includes memory-impacting or high-stakes operations.")
+            if len(agent_names) >= 4:
+                reasons.append("Plan fanout is high; explicit user confirmation is safer.")
+
+        gate = PlanConfirmationGate(required=requires_confirmation, reasons=reasons)
+
+        if requires_confirmation and bool(metadata.get("plan_confirmed")):
+            actor = str(metadata.get("plan_confirmed_by", "runtime"))
+            note = str(metadata.get("plan_confirmation_note", ""))
+            gate.mark_confirmed(actor=actor, note=note)
+        elif requires_confirmation and bool(metadata.get("plan_denied")):
+            actor = str(metadata.get("plan_denied_by", "runtime"))
+            note = str(metadata.get("plan_denial_note", ""))
+            gate.mark_denied(actor=actor, note=note)
+
+        return gate
+
+    def _build_l1_execution_plan(self, query: MemoryQuery, agent_names: List[str], primary_agent_name: str) -> L1ExecutionPlan:
+        intent_label = query.intent.value if hasattr(query.intent, "value") else str(query.intent)
+        metadata = dict(getattr(query, "metadata", {}) or {})
+
+        if len(agent_names) <= 1:
+            execution_mode = RuntimeExecutionMode.SINGLE_STEP
+        elif query.sub_queries:
+            execution_mode = RuntimeExecutionMode.MULTI_STEP_SEQUENTIAL
+        else:
+            execution_mode = RuntimeExecutionMode.MULTI_STEP_PARALLEL
+
+        if len(agent_names) >= 3 or query.complexity >= 0.75:
+            execution_mode = RuntimeExecutionMode.PLAN_MODE
+
+        potential_conflicts: List[str] = []
+        if query.intent == QueryIntent.COMPARATIVE:
+            potential_conflicts.append("Comparative intent often yields contradictory evidence candidates.")
+
+        domain_specialists = [
+            name
+            for name in agent_names
+            if name not in {"timeline", "causal", "reflection", "planning", "arbitration"}
+        ]
+        if len(domain_specialists) >= 2:
+            potential_conflicts.append("Mixed-domain specialist synthesis may require arbitration.")
+
+        q_lower = (query.raw_query or "").lower()
+        if any(token in q_lower for token in ("compare", "versus", "vs", "conflict", "contradict", "tradeoff")):
+            potential_conflicts.append("Query phrasing indicates explicit conflict or tradeoff analysis.")
+
+        conflict_path = ConflictResolutionPath.ARBITRATION_FIRST
+        if str(metadata.get("conflict_resolution_path", "")).lower() == "synthesis_first":
+            conflict_path = ConflictResolutionPath.SYNTHESIS_FIRST
+
+        confirmation_gate = self._build_plan_confirmation_gate(query, agent_names)
+
+        return L1ExecutionPlan(
+            query=query.raw_query,
+            intent=intent_label,
+            complexity=query.complexity,
+            primary_agent=primary_agent_name,
+            selected_agents=list(agent_names),
+            execution_mode=execution_mode,
+            conflict_resolution_path=conflict_path,
+            potential_conflicts=potential_conflicts,
+            confirmation_gate=confirmation_gate,
+            metadata={
+                "routing": query.routing.value if hasattr(query.routing, "value") else str(query.routing),
+                "sub_query_count": len(query.sub_queries),
+            },
+        )
+
+    def _build_coordinator_plan(
+        self,
+        query: MemoryQuery,
+        agent_names: List[str],
+        primary_agent_name: str,
+        execution_plan: Optional[L1ExecutionPlan] = None,
+    ) -> Dict[str, Any]:
+        plan = execution_plan or self._build_l1_execution_plan(query, agent_names, primary_agent_name)
+        return {
+            "strategy": "parallel_multi_agent",
+            "query_intent": query.intent.value,
+            "query_complexity": round(query.complexity, 3),
+            "primary_agent": primary_agent_name,
+            "subagent_count": len(agent_names),
+            "execution_mode": plan.execution_mode.value,
+            "conflict_resolution_path": plan.conflict_resolution_path.value,
+            "potential_conflicts": list(plan.potential_conflicts),
+            "confirmation_gate": plan.confirmation_gate.to_dict(),
+            "subagents": [
+                {
+                    "agent": name,
+                    "role": "primary" if name == primary_agent_name else "support",
+                    "reason": (
+                        "primary intent handler"
+                        if name == primary_agent_name
+                        else "intent-supporting decomposition"
+                    ),
+                }
+                for name in agent_names
+            ],
+            "plan_mode": plan.to_dict(),
+        }
+
+    def _select_domain_specialists(self, raw_query: str) -> List[str]:
+        """Select domain specialists based on lexical signals in the user query."""
+        q = (raw_query or "").lower()
+        selected: List[str] = []
+
+        for agent_name in SPECIALIZED_AGENT_ORDER:
+            if agent_name in {"timeline", "causal", "reflection", "planning", "arbitration"}:
+                continue
+            keywords = self.domain_signal_map.get(agent_name, [])
+            if any(keyword in q for keyword in keywords):
+                selected.append(agent_name)
+
+        return selected
+
+    def _make_cache_key(self, raw_query: str, session_context: str = "") -> str:
+        """Build a stable, session-aware cache key (legacy compatibility API)."""
+        query_norm = (raw_query or "").strip().lower()
+        ctx = (session_context or "").strip()
+        session_hash = hashlib.md5(ctx.encode("utf-8")).hexdigest()[:8] if ctx else "no_ctx"
+        return f"{query_norm}|{session_hash}"
+
+    def _cache_get(self, raw_query: str, session_context: str = "") -> Optional[Dict[str, Any]]:
+        """Get a cached payload by normalized query+context key (legacy compatibility API)."""
+        return self._response_cache.get(self._make_cache_key(raw_query, session_context))
+
+    def _cache_put(
+        self,
+        raw_query: str,
+        session_context: str,
+        payload: Dict[str, Any],
+    ) -> str:
+        """Store payload in the lightweight orchestrator response cache (legacy compatibility API)."""
+        key = self._make_cache_key(raw_query, session_context)
+        if len(self._response_cache) >= self._cache_max_entries:
+            oldest_key = next(iter(self._response_cache))
+            self._response_cache.pop(oldest_key, None)
+        self._response_cache[key] = payload
+        return key
+
+    def _select_agents(self, query: MemoryQuery, force_multi_step: bool = False) -> List[str]:
+        """Select agents for the current query (legacy-compatible helper)."""
+        primary_agent_name = self.intent_to_agent.get(query.intent, "planning")
+        agent_names: List[str] = [primary_agent_name]
+
+        if not force_multi_step and query.routing == RoutingStrategy.SINGLE_STEP:
+            if query.intent in {QueryIntent.FACTUAL, QueryIntent.EXPLORATORY, QueryIntent.PROCEDURAL}:
+                specialists = self._select_domain_specialists(query.raw_query)
+                if specialists:
+                    candidate = specialists[0]
+                    if candidate in self.agents:
+                        return [candidate]
+            return agent_names
+
+        if force_multi_step or query.routing == RoutingStrategy.MULTI_STEP:
+            if query.intent == QueryIntent.CAUSAL:
+                agent_names.append("timeline")
+            elif query.intent == QueryIntent.REFLECTIVE:
+                agent_names.append("causal")
+            elif query.intent == QueryIntent.TEMPORAL:
+                agent_names.append("reflection")
+
+            if "planning" not in agent_names and query.sub_queries:
+                agent_names.append("planning")
+
+            for specialist in self._select_domain_specialists(query.raw_query):
+                if len(agent_names) >= self.max_multi_agent_dispatch:
+                    break
+                if specialist in self.agents and specialist not in agent_names:
+                    agent_names.append(specialist)
+
+        return agent_names[: self.max_multi_agent_dispatch]
+
     async def process(self, raw_query: str, session_context: str = "") -> OrchestratorResponse:
         """
         Full orchestration pipeline with fine-tuned model integration.
@@ -121,6 +568,7 @@ class AgentOrchestrator:
         t0 = time.time()
         trace = PipelineTrace(query=raw_query)
         trace_id = trace.trace_id  # Alias for event emissions
+        runtime_loop = self._new_runtime_loop_state(raw_query, session_context, trace_id)
 
         print(f"\n{'='*60}")
         print(f"  🧠 Orchestrator: Processing query")
@@ -131,6 +579,7 @@ class AgentOrchestrator:
         await pipeline_events.emit_pipeline_start(trace_id, raw_query)
 
         # 1. Analyze query (keyword heuristics — fast, no LLM call)
+        runtime_loop.register_iteration()
         await pipeline_events.emit_step_start(trace_id, "Query Analysis", "query_analysis")
         t_step = time.time()
         query = self.analyzer.analyze(raw_query)
@@ -149,6 +598,18 @@ class AgentOrchestrator:
             "time_start": query.time_start.isoformat() if query.time_start else None,
             "time_end": query.time_end.isoformat() if query.time_end else None,
         }
+        query_metadata = dict(getattr(query, "metadata", {}) or {})
+        query_metadata.setdefault("runtime_event", "query_flow")
+        query_metadata.setdefault("runtime_mode", "cloud")
+        query_metadata.setdefault("llm_provider", self.llm.__class__.__name__)
+        query_metadata.setdefault(
+            "permission_chain",
+            "schema->scope->resource->privacy->user_permission->audit",
+        )
+        query_metadata.setdefault("privacy_tier", "default")
+        query_metadata["trace_id"] = trace_id
+        query_metadata["routing_strategy"] = query.routing.value
+        query.metadata = query_metadata
         trace.add_step(PipelineStep(
             step_name="Query Analysis",
             step_type="query_analysis",
@@ -197,6 +658,7 @@ class AgentOrchestrator:
             ))
 
         # 2. Transform query (add multi-query, HyDE, etc.)
+        runtime_loop.register_iteration()
         await pipeline_events.emit_step_start(trace_id, "Query Transformation", "query_transform")
         t_step = time.time()
         query = self.transformer.transform(query)
@@ -238,7 +700,7 @@ class AgentOrchestrator:
         tool_response = None
         if self.llm.model is not None and query.routing != RoutingStrategy.NO_RETRIEVAL:
             t_step = time.time()
-            tool_response = await self._try_function_calling(query, trace)
+            tool_response = await self._try_function_calling(query, trace, runtime_loop=runtime_loop)
             fc_ms = (time.time() - t_step) * 1000
             if tool_response:
                 trace.add_step(PipelineStep(
@@ -258,11 +720,19 @@ class AgentOrchestrator:
                 ))
 
         # 3. Route based on complexity (skip if function calling handled it)
+        runtime_loop.register_iteration()
         await pipeline_events.emit_step_start(trace_id, "Agent Execution", "agent_execution")
         t_step = time.time()
         if tool_response:
             response = tool_response
-            route_label = "FUNCTION_CALL"
+            if "tool_rate_limited" in response.agents_used:
+                route_label = "FUNCTION_CALL_RATE_LIMITED"
+                runtime_loop.mark_stop(StopReason.RATE_LIMITED, "Tool dispatch blocked by deterministic rate-limit window")
+            elif "safe_runtime_block" in response.agents_used:
+                route_label = "FUNCTION_CALL_BLOCKED"
+                runtime_loop.mark_stop(StopReason.POLICY_DENIED, "Tool execution blocked by SafeToolRuntime")
+            else:
+                route_label = "FUNCTION_CALL"
         elif query.routing == RoutingStrategy.NO_RETRIEVAL:
             response = await self._handle_no_retrieval(query)
             route_label = "NO_RETRIEVAL"
@@ -270,8 +740,12 @@ class AgentOrchestrator:
             response = await self._handle_single_step(query)
             route_label = "SINGLE_STEP"
         else:
-            response = await self._handle_multi_step(query)
-            route_label = "MULTI_STEP"
+            response = await self._handle_multi_step(query, trace=trace)
+            if "coordinator_cancelled" in response.agents_used:
+                route_label = "MULTI_STEP_CANCELLED"
+                runtime_loop.mark_stop(StopReason.CANCELLED, "Multi-agent subagent execution cancelled")
+            else:
+                route_label = "MULTI_STEP"
         route_ms = (time.time() - t_step) * 1000
         await pipeline_events.emit_step_complete(trace_id, f"Agent Execution ({route_label})", "agent_execution", route_ms, {
             "routing": route_label,
@@ -352,6 +826,7 @@ class AgentOrchestrator:
         response.pipeline_trace = trace
 
         # 4. CRAG quality evaluation (fast — no LLM call, just scoring)
+        runtime_loop.register_iteration()
         await pipeline_events.emit_step_start(trace_id, "CRAG Quality Evaluation", "crag")
         t_step = time.time()
         pre_crag_confidence = response.confidence
@@ -381,6 +856,7 @@ class AgentOrchestrator:
         # Threshold 0.80: most single-agent responses land at 0.70-0.85
         if (response.evidence and response.confidence < 0.80
                 and len(response.answer.strip()) > 20):
+            runtime_loop.register_iteration()
             await pipeline_events.emit_step_start(trace_id, "Self-RAG Critique", "self_rag")
             t_step = time.time()
             pre_selfrag_confidence = response.confidence
@@ -417,6 +893,7 @@ class AgentOrchestrator:
         # Triggers when confidence remains below 0.55 after Self-RAG
         if (response.confidence < 0.55 and response.evidence
                 and len(response.answer.strip()) > 20):
+            runtime_loop.register_iteration()
             await pipeline_events.emit_step_start(trace_id, "FLARE Active Retrieval", "flare")
             t_step = time.time()
             pre_flare_confidence = response.confidence
@@ -465,6 +942,7 @@ class AgentOrchestrator:
             "quantization": "4-bit",
         }
         trace.cache_status = {"hit": False, "level": None}
+        self._finalize_runtime_loop(trace, runtime_loop)
         response.pipeline_trace = trace
 
         # Emit pipeline complete event
@@ -473,6 +951,9 @@ class AgentOrchestrator:
             "evidence_count": len(response.evidence),
             "agents_used": response.agents_used,
             "steps_total": len(trace.steps),
+            "stop_reason": trace.stop_reason,
+            "runtime_iterations": trace.runtime_loop_state.get("iterations_executed", 0),
+            "runtime_tool_calls": trace.runtime_loop_state.get("tool_calls_executed", 0),
         })
 
         print(f"\n  ✅ Response ready: confidence={response.confidence:.2f}, "
@@ -490,6 +971,7 @@ class AgentOrchestrator:
         t0 = time.time()
         trace = PipelineTrace(query=raw_query)
         trace_id = raw_query  # Use query as trace identifier for events
+        runtime_loop = self._new_runtime_loop_state(raw_query, session_context, trace.trace_id)
 
         print(f"\n{'='*60}")
         print(f"  🔍 Orchestrator: Retrieve-only mode")
@@ -499,6 +981,7 @@ class AgentOrchestrator:
         await pipeline_events.emit_pipeline_start(trace_id, raw_query)
 
         # 1. Analyze query
+        runtime_loop.register_iteration()
         await pipeline_events.emit_step_start(trace_id, "Query Analysis", "query_analysis")
         t_step = time.time()
         query = self.analyzer.analyze(raw_query)
@@ -538,6 +1021,7 @@ class AgentOrchestrator:
             await pipeline_events.emit_step_skip(trace_id, "LLM Routing", "routing", "complexity_outside_range")
 
         # 2. Transform query
+        runtime_loop.register_iteration()
         await pipeline_events.emit_step_start(trace_id, "Query Transformation", "query_transform")
         t_step = time.time()
         query = self.transformer.transform(query)
@@ -562,6 +1046,7 @@ class AgentOrchestrator:
         trace.routing_decision = query.routing.value
 
         # 3. Retrieve evidence (no LLM generation)
+        runtime_loop.register_iteration()
         await pipeline_events.emit_step_start(trace_id, "Evidence Retrieval", "agent_execution")
         t_step = time.time()
         if query.routing == RoutingStrategy.NO_RETRIEVAL:
@@ -667,6 +1152,7 @@ class AgentOrchestrator:
             await pipeline_events.emit_step_skip(trace_id, "Context Compression", "compression", "no_evidence")
 
         # 4. CRAG quality evaluation (fast — no LLM call)
+        runtime_loop.register_iteration()
         await pipeline_events.emit_step_start(trace_id, "CRAG Quality Evaluation", "crag")
         t_step = time.time()
         response = await self._crag_evaluate(query, response)
@@ -696,6 +1182,7 @@ class AgentOrchestrator:
         trace.final_confidence = response.confidence
         trace.evidence_count = len(response.evidence)
         trace.cache_status = {"hit": False, "level": None}
+        self._finalize_runtime_loop(trace, runtime_loop)
         response.pipeline_trace = trace
 
         # Emit pipeline complete
@@ -704,6 +1191,9 @@ class AgentOrchestrator:
             "evidence_count": len(response.evidence),
             "mode": "retrieve_only",
             "steps_total": len(trace.steps),
+            "stop_reason": trace.stop_reason,
+            "runtime_iterations": trace.runtime_loop_state.get("iterations_executed", 0),
+            "runtime_tool_calls": trace.runtime_loop_state.get("tool_calls_executed", 0),
         })
 
         print(f"\n  ✅ Retrieval ready: confidence={response.confidence:.2f}, "
@@ -799,7 +1289,14 @@ Assistant:""",
 
     async def _handle_single_step(self, query: MemoryQuery) -> OrchestratorResponse:
         """Handle moderate queries with a single agent."""
-        agent_name = self.intent_to_agent.get(query.intent, "planning")
+        selected_agents = self._select_agents(query)
+        agent_name = selected_agents[0] if selected_agents else self.intent_to_agent.get(query.intent, "planning")
+        query_metadata = dict(getattr(query, "metadata", {}) or {})
+        query_metadata["execution_mode"] = RuntimeExecutionMode.SINGLE_STEP.value
+        query_metadata["selected_agents"] = [agent_name]
+        query_metadata.setdefault("conflict_resolution", ConflictResolutionPath.ARBITRATION_FIRST.value)
+        query.metadata = query_metadata
+
         agent = self.agents.get(agent_name, self.agents["planning"])
 
         print(f"  🔀 Routing: SINGLE_STEP → {agent_name} agent")
@@ -822,41 +1319,274 @@ Assistant:""",
             reasoning_trace=agent_response.reasoning_trace,
         )
 
-    async def _handle_multi_step(self, query: MemoryQuery) -> OrchestratorResponse:
+    async def _handle_multi_step(self, query: MemoryQuery, trace: Optional[PipelineTrace] = None) -> OrchestratorResponse:
         """Handle complex queries with multiple agents + Chain-of-Retrieval."""
         primary_agent_name = self.intent_to_agent.get(query.intent, "planning")
-        agent_names = [primary_agent_name]
+        agent_names = self._select_agents(query, force_multi_step=True)
+        if not agent_names:
+            agent_names = [primary_agent_name]
 
-        # Add secondary agents based on intent
-        if query.intent == QueryIntent.CAUSAL:
-            agent_names.append("timeline")
-        elif query.intent == QueryIntent.REFLECTIVE:
-            agent_names.append("causal")
-        elif query.intent == QueryIntent.TEMPORAL:
-            agent_names.append("reflection")
+        execution_plan = self._build_l1_execution_plan(query, agent_names, primary_agent_name)
+        query_metadata = dict(getattr(query, "metadata", {}) or {})
+        query_metadata["execution_mode"] = execution_plan.execution_mode.value
+        query_metadata["selected_agents"] = list(agent_names)
+        query_metadata["conflict_resolution"] = execution_plan.conflict_resolution_path.value
+        query.metadata = query_metadata
 
-        if "planning" not in agent_names and query.sub_queries:
-            agent_names.append("planning")
+        if execution_plan.requires_confirmation:
+            if trace is not None:
+                trace.coordinator_plan = self._build_coordinator_plan(
+                    query,
+                    agent_names,
+                    primary_agent_name,
+                    execution_plan=execution_plan,
+                )
+
+            return OrchestratorResponse(
+                answer=(
+                    "This multi-agent plan requires your confirmation before execution. "
+                    "Confirm the proposed dispatch plan to continue."
+                ),
+                thinking="Plan-mode confirmation gate is active for this request.",
+                evidence=[],
+                agents_used=["plan_mode_confirmation_required"],
+                confidence=0.2,
+                reasoning_trace=(
+                    f"Execution paused pending plan confirmation (plan_id={execution_plan.plan_id})."
+                ),
+            )
 
         print(f"  🔀 Routing: MULTI_STEP → {agent_names}")
 
-        # Execute agents in parallel
-        tasks = []
-        for name in agent_names:
-            agent = self.agents.get(name, self.agents["planning"])
-            tasks.append(agent.execute(query))
+        coordinator_plan = self._build_coordinator_plan(
+            query,
+            agent_names,
+            primary_agent_name,
+            execution_plan=execution_plan,
+        )
+        if trace is not None:
+            trace.coordinator_plan = coordinator_plan
 
-        agent_responses = await asyncio.gather(*tasks)
+        parent_task_id = None
+        spawn_records: List[Dict[str, Any]] = []
+        sidechain_events: List[Dict[str, Any]] = []
+        if self.runtime_task_manager is not None and trace is not None:
+            parent_task_id = self._coordinator_task_id(trace.trace_id)
+            trace.coordinator_task_id = parent_task_id
+            try:
+                self.runtime_task_manager.create_task(
+                    task_id=parent_task_id,
+                    metadata={
+                        "trace_id": trace.trace_id,
+                        "query": query.raw_query,
+                        "plan": coordinator_plan,
+                    },
+                )
+            except ValueError:
+                pass
+            self._safe_transition_task(parent_task_id, TaskState.RUNNING, note="coordinator started")
+
+        # Execute agents in parallel with task-manager registration.
+        running_entries: List[Dict[str, Any]] = []
+        for index, name in enumerate(agent_names):
+            agent = self.agents.get(name, self.agents["planning"])
+            subagent_task_id = None
+
+            if self.runtime_task_manager is not None and parent_task_id is not None and trace is not None:
+                subagent_task_id = self._subagent_task_id(trace.trace_id, index, name)
+                metadata = {
+                    "trace_id": trace.trace_id,
+                    "agent": name,
+                    "role": "primary" if name == primary_agent_name else "support",
+                    "query": query.raw_query,
+                }
+                try:
+                    self.runtime_task_manager.create_task(
+                        task_id=subagent_task_id,
+                        parent_task_id=parent_task_id,
+                        metadata=metadata,
+                    )
+                except ValueError:
+                    pass
+                self._safe_transition_task(subagent_task_id, TaskState.RUNNING, note="subagent dispatched")
+
+                spawn_record = {
+                    "parent_task_id": parent_task_id,
+                    "task_id": subagent_task_id,
+                    "agent": name,
+                    "role": metadata["role"],
+                    "spawned_at": datetime.now(timezone.utc).isoformat(),
+                }
+                spawn_records.append(spawn_record)
+                sidechain_events.append(
+                    {
+                        "event": "subagent_spawned",
+                        "agent": name,
+                        "task_id": subagent_task_id,
+                        "trace_id": trace.trace_id,
+                        "timestamp": spawn_record["spawned_at"],
+                    }
+                )
+
+            task = asyncio.create_task(agent.execute(query), name=f"subagent:{name}")
+            if self.runtime_task_manager is not None and subagent_task_id is not None:
+                self.runtime_task_manager.attach_asyncio_task(subagent_task_id, task)
+            running_entries.append({"agent": name, "task_id": subagent_task_id, "task": task})
+
+        agent_responses = await asyncio.gather(*[entry["task"] for entry in running_entries], return_exceptions=True)
 
         # Combine all evidence and answers
         combined_answers = []
         all_evidence = []
         all_traces = []
+        successful_payloads: List[Dict[str, Any]] = []
+        successful_responses = 0
+        cancelled_responses = 0
 
-        for name, resp in zip(agent_names, agent_responses):
+        for entry, outcome in zip(running_entries, agent_responses):
+            name = entry["agent"]
+            task_id = entry["task_id"]
+            ts = datetime.now(timezone.utc).isoformat()
+
+            if isinstance(outcome, asyncio.CancelledError):
+                cancelled_responses += 1
+                if task_id is not None:
+                    self._safe_transition_task(task_id, TaskState.CANCELLED, note="subagent cancelled")
+                sidechain_events.append(
+                    {
+                        "event": "subagent_cancelled",
+                        "agent": name,
+                        "task_id": task_id,
+                        "trace_id": trace.trace_id if trace else "",
+                        "timestamp": ts,
+                    }
+                )
+                continue
+            if isinstance(outcome, Exception):
+                if task_id is not None:
+                    self._safe_transition_task(task_id, TaskState.FAILED, note=str(outcome)[:240])
+                sidechain_events.append(
+                    {
+                        "event": "subagent_failed",
+                        "agent": name,
+                        "task_id": task_id,
+                        "trace_id": trace.trace_id if trace else "",
+                        "timestamp": ts,
+                        "error": str(outcome),
+                    }
+                )
+                continue
+
+            successful_responses += 1
+            resp = outcome
+            if task_id is not None:
+                self._safe_transition_task(task_id, TaskState.COMPLETED, note="subagent completed")
+            successful_payloads.append({"agent": name, "response": resp})
             combined_answers.append(f"[{name.title()} Agent]: {resp.answer}")
             all_evidence.extend(resp.evidence)
             all_traces.append(f"{name}: {resp.reasoning_trace}")
+            sidechain_events.append(
+                {
+                    "event": "subagent_completed",
+                    "agent": name,
+                    "task_id": task_id,
+                    "trace_id": trace.trace_id if trace else "",
+                    "timestamp": ts,
+                    "confidence": round(resp.confidence, 3),
+                    "answer_preview": resp.answer[:220],
+                }
+            )
+
+        if trace is not None:
+            trace.subagent_spawn_records.extend(spawn_records)
+            trace.sidechain_transcript.extend(sidechain_events)
+
+        if cancelled_responses == len(running_entries):
+            if parent_task_id is not None:
+                self._safe_transition_task(parent_task_id, TaskState.CANCELLED, note="all subagents cancelled")
+            if parent_task_id is not None and trace is not None:
+                trace.sidechain_transcript.append(
+                    {
+                        "event": "coordinator_cancelled",
+                        "task_id": parent_task_id,
+                        "trace_id": trace.trace_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+            return OrchestratorResponse(
+                answer="Multi-agent execution was cancelled before completion.",
+                thinking="Coordinator cancelled all delegated subagent tasks.",
+                evidence=[],
+                agents_used=agent_names + ["coordinator_cancelled"],
+                confidence=0.0,
+                reasoning_trace="Multi-agent orchestration cancelled by runtime task manager.",
+            )
+
+        if successful_responses == 0:
+            if parent_task_id is not None:
+                self._safe_transition_task(parent_task_id, TaskState.FAILED, note="no successful subagent responses")
+            return OrchestratorResponse(
+                answer="I couldn't complete this request because delegated subagents failed.",
+                thinking="Coordinator observed failures across all delegated subagents.",
+                evidence=[],
+                agents_used=agent_names + ["coordinator_failed"],
+                confidence=0.1,
+                reasoning_trace="Multi-agent orchestration failed: no successful subagent responses.",
+            )
+
+        detected_conflicts = self._detect_inter_agent_conflicts(successful_payloads)
+        arbitration_invoked = False
+        if detected_conflicts:
+            execution_plan.metadata["detected_conflicts"] = detected_conflicts
+
+        if (
+            detected_conflicts
+            and execution_plan.conflict_resolution_path == ConflictResolutionPath.ARBITRATION_FIRST
+            and "arbitration" in self.agents
+            and all(payload.get("agent") != "arbitration" for payload in successful_payloads)
+        ):
+            conflict_context = "Detected conflicts:\n" + json.dumps(detected_conflicts[:5], indent=2)
+            arbitration_agent = self.agents["arbitration"]
+            try:
+                arbitration_response = await arbitration_agent.execute(query, context=conflict_context)
+                arbitration_invoked = True
+                successful_payloads.append({"agent": "arbitration", "response": arbitration_response})
+                combined_answers.append(f"[Arbitration Agent]: {arbitration_response.answer}")
+                all_evidence.extend(arbitration_response.evidence)
+                all_traces.append(f"arbitration: {arbitration_response.reasoning_trace}")
+
+                arbitration_event = {
+                    "event": "arbitration_invoked",
+                    "agent": "arbitration",
+                    "trace_id": trace.trace_id if trace else "",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "conflict_count": len(detected_conflicts),
+                    "resolution_confidence": round(arbitration_response.confidence, 3),
+                }
+                sidechain_events.append(arbitration_event)
+                if trace is not None:
+                    trace.sidechain_transcript.append(arbitration_event)
+            except Exception as exc:
+                arbitration_error_event = {
+                    "event": "arbitration_failed",
+                    "agent": "arbitration",
+                    "trace_id": trace.trace_id if trace else "",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "error": str(exc),
+                }
+                sidechain_events.append(arbitration_error_event)
+                if trace is not None:
+                    trace.sidechain_transcript.append(arbitration_error_event)
+
+        execution_plan.metadata["arbitration_invoked"] = arbitration_invoked
+        execution_plan.metadata["detected_conflict_count"] = len(detected_conflicts)
+        if trace is not None:
+            trace.coordinator_plan = self._build_coordinator_plan(
+                query,
+                agent_names,
+                primary_agent_name,
+                execution_plan=execution_plan,
+            )
 
         # Deduplicate evidence
         seen = set()
@@ -886,7 +1616,16 @@ Agent Analyses:
 Synthesized answer:"""
             final_answer = self.llm.generate(synthesis_prompt, max_tokens=1024, temperature=0.3)
 
-        avg_confidence = sum(r.confidence for r in agent_responses) / len(agent_responses)
+        successful_confidence_values = [
+            payload["response"].confidence
+            for payload in successful_payloads
+            if isinstance(payload.get("response"), AgentResponse)
+        ]
+        if successful_confidence_values:
+            avg_confidence = sum(successful_confidence_values) / len(successful_confidence_values)
+        else:
+            # Guard against contract drift in mocked/non-standard agent payloads.
+            avg_confidence = min(0.4 + 0.1 * successful_responses, 0.75)
 
         thinking = (
             f"Intent: {query.intent.value} (complexity: {query.complexity:.2f})\n"
@@ -895,13 +1634,20 @@ Synthesized answer:"""
             f"Traces:\n" + "\n".join(f"  - {t}" for t in all_traces)
         )
 
+        if parent_task_id is not None:
+            self._safe_transition_task(parent_task_id, TaskState.COMPLETED, note="multi-agent synthesis completed")
+
+        agents_used = list(agent_names)
+        if arbitration_invoked and "arbitration" not in agents_used:
+            agents_used.append("arbitration")
+
         return OrchestratorResponse(
             answer=final_answer,
             thinking=thinking,
             evidence=unique_evidence[:10],
-            agents_used=agent_names,
+            agents_used=agents_used,
             confidence=avg_confidence,
-            reasoning_trace=f"Multi-agent synthesis from {len(agent_names)} agents",
+            reasoning_trace=f"Multi-agent synthesis from {len(agents_used)} agents",
         )
 
     async def _crag_evaluate(self, query: MemoryQuery, response: OrchestratorResponse) -> OrchestratorResponse:
@@ -1155,8 +1901,13 @@ Improved answer (focus on {weak}):"""
 
         return response
 
-    async def _try_function_calling(self, query: MemoryQuery,
-                                     trace: PipelineTrace) -> Optional[OrchestratorResponse]:
+    async def _try_function_calling(
+        self,
+        query: MemoryQuery,
+        trace: PipelineTrace,
+        runtime_loop: Optional[RuntimeLoopState] = None,
+        now: Optional[datetime] = None,
+    ) -> Optional[OrchestratorResponse]:
         """
         Stage 13 (Function Calling): Check if query should be handled by a tool.
         Returns OrchestratorResponse if a tool was successfully executed, else None.
@@ -1168,6 +1919,7 @@ Improved answer (focus on {weak}):"""
         - trace_causal_chain → CausalAgent
         - detect_belief_evolution → LLM detect_belief_change
         - summarize_topic → LLM summarize
+        - delete_memory → metadata + vector deletion (approval-gated)
         """
         try:
             # Ask the LLM which tool to use
@@ -1179,6 +1931,38 @@ Improved answer (focus on {weak}):"""
                 return None
 
             print(f"  🔧 Function call: {tool_name}({arguments})")
+
+            if runtime_loop is not None:
+                dispatch_ts = now or datetime.now(timezone.utc)
+                allowed = runtime_loop.try_register_tool_dispatch(now=dispatch_ts)
+                if not allowed:
+                    trace.add_step(PipelineStep(
+                        step_name=f"Tool Dispatch Rate Limit ({tool_name})",
+                        step_type="tool_rate_limit",
+                        status="error",
+                        duration_ms=0,
+                        details={
+                            "decision": "rate_limited",
+                            "window_seconds": runtime_loop.envelope.budget.window_seconds,
+                            "max_tool_calls_per_window": runtime_loop.envelope.budget.max_tool_calls_per_window,
+                            "tool_calls_executed": runtime_loop.tool_calls_executed,
+                            "reason": runtime_loop.stop_note,
+                        },
+                    ))
+                    return OrchestratorResponse(
+                        answer=(
+                            "Tool dispatch rate limit reached for this query window. "
+                            "Please retry after the current window resets."
+                        ),
+                        thinking="Function call blocked by deterministic tool dispatch window guardrail.",
+                        agents_used=["function_calling", "tool_rate_limited"],
+                        confidence=0.2,
+                        reasoning_trace=f"Function call rate-limited: {tool_name}",
+                    )
+
+            safety_block = self._authorize_tool_execution(query, trace, tool_name, arguments)
+            if safety_block is not None:
+                return safety_block
 
             # Execute the tool
             if tool_name == "search_memories":
@@ -1242,6 +2026,18 @@ Improved answer (focus on {weak}):"""
                             confidence=0.70,
                             reasoning_trace=f"Function call: summarize_topic('{topic[:50]}') → summary from {len(results)} memories",
                         )
+
+            elif tool_name == "delete_memory":
+                memory_id = str(arguments.get("memory_id", "")).strip()
+                if memory_id:
+                    self.retriever.metadata.delete_memory(memory_id)
+                    self.retriever.vectors.delete(memory_id)
+                    return OrchestratorResponse(
+                        answer=f"Deleted memory {memory_id}.",
+                        agents_used=["function_calling"],
+                        confidence=0.7,
+                        reasoning_trace=f"Function call: delete_memory('{memory_id}') → deleted",
+                    )
 
             # Tool not handled or didn't produce results → fall back to normal pipeline
             return None

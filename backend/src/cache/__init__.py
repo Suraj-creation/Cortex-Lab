@@ -96,6 +96,15 @@ class MultiLevelCache:
         key = self._hash_key(query, provider)
         self._exact_cache[key] = result
 
+    def get_exact(self, query: str, provider: str = "") -> Optional[Dict]:
+        """Legacy-compatible exact-cache lookup helper."""
+        key = self._hash_key(query, provider)
+        if key in self._exact_cache:
+            self._hits["exact"] += 1
+            return self._exact_cache[key]
+        self._hits["miss"] += 1
+        return None
+
     def invalidate_topic(self, topic: str):
         """Remove cached entries related to a topic."""
         if not topic:
@@ -122,6 +131,9 @@ class MultiLevelCache:
             "exact_cache_size": len(self._exact_cache),
             "semantic_cache_size": len(self._semantic_cache),
             "hits": dict(self._hits),
+            "exact_hits": exact_hits,
+            "semantic_hits": semantic_hits,
+            "exact_misses": self._hits["miss"],
             "total_hits": exact_hits + semantic_hits,
             "total_queries": total,
             "hit_rate": round(

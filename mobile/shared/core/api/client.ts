@@ -7,12 +7,16 @@ import {
   DEFAULT_SETTINGS,
   EvidenceCard,
   GraphData,
+  InferenceMode,
+  LLMProviderType,
   LivePipelineEvent,
   MemoryObject,
   ModelStatus,
+  ModelpackManifest,
   PipelineTrace,
   QueryAnalysis,
   RAGStats,
+  RuntimeSelection,
   TracesResponse,
   VoiceQueryResult,
   VoiceProviders,
@@ -80,10 +84,39 @@ export interface PageIndexUsage {
 }
 
 interface LLMProviderResponse {
-  provider: "local" | "gemini";
+  provider: LLMProviderType;
+  active_backend?: "local" | "gemini";
   available: string[];
   gemini_configured: boolean;
   local_model_loaded: boolean;
+}
+
+export interface RuntimeModeResponse {
+  mode: InferenceMode;
+  allow_cloud_fallback: boolean;
+  supported_modes: InferenceMode[];
+}
+
+export interface RuntimeProvidersResponse {
+  selection: {
+    mode: InferenceMode;
+    llm_provider: LLMProviderType;
+    stt_provider: VoiceProviderType;
+    tts_provider: VoiceProviderType;
+    allow_cloud_fallback: boolean;
+    updated_at: string;
+  };
+  available: {
+    llm: LLMProviderType[];
+    stt: VoiceProviderType[];
+    tts: VoiceProviderType[];
+  };
+  availability: {
+    llm: Record<string, boolean>;
+    stt: Record<string, boolean>;
+    tts: Record<string, boolean>;
+    ambient_available: boolean;
+  };
 }
 
 export interface TTSStatus {
@@ -166,6 +199,8 @@ export function createApiClient(config: ApiConfig) {
         stream: false,
         use_rag: settings.useRAG,
         llm_provider: settings.llmProvider,
+        inference_mode: settings.inferenceMode,
+        allow_cloud_fallback: settings.allowCloudFallback,
       }),
     });
 
@@ -208,6 +243,8 @@ export function createApiClient(config: ApiConfig) {
           stream: true,
           use_rag: settings.useRAG,
           llm_provider: settings.llmProvider,
+          inference_mode: settings.inferenceMode,
+          allow_cloud_fallback: settings.allowCloudFallback,
         }),
       });
 
@@ -274,12 +311,103 @@ export function createApiClient(config: ApiConfig) {
   }
 
   async function setLLMProvider(
-    provider: "local" | "gemini",
+    provider: LLMProviderType,
   ): Promise<{ provider: string; status: string }> {
     const res = await fetch(`${baseUrl}/llm/provider`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ provider }),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function getRuntimeMode(): Promise<RuntimeModeResponse> {
+    const res = await fetch(`${baseUrl}/runtime/mode`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function setRuntimeMode(
+    mode: InferenceMode,
+    allowCloudFallback?: boolean,
+  ): Promise<RuntimeModeResponse> {
+    const res = await fetch(`${baseUrl}/runtime/mode`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mode,
+        allow_cloud_fallback: allowCloudFallback,
+      }),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function getRuntimeProviders(): Promise<RuntimeProvidersResponse> {
+    const res = await fetch(`${baseUrl}/runtime/providers`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function setRuntimeProviders(
+    selection: Partial<RuntimeSelection>,
+  ): Promise<{ selection: RuntimeProvidersResponse["selection"]; fallback_applied: Array<{ target: string; from: string; to: string }> }> {
+    const res = await fetch(`${baseUrl}/runtime/providers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        llm_provider: selection.llmProvider,
+        stt_provider: selection.sttProvider,
+        tts_provider: selection.ttsProvider,
+        allow_cloud_fallback: selection.allowCloudFallback,
+      }),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function getRuntimeHealth(): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/runtime/health`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function getModelpackManifest(): Promise<ModelpackManifest> {
+    const res = await fetch(`${baseUrl}/modelpacks/manifest`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function verifyModelpack(
+    filePath: string,
+    expectedSha256: string,
+  ): Promise<{
+    verified: boolean;
+    algorithm: string;
+    file_path: string;
+    file_size_bytes: number;
+    expected_sha256: string;
+    actual_sha256: string;
+  }> {
+    const res = await fetch(`${baseUrl}/modelpacks/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file_path: filePath, expected_sha256: expectedSha256 }),
     });
     if (!res.ok) {
       throw await parseError(res);
@@ -685,6 +813,13 @@ export function createApiClient(config: ApiConfig) {
     streamMessage,
     getLLMProvider,
     setLLMProvider,
+    getRuntimeMode,
+    setRuntimeMode,
+    getRuntimeProviders,
+    setRuntimeProviders,
+    getRuntimeHealth,
+    getModelpackManifest,
+    verifyModelpack,
     getMemories,
     searchMemories,
     ingestMemory,

@@ -295,7 +295,7 @@ Output JSON:
         )
 
         prompt = f"""{system}
-{f'Session context: {session_context[:200]}' if session_context else ''}
+    {f'Session context: {session_context[:1200]}' if session_context else ''}
 
 User question: {query}
 

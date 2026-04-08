@@ -1108,7 +1108,7 @@ class LLMProvider:
     def __init__(self):
         self.local_llm: Optional[LocalLLM] = None
         self.gemini_llm = None          # GeminiLLM instance (or None)
-        self.provider: str = "local"    # "local" | "gemini"
+        self.provider: str = "local"    # "local" | "gemma_local" | "gemini"
 
     @property
     def active_llm(self):
@@ -1131,7 +1131,7 @@ class LLMProvider:
         return active is not None and getattr(active, 'model', None) is not None
 
     def set_provider(self, name: str):
-        if name in ("local", "gemini"):
+        if name in ("local", "gemini", "gemma_local"):
             self.provider = name
 
     # ── Delegate everything else to the active LLM ───────────────────────

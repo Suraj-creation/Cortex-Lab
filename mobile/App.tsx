@@ -28,11 +28,13 @@ import type {
   ConversationRecord,
   ConversationTurn,
   ModelStatus,
+  ModelpackManifest,
   MemoryObject,
   GraphData,
   RAGStats,
   AmbientState,
   LivePipelineEvent,
+  LLMProviderType,
   VoiceProviders,
 } from './shared/core/types';
 import { DEFAULT_SETTINGS } from './shared/core/types';
@@ -102,6 +104,9 @@ interface SettingsPageProps {
   testingConnection: boolean;
   connectionStatus: string;
   backendUrl: string;
+  modelpackManifest: ModelpackManifest | null;
+  modelpackError: string;
+  onRefreshModelpacks: () => void;
 }
 
 const SettingsPage = require('./src/screens/SettingsScreen').SettingsScreen as React.ComponentType<SettingsPageProps>;
@@ -119,6 +124,8 @@ function AppContent() {
   const [testingConnection, setTestingConnection] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState('');
   const [backendUrl, setBackendUrl] = useState(apiBase);
+  const [modelpackManifest, setModelpackManifest] = useState<ModelpackManifest | null>(null);
+  const [modelpackError, setModelpackError] = useState('');
 
   // ── Global state ────────────────────────────────────────────────────────────
   const [modelStatus, setModelStatus] = useState<ModelStatus>({ status: 'loading', model_loaded: false, model_info: {} });
@@ -201,6 +208,16 @@ function AppContent() {
     } catch {}
   }, [api]);
 
+  const loadModelpackManifest = useCallback(async () => {
+    try {
+      const manifest = await api.getModelpackManifest();
+      setModelpackManifest(manifest);
+      setModelpackError('');
+    } catch (e) {
+      setModelpackError(e instanceof Error ? e.message : String(e));
+    }
+  }, [api]);
+
   const loadConversations = useCallback(async () => {
     try {
       const all = await getAllConversations();
@@ -250,14 +267,28 @@ function AppContent() {
           setBackendUrl(persistedUrl);
         }
 
-        await Promise.all([refreshModelStatus(), syncLLMProvider(), ensureActiveConversation()]);
+        await Promise.all([
+          refreshModelStatus(),
+          syncLLMProvider(),
+          ensureActiveConversation(),
+          loadModelpackManifest(),
+        ]);
       } catch (e) {
         if (mounted) setGlobalError(e instanceof Error ? e.message : String(e));
       }
     })();
     const interval = setInterval(() => void refreshModelStatus(), 15000);
     return () => { mounted = false; clearInterval(interval); };
-  }, [refreshModelStatus, syncLLMProvider, ensureActiveConversation]);
+  }, [refreshModelStatus, syncLLMProvider, ensureActiveConversation, loadModelpackManifest]);
+
+  useEffect(() => {
+    if (!settingsVisible) {
+      return;
+    }
+    if (modelpackManifest === null) {
+      void loadModelpackManifest();
+    }
+  }, [settingsVisible, modelpackManifest, loadModelpackManifest]);
 
   useEffect(() => { void saveChatSettings(settings); }, [settings]);
 
@@ -300,8 +331,18 @@ function AppContent() {
   }, []);
 
   const toggleProvider = useCallback(async () => {
-    const next = settings.llmProvider === 'local' ? 'gemini' : 'local';
-    if (next === 'local' && !localModelAvailable) { setGlobalError('Local model unavailable.'); return; }
+    const providerCycle: LLMProviderType[] = localModelAvailable
+      ? ['local', 'gemma_local', 'gemini']
+      : ['gemini'];
+    const currentIndex = providerCycle.indexOf(settings.llmProvider);
+    const safeIndex = currentIndex >= 0 ? currentIndex : providerCycle.length - 1;
+    const next = providerCycle[(safeIndex + 1) % providerCycle.length];
+
+    if ((next === 'local' || next === 'gemma_local') && !localModelAvailable) {
+      setGlobalError('Local model unavailable.');
+      return;
+    }
+
     setProviderBusy(true);
     try {
       await api.setLLMProvider(next);
@@ -464,7 +505,7 @@ function AppContent() {
     finally { setAmbientBusy(false); }
   }, [api, loadAmbient]);
 
-  const setAmbientProvider = useCallback(async (kind: 'stt' | 'tts', provider: 'traditional' | 'gemini') => {
+  const setAmbientProvider = useCallback(async (kind: 'stt' | 'tts', provider: 'traditional' | 'local' | 'gemini') => {
     setAmbientBusy(true);
     try {
       if (kind === 'stt') await api.setSTTProvider(provider); else await api.setTTSProvider(provider);
@@ -647,6 +688,9 @@ function AppContent() {
           testingConnection={testingConnection}
           connectionStatus={connectionStatus}
           backendUrl={backendUrl}
+          modelpackManifest={modelpackManifest}
+          modelpackError={modelpackError}
+          onRefreshModelpacks={() => void loadModelpackManifest()}
         />
       ) : (
         <>

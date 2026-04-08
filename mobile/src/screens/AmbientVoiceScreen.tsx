@@ -52,7 +52,7 @@ interface AmbientVoiceScreenProps {
   ttsBusy: boolean;
   ttsLastBytes: number | null;
   onAmbientAction: (a: 'start' | 'stop' | 'pause' | 'resume') => void;
-  onSetProvider: (kind: 'stt' | 'tts', provider: 'traditional' | 'gemini') => void;
+  onSetProvider: (kind: 'stt' | 'tts', provider: 'traditional' | 'local' | 'gemini') => void;
   onStartEnrollment: () => void;
   onToggleAutoIngest: () => void;
   onRunTTS: () => void;
@@ -185,15 +185,32 @@ export function AmbientVoiceScreen({
         <Card variant="outlined" style={s.card}>
           <Text style={s.cardTitle}>Speech-to-Text Provider</Text>
           <View style={s.segmentRow}>
-            {(['traditional', 'gemini'] as const).map((p) => (
+            {(['local', 'gemini'] as const).map((p) => (
               <TouchableOpacity
                 key={p}
                 onPress={() => onSetProvider('stt', p)}
-                disabled={ambientBusy || (p === 'traditional' && ambientProviders?.traditional_stt_available === false)}
-                style={[s.segmentBtn, ambientState.stt_provider === p && s.segmentBtnActive]}
+                disabled={
+                  ambientBusy
+                  || (p === 'local'
+                    && ambientProviders?.local_stt_available === false
+                    && ambientProviders?.traditional_stt_available === false)
+                }
+                style={[
+                  s.segmentBtn,
+                  ((p === 'local' && (ambientState.stt_provider === 'local' || ambientState.stt_provider === 'traditional'))
+                    || ambientState.stt_provider === p)
+                    && s.segmentBtnActive,
+                ]}
               >
-                <Text style={[s.segmentText, ambientState.stt_provider === p && s.segmentTextActive]}>
-                  {p === 'traditional' ? 'Whisper' : 'Gemini'}
+                <Text
+                  style={[
+                    s.segmentText,
+                    ((p === 'local' && (ambientState.stt_provider === 'local' || ambientState.stt_provider === 'traditional'))
+                      || ambientState.stt_provider === p)
+                      && s.segmentTextActive,
+                  ]}
+                >
+                  {p === 'local' ? 'Local' : 'Gemini'}
                 </Text>
               </TouchableOpacity>
             ))}
@@ -204,15 +221,32 @@ export function AmbientVoiceScreen({
         <Card variant="outlined" style={s.card}>
           <Text style={s.cardTitle}>Text-to-Speech Provider</Text>
           <View style={s.segmentRow}>
-            {(['traditional', 'gemini'] as const).map((p) => (
+            {(['local', 'gemini'] as const).map((p) => (
               <TouchableOpacity
                 key={p}
                 onPress={() => onSetProvider('tts', p)}
-                disabled={ambientBusy || (p === 'traditional' && ambientProviders?.traditional_tts_available === false)}
-                style={[s.segmentBtn, ambientState.tts_provider === p && s.segmentBtnActive]}
+                disabled={
+                  ambientBusy
+                  || (p === 'local'
+                    && ambientProviders?.local_tts_available === false
+                    && ambientProviders?.traditional_tts_available === false)
+                }
+                style={[
+                  s.segmentBtn,
+                  ((p === 'local' && (ambientState.tts_provider === 'local' || ambientState.tts_provider === 'traditional'))
+                    || ambientState.tts_provider === p)
+                    && s.segmentBtnActive,
+                ]}
               >
-                <Text style={[s.segmentText, ambientState.tts_provider === p && s.segmentTextActive]}>
-                  {p === 'traditional' ? 'Piper' : 'Gemini'}
+                <Text
+                  style={[
+                    s.segmentText,
+                    ((p === 'local' && (ambientState.tts_provider === 'local' || ambientState.tts_provider === 'traditional'))
+                      || ambientState.tts_provider === p)
+                      && s.segmentTextActive,
+                  ]}
+                >
+                  {p === 'local' ? 'Local' : 'Gemini'}
                 </Text>
               </TouchableOpacity>
             ))}

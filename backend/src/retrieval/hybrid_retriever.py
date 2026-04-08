@@ -44,27 +44,30 @@ class HybridRetriever:
     Latency savings: 64%
     """
 
-    # Channel weights — PageIndex bypasses RRF entirely (injected post-fusion).
-    # These weights are for the 5 local channels only when PageIndex is active.
-    # Sum = 0.55 (PageIndex's 0.45 is removed since it no longer goes through RRF).
-    # The actual RRF uses these directly — normalization not needed for RRF.
+    # Channel weights — includes backward-compatible legacy channels.
+    # PageIndex bypasses RRF and is injected post-fusion.
+    # Legacy channels (`raptor`, `community`) are compatibility placeholders
+    # unless enabled by a downstream runtime extension.
     WEIGHTS = {
         "dense": 0.35,
         "sparse": 0.25,
         "graph": 0.20,
         "temporal": 0.10,
-        # proposition: disabled — very slow with Gemini API (26 API calls/query)
-        # re-enable when sentence-transformers is installed (local, instant)
+        "proposition": 0.05,
+        "raptor": 0.03,
+        "community": 0.02,
     }
 
-    # Fallback weights when PageIndex is disabled / has no documents
-    # (Same as WEIGHTS since PageIndex no longer goes through RRF)
+    # Fallback weights when PageIndex is disabled / has no documents.
+    # Keep backward-compatible channels represented to preserve old contracts.
     WEIGHTS_LOCAL_ONLY = {
         "dense": 0.40,
-        "sparse": 0.30,
+        "sparse": 0.25,
         "graph": 0.20,
         "temporal": 0.10,
-        # proposition: disabled — see WEIGHTS note above
+        "proposition": 0.03,
+        "raptor": 0.01,
+        "community": 0.01,
     }
 
     # RRF constant
@@ -429,6 +432,25 @@ class HybridRetriever:
 
         return results
 
+    # ─── Legacy Compatibility Channels ────────────────────────────────
+
+    async def _raptor_retrieve(self, query: MemoryQuery, top_k: int) -> List[Tuple[str, float]]:
+        """Compatibility stub for legacy RAPTOR channel contracts.
+
+        The current runtime does not maintain RAPTOR cluster indexes by default,
+        so this method returns an empty result set until a RAPTOR index backend
+        is wired in.
+        """
+        return []
+
+    async def _community_retrieve(self, query: MemoryQuery, top_k: int) -> List[Tuple[str, float]]:
+        """Compatibility stub for legacy community retrieval contracts.
+
+        Community-level retrieval can be activated by a graph community backend.
+        Until then, it safely returns no matches.
+        """
+        return []
+
     # ─── Channel 5: Proposition Retrieval ────────────────────────────────
 
     async def _proposition_retrieve(self, query: MemoryQuery, top_k: int) -> List[Tuple[str, float]]:
@@ -783,6 +805,40 @@ class HybridRetriever:
         self._prop_last_count = self.metadata.count_memories()
 
     # ─── Helpers ─────────────────────────────────────────────────────────
+
+    def _prefilter_by_metadata(self, query: MemoryQuery, candidates: List[Tuple[str, float]]) -> List[Tuple[str, float]]:
+        """Compatibility helper to pre-filter candidate IDs by query metadata.
+
+        Preserves older retriever contracts that apply time/entity/topic filters
+        before rank fusion.
+        """
+        if not candidates:
+            return []
+
+        filtered: List[Tuple[str, float]] = []
+        for memory_id, score in candidates:
+            memory = self.metadata.get_memory(memory_id)
+            if memory is None:
+                continue
+
+            if query.time_start and memory.timestamp and memory.timestamp < query.time_start:
+                continue
+            if query.time_end and memory.timestamp and memory.timestamp > query.time_end:
+                continue
+
+            if query.entities:
+                memory_entities = {entity.lower() for entity in (memory.entities or [])}
+                if not any(entity.lower() in memory_entities for entity in query.entities):
+                    continue
+
+            if query.topics:
+                memory_topics = set(memory.topics or [])
+                if not any(topic in memory_topics for topic in query.topics):
+                    continue
+
+            filtered.append((memory_id, score))
+
+        return filtered
 
     def _tokenize(self, text: str) -> List[str]:
         """Simple whitespace + lowercase tokenization."""

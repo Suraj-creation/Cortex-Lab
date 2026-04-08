@@ -154,7 +154,7 @@ export function DocumentsPanel({ onBack }: { onBack: () => void }) {
     try {
       await deleteDocument(docId);
       await loadData();
-    } catch (err) {
+    } catch {
       setError("Failed to delete document");
     }
   };

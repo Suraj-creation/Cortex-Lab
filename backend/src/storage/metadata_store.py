@@ -214,6 +214,59 @@ class MetadataStore:
                 results.append(mem)
         return results
 
+    def update_memory_metadata(self, memory_id: str, metadata: Dict[str, Any], merge: bool = True) -> bool:
+        """Update metadata JSON for an existing memory.
+
+        When merge=True, merges provided keys into existing metadata while
+        preserving previous fields.
+        """
+        if not memory_id:
+            return False
+
+        if self._use_duckdb:
+            row = self.conn.execute(
+                "SELECT metadata FROM memories WHERE id = ?",
+                [memory_id],
+            ).fetchone()
+            if not row:
+                return False
+
+            existing_raw = row[0]
+            if isinstance(existing_raw, str):
+                try:
+                    existing = json.loads(existing_raw)
+                except Exception:
+                    existing = {}
+            else:
+                existing = existing_raw or {}
+
+            if merge:
+                updated = dict(existing)
+                updated.update(metadata or {})
+            else:
+                updated = dict(metadata or {})
+
+            self.conn.execute(
+                "UPDATE memories SET metadata = ? WHERE id = ?",
+                [json.dumps(updated), memory_id],
+            )
+            return True
+
+        existing = self._fallback.get(memory_id)
+        if not existing:
+            return False
+
+        current_metadata = existing.get("metadata", {}) if isinstance(existing, dict) else {}
+        if merge:
+            updated = dict(current_metadata)
+            updated.update(metadata or {})
+        else:
+            updated = dict(metadata or {})
+
+        existing["metadata"] = updated
+        self._fallback[memory_id] = existing
+        return True
+
     def search_by_time(self, start: Optional[datetime] = None,
                        end: Optional[datetime] = None,
                        limit: int = 50) -> List[CausalMemoryObject]:

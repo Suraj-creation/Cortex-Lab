@@ -15,13 +15,17 @@ import {
   Pressable,
   KeyboardAvoidingView,
   Platform,
+  Linking,
 } from 'react-native';
 import Slider from '@react-native-community/slider';
 import { NEURAL, SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT } from '../theme/colors';
 import { Button } from '../components/ui/Button';
 import { TextInput } from '../components/ui/TextInput';
 import { AppIcon } from '../components/ui/AppIcon';
-import type { ChatSettings } from '../../shared/core/types';
+import { ModelDownloadManager } from '../components/modelpacks/ModelDownloadManager';
+import { ModelRecommendationCard } from '../components/modelpacks/ModelRecommendationCard';
+import { OfflineReadinessBadge } from '../components/modelpacks/OfflineReadinessBadge';
+import type { ChatSettings, ModelpackEntry, ModelpackManifest } from '../../shared/core/types';
 
 interface SettingsSheetProps {
   visible: boolean;
@@ -33,6 +37,105 @@ interface SettingsSheetProps {
   testingConnection: boolean;
   connectionStatus: string;
   backendUrl: string;
+  modelpackManifest?: ModelpackManifest | null;
+  modelpackError?: string;
+  onRefreshModelpacks?: () => void;
+}
+
+const MODELPACK_DOCS_FALLBACK =
+  'https://github.com/google-ai-edge/LiteRT-LM/blob/main/docs%2Fapi%2Fkotlin%2Fgetting_started.md';
+
+const FALLBACK_MODELPACKS: ModelpackEntry[] = [
+  {
+    id: 'gemma-4-e4b-it-litert-lm',
+    display_name: 'Gemma 4 E4B IT (LiteRT-LM)',
+    version: '2026.04.0',
+    target: 'android-web',
+    family: 'gemma-4',
+    quantization: 'E4B',
+    summary: 'Higher-quality Gemma 4 local model for capable devices.',
+    availability: 'available',
+    download_url: 'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm',
+    cta_label: 'Download from Hugging Face',
+    files: [],
+  },
+  {
+    id: 'gemma-4-e2b-it-litert-lm',
+    display_name: 'Gemma 4 E2B IT (LiteRT-LM)',
+    version: '2026.04.0',
+    target: 'android-web',
+    family: 'gemma-4',
+    quantization: 'E2B',
+    summary: 'Lean Gemma 4 local model for faster installs and mid-range devices.',
+    availability: 'available',
+    download_url: 'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm',
+    cta_label: 'Download from Hugging Face',
+    files: [],
+  },
+  {
+    id: 'gemma-3-5-ft-local',
+    display_name: 'Gemma 3.5 Fine-Tuned (Planned)',
+    version: 'planned',
+    target: 'android-web',
+    family: 'gemma-3.5',
+    quantization: 'tbd',
+    summary: 'Reserved slot for your upcoming fine-tuned local model integration.',
+    availability: 'coming_soon',
+    cta_label: 'Coming Soon',
+    files: [],
+  },
+];
+
+function normalizeModelpackManifest(input: ModelpackManifest | null | undefined): ModelpackManifest {
+  const raw = input && typeof input === 'object' ? (input as unknown as Record<string, unknown>) : {};
+  const rawPacks = Array.isArray(raw.packs) ? raw.packs : [];
+
+  const packs: ModelpackEntry[] = rawPacks
+    .filter((pack): pack is Record<string, unknown> => Boolean(pack && typeof pack === 'object'))
+    .map((pack, idx) => {
+      const rawFiles = Array.isArray(pack.files) ? pack.files : [];
+      return {
+        id: typeof pack.id === 'string' && pack.id.trim() ? pack.id.trim() : `pack-${idx + 1}`,
+        display_name:
+          typeof pack.display_name === 'string' && pack.display_name.trim()
+            ? pack.display_name.trim()
+            : `Model Pack ${idx + 1}`,
+        version: typeof pack.version === 'string' && pack.version.trim() ? pack.version.trim() : 'unknown',
+        target: typeof pack.target === 'string' ? pack.target : undefined,
+        family: typeof pack.family === 'string' ? pack.family : undefined,
+        quantization: typeof pack.quantization === 'string' ? pack.quantization : undefined,
+        summary: typeof pack.summary === 'string' ? pack.summary : undefined,
+        availability: pack.availability === 'coming_soon' ? 'coming_soon' : 'available',
+        download_url:
+          typeof pack.download_url === 'string' && pack.download_url.trim()
+            ? pack.download_url.trim()
+            : undefined,
+        cta_label: typeof pack.cta_label === 'string' ? pack.cta_label : undefined,
+        docs_url: typeof pack.docs_url === 'string' ? pack.docs_url : undefined,
+        requires: Array.isArray(pack.requires)
+          ? pack.requires.filter((item): item is string => typeof item === 'string')
+          : undefined,
+        files: rawFiles
+          .filter((file): file is Record<string, unknown> => Boolean(file && typeof file === 'object'))
+          .map((file) => ({
+            path: typeof file.path === 'string' ? file.path : '',
+            size_bytes: typeof file.size_bytes === 'number' ? file.size_bytes : 0,
+            sha256: typeof file.sha256 === 'string' ? file.sha256 : '',
+          })),
+      };
+    });
+
+  return {
+    schema_version: typeof raw.schema_version === 'string' ? raw.schema_version : '1.1',
+    generated_at: typeof raw.generated_at === 'string' ? raw.generated_at : new Date().toISOString(),
+    signature_required: raw.signature_required !== false,
+    source: typeof raw.source === 'string' ? raw.source : 'mobile-sheet-fallback',
+    docs_url: typeof raw.docs_url === 'string' ? raw.docs_url : MODELPACK_DOCS_FALLBACK,
+    channels: Array.isArray(raw.channels)
+      ? raw.channels.filter((item): item is string => typeof item === 'string')
+      : undefined,
+    packs: packs.length > 0 ? packs : FALLBACK_MODELPACKS,
+  };
 }
 
 export function SettingsSheet({
@@ -45,12 +148,43 @@ export function SettingsSheet({
   testingConnection,
   connectionStatus,
   backendUrl,
+  modelpackManifest = null,
+  modelpackError = '',
+  onRefreshModelpacks,
 }: SettingsSheetProps) {
   const [backendDraft, setBackendDraft] = React.useState(backendUrl);
+  const [modelpackLinkError, setModelpackLinkError] = React.useState('');
+
+  const normalizedManifest = React.useMemo(
+    () => normalizeModelpackManifest(modelpackManifest),
+    [modelpackManifest],
+  );
+
+  const downloadableNow = React.useMemo(
+    () =>
+      normalizedManifest.packs.filter(
+        (pack) => pack.availability !== 'coming_soon' && Boolean(pack.download_url),
+      ).length,
+    [normalizedManifest.packs],
+  );
+
+  const openExternalUrl = React.useCallback(async (url: string) => {
+    try {
+      setModelpackLinkError('');
+      const supported = await Linking.canOpenURL(url);
+      if (!supported) {
+        throw new Error('This device cannot open the requested URL.');
+      }
+      await Linking.openURL(url);
+    } catch (error) {
+      setModelpackLinkError(error instanceof Error ? error.message : 'Failed to open URL.');
+    }
+  }, []);
 
   useEffect(() => {
     if (visible) {
       setBackendDraft(backendUrl);
+      setModelpackLinkError('');
     }
   }, [visible, backendUrl]);
   const slideAnim = useRef(new Animated.Value(600)).current;
@@ -108,18 +242,89 @@ export function SettingsSheet({
           <View style={styles.section}>
             <Text style={styles.sectionLabel}>LLM Provider</Text>
             <View style={styles.segmentRow}>
-              {(['gemini', 'local'] as const).map((p) => (
+              {(['local', 'gemma_local', 'gemini'] as const).map((p) => (
                 <TouchableOpacity
                   key={p}
                   onPress={() => onUpdateSettings({ llmProvider: p })}
                   style={[styles.segBtn, settings.llmProvider === p && styles.segBtnActive]}
                 >
                   <Text style={[styles.segText, settings.llmProvider === p && styles.segTextActive]}>
-                    {p === 'gemini' ? 'Gemini' : 'Local'}
+                    {p === 'gemini' ? 'Gemini' : p === 'gemma_local' ? 'Gemma Local' : 'Local'}
                   </Text>
                 </TouchableOpacity>
               ))}
             </View>
+          </View>
+
+          {/* Local model packs */}
+          <View style={styles.section}>
+            <View style={styles.modelpackHeaderRow}>
+              <View style={styles.modelpackHeaderText}>
+                <Text style={styles.sectionLabel}>Local Model Packs</Text>
+                <Text style={styles.hintText}>
+                  Direct links for LiteRT Gemma downloads used by Gemma Local mode.
+                </Text>
+              </View>
+              <OfflineReadinessBadge ready={false} details={`${downloadableNow} downloadable now`} />
+            </View>
+
+            <View style={styles.modelpackList}>
+              {normalizedManifest.packs.map((pack) => {
+                const available = pack.availability !== 'coming_soon';
+                const downloadUrl = pack.download_url;
+
+                return (
+                  <View key={pack.id} style={styles.modelpackBlock}>
+                    <ModelRecommendationCard
+                      title={pack.display_name}
+                      reason={pack.summary || 'Model pack prepared for local runtime.'}
+                      recommended={available}
+                    />
+                    <ModelDownloadManager
+                      packName={pack.display_name}
+                      status="not_installed"
+                      actionLabel={available ? pack.cta_label || 'Download' : pack.cta_label || 'Coming Soon'}
+                      actionDisabled={!available || !downloadUrl}
+                      onInstall={
+                        available && downloadUrl
+                          ? () => {
+                              void openExternalUrl(downloadUrl);
+                            }
+                          : undefined
+                      }
+                    />
+                  </View>
+                );
+              })}
+            </View>
+
+            <View style={styles.actionRow}>
+              <Button
+                label="LiteRT Kotlin Guide"
+                variant="outline"
+                onPress={() => void openExternalUrl(normalizedManifest.docs_url || MODELPACK_DOCS_FALLBACK)}
+                size="sm"
+              />
+              {onRefreshModelpacks ? (
+                <Button
+                  label="Refresh Catalog"
+                  variant="outline"
+                  onPress={onRefreshModelpacks}
+                  size="sm"
+                />
+              ) : null}
+            </View>
+
+            {modelpackError ? (
+              <Text style={[styles.connStatus, { color: NEURAL.error }]}>
+                Modelpack catalog: {modelpackError}
+              </Text>
+            ) : null}
+            {modelpackLinkError ? (
+              <Text style={[styles.connStatus, { color: NEURAL.error }]}>
+                {modelpackLinkError}
+              </Text>
+            ) : null}
           </View>
 
           {/* Temperature */}
@@ -302,6 +507,32 @@ const styles = StyleSheet.create({
   segBtnActive: { backgroundColor: `${NEURAL.primary}26`, borderColor: `${NEURAL.primary}60` },
   segText: { fontSize: FONT_SIZE.sm, color: NEURAL.onSurfaceVariant, fontWeight: FONT_WEIGHT.medium },
   segTextActive: { color: NEURAL.primary, fontWeight: FONT_WEIGHT.bold },
+
+  modelpackHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: SPACING.sm,
+  },
+  modelpackHeaderText: {
+    flex: 1,
+  },
+  modelpackList: {
+    gap: SPACING.md,
+  },
+  modelpackBlock: {
+    gap: SPACING.sm,
+  },
+  hintText: {
+    fontSize: FONT_SIZE.xs,
+    color: NEURAL.onSurfaceVariant,
+    marginBottom: SPACING.sm,
+  },
+  actionRow: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+    marginTop: SPACING.md,
+  },
 
   sliderHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: SPACING.sm },
   sliderValue: { fontSize: FONT_SIZE.base, color: NEURAL.primary, fontWeight: FONT_WEIGHT.bold },
