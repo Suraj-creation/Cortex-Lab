@@ -4370,6 +4370,439 @@ async def query_documents(request: MemorySearchRequest):
     }
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# AUTONOMOUS AGENT RUNTIME API — Pi-Mono Source-Level Integration
+# Architecture: Orchestrator.md §22, Agentic-RAG-Architecture.md §17-19
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from src.agents.autonomous_loop import CortexAgentLoop, AgentConfig
+from src.agents.tier_router import TierRouter, ResponseCache
+from src.agents.tool_types import CortexEvent, CortexEventType
+from src.agents.scheduler import background_scheduler
+
+_agent_sessions: Dict[str, CortexAgentLoop] = {}
+_tier_router = TierRouter()
+
+
+class AgentQueryRequest(BaseModel):
+    query: str = Field(..., description="User query to process")
+    session_id: Optional[str] = Field(None, description="Existing session to continue")
+    tier_override: Optional[str] = Field(None, description="Force tier classification T0-T4")
+
+
+class AgentSteerRequest(BaseModel):
+    text: str = Field(..., description="Steering message to inject mid-query")
+
+
+class AgentFollowUpRequest(BaseModel):
+    text: str = Field(..., description="Follow-up message for when agent is idle")
+
+
+class AgentSessionCreateRequest(BaseModel):
+    agent_id: str = Field("l1_orchestrator", description="Agent config ID to use")
+    title: Optional[str] = Field(None, description="Session title")
+
+
+# ── Agent Session Management ─────────────────────────────────────────────────
+
+@app.post("/api/agent/sessions")
+async def create_agent_session(request: AgentSessionCreateRequest):
+    """Create a new agent session with a specific agent configuration."""
+    from src.agents.agent_configs import ALL_AGENT_CONFIGS
+    from src.agents.cortex_extensions import DEFAULT_EXTENSIONS
+
+    config = ALL_AGENT_CONFIGS.get(request.agent_id)
+    if not config:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown agent: {request.agent_id}. Available: {list(ALL_AGENT_CONFIGS.keys())}",
+        )
+
+    config_with_ext = AgentConfig(
+        agent_id=config.agent_id,
+        system_prompt=config.system_prompt,
+        tools=config.tools,
+        extensions=list(DEFAULT_EXTENSIONS) + config.extensions,
+        session_config=config.session_config,
+        scheduling=config.scheduling,
+        retry_config=config.retry_config,
+        max_turns=config.max_turns,
+        max_tool_chain_depth=config.max_tool_chain_depth,
+        context_window=config.context_window,
+        llm_provider=config.llm_provider,
+    )
+
+    loop = CortexAgentLoop(config=config_with_ext)
+    session_id = loop.session.session_id if loop.session else str(uuid.uuid4())
+    _agent_sessions[session_id] = loop
+
+    return {
+        "session_id": session_id,
+        "agent_id": config.agent_id,
+        "status": "created",
+    }
+
+
+@app.get("/api/agent/sessions")
+async def list_agent_sessions():
+    """List all active agent sessions."""
+    sessions = []
+    for sid, loop in _agent_sessions.items():
+        sessions.append({
+            "session_id": sid,
+            "agent_id": loop.config.agent_id,
+            "is_running": loop.is_running,
+            "is_streaming": loop.is_streaming,
+            **loop.get_session_stats(),
+        })
+    return {"sessions": sessions, "count": len(sessions)}
+
+
+@app.get("/api/agent/sessions/{session_id}")
+async def get_agent_session(session_id: str):
+    """Get details of a specific agent session."""
+    loop = _agent_sessions.get(session_id)
+    if not loop:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return loop.get_session_stats()
+
+
+@app.delete("/api/agent/sessions/{session_id}")
+async def close_agent_session(session_id: str):
+    """Close and remove an agent session."""
+    loop = _agent_sessions.pop(session_id, None)
+    if not loop:
+        raise HTTPException(status_code=404, detail="Session not found")
+    loop.abort()
+    return {"session_id": session_id, "status": "closed"}
+
+
+# ── Agent Query (SSE Streaming) ──────────────────────────────────────────────
+
+@app.post("/api/agent/query")
+async def agent_query(request: AgentQueryRequest):
+    """
+    Send a query to the autonomous agent. Returns JSON response.
+    For streaming, use /api/agent/query/stream.
+    """
+    from src.agents.agent_configs import ALL_AGENT_CONFIGS
+    from src.agents.cortex_extensions import DEFAULT_EXTENSIONS
+
+    tier = _tier_router.classify(request.query)
+
+    if request.session_id and request.session_id in _agent_sessions:
+        loop = _agent_sessions[request.session_id]
+    else:
+        config = ALL_AGENT_CONFIGS["l1_orchestrator"]
+        config_with_ext = AgentConfig(
+            agent_id=config.agent_id,
+            system_prompt=config.system_prompt,
+            tools=config.tools,
+            extensions=list(DEFAULT_EXTENSIONS) + config.extensions,
+            session_config=config.session_config,
+            max_turns=config.max_turns,
+            context_window=config.context_window,
+            llm_provider=config.llm_provider,
+        )
+        loop = CortexAgentLoop(config=config_with_ext)
+        if loop.session:
+            _agent_sessions[loop.session.session_id] = loop
+
+    result = await loop.prompt(request.query)
+
+    _tier_router.cache_response(request.query, result)
+
+    return {
+        "answer": result.get("text", ""),
+        "tier": tier.to_dict(),
+        "turns": result.get("turns", 0),
+        "session_id": loop.session.session_id if loop.session else None,
+        "tool_results": result.get("tool_results", []),
+    }
+
+
+@app.post("/api/agent/query/stream")
+async def agent_query_stream(request: AgentQueryRequest):
+    """
+    SSE streaming endpoint for agent queries.
+    Emits CortexEvent objects as Server-Sent Events.
+    """
+    from src.agents.agent_configs import ALL_AGENT_CONFIGS
+    from src.agents.cortex_extensions import DEFAULT_EXTENSIONS
+
+    tier = _tier_router.classify(request.query)
+
+    if request.session_id and request.session_id in _agent_sessions:
+        loop = _agent_sessions[request.session_id]
+    else:
+        config = ALL_AGENT_CONFIGS["l1_orchestrator"]
+        config_with_ext = AgentConfig(
+            agent_id=config.agent_id,
+            system_prompt=config.system_prompt,
+            tools=config.tools,
+            extensions=list(DEFAULT_EXTENSIONS) + config.extensions,
+            session_config=config.session_config,
+            max_turns=config.max_turns,
+            context_window=config.context_window,
+            llm_provider=config.llm_provider,
+        )
+        loop = CortexAgentLoop(config=config_with_ext)
+        if loop.session:
+            _agent_sessions[loop.session.session_id] = loop
+
+    event_queue: asyncio.Queue = asyncio.Queue()
+    collected_events: list[dict] = []
+
+    def on_event(event: CortexEvent):
+        event_queue.put_nowait(event)
+        collected_events.append(event.to_dict())
+
+    unsubscribe = loop.subscribe(on_event)
+
+    async def event_generator():
+        tier_event = CortexEvent(
+            type=CortexEventType.TIER_SELECTED,
+            data=tier.to_dict(),
+            session_id=loop.session.session_id if loop.session else "",
+            agent_id=loop.config.agent_id,
+        )
+        yield tier_event.to_sse()
+
+        prompt_task = asyncio.create_task(loop.prompt(request.query))
+
+        while not prompt_task.done():
+            try:
+                event = await asyncio.wait_for(event_queue.get(), timeout=0.5)
+                yield event.to_sse()
+            except asyncio.TimeoutError:
+                continue
+
+        result = await prompt_task
+
+        while not event_queue.empty():
+            event = event_queue.get_nowait()
+            yield event.to_sse()
+
+        final_event = CortexEvent(
+            type=CortexEventType.AGENT_END,
+            data={
+                "answer": result.get("text", ""),
+                "turns": result.get("turns", 0),
+                "session_id": loop.session.session_id if loop.session else None,
+            },
+        )
+        yield final_event.to_sse()
+
+        unsubscribe()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ── Steering & Follow-Up ────────────────────────────────────────────────────
+
+@app.post("/api/agent/sessions/{session_id}/steer")
+async def steer_agent(session_id: str, request: AgentSteerRequest):
+    """Inject a steering message mid-query to redirect the agent."""
+    loop = _agent_sessions.get(session_id)
+    if not loop:
+        raise HTTPException(status_code=404, detail="Session not found")
+    await loop.steer(request.text)
+    return {"status": "steered", "queue": loop.steering_state}
+
+
+@app.post("/api/agent/sessions/{session_id}/follow-up")
+async def follow_up_agent(session_id: str, request: AgentFollowUpRequest):
+    """Queue a follow-up message for when the agent is idle."""
+    loop = _agent_sessions.get(session_id)
+    if not loop:
+        raise HTTPException(status_code=404, detail="Session not found")
+    await loop.follow_up(request.text)
+    return {"status": "queued", "queue": loop.steering_state}
+
+
+@app.post("/api/agent/sessions/{session_id}/abort")
+async def abort_agent(session_id: str):
+    """Abort the currently running agent query."""
+    loop = _agent_sessions.get(session_id)
+    if not loop:
+        raise HTTPException(status_code=404, detail="Session not found")
+    loop.abort()
+    return {"status": "aborted", "session_id": session_id}
+
+
+# ── Tier Classification ──────────────────────────────────────────────────────
+
+@app.post("/api/agent/classify")
+async def classify_query(request: AgentQueryRequest):
+    """Classify a query into processing tiers T0-T4."""
+    tier = _tier_router.classify(request.query)
+    return tier.to_dict()
+
+
+@app.get("/api/agent/cache/stats")
+async def get_cache_stats():
+    """Get T0 response cache statistics."""
+    return _tier_router.cache_stats
+
+
+# ── Agent Configuration ──────────────────────────────────────────────────────
+
+@app.get("/api/agent/configs")
+async def list_agent_configs():
+    """List all available agent configurations."""
+    from src.agents.agent_configs import ALL_AGENT_CONFIGS
+    configs = []
+    for aid, cfg in ALL_AGENT_CONFIGS.items():
+        configs.append({
+            "agent_id": aid,
+            "tool_count": len(cfg.tools),
+            "max_turns": cfg.max_turns,
+            "scheduling": {
+                "always_on": cfg.scheduling.always_on if cfg.scheduling else False,
+                "continuous": cfg.scheduling.continuous if cfg.scheduling else False,
+                "on_ingest": cfg.scheduling.on_ingest if cfg.scheduling else False,
+                "interval_min": cfg.scheduling.interval_min if cfg.scheduling else 0,
+            } if cfg.scheduling else None,
+        })
+    return {"agents": configs, "count": len(configs)}
+
+
+@app.get("/api/agent/configs/{agent_id}")
+async def get_agent_config(agent_id: str):
+    """Get detailed configuration for a specific agent."""
+    from src.agents.agent_configs import ALL_AGENT_CONFIGS
+    config = ALL_AGENT_CONFIGS.get(agent_id)
+    if not config:
+        raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
+    return {
+        "agent_id": config.agent_id,
+        "system_prompt": config.system_prompt[:500] + "..." if len(config.system_prompt) > 500 else config.system_prompt,
+        "tools": [{"name": t.name, "description": t.description} for t in config.tools],
+        "max_turns": config.max_turns,
+        "context_window": config.context_window,
+    }
+
+
+# ── Wiki & Claims API ────────────────────────────────────────────────────────
+
+@app.get("/api/wiki/pages")
+async def list_wiki_pages():
+    """List all personal wiki pages."""
+    from src.wiki.wiki_store import WikiStore
+    try:
+        store = WikiStore.get_instance()
+        return {"pages": store.list_pages(), "stats": store.stats()}
+    except Exception as e:
+        return {"pages": [], "stats": {}, "error": str(e)}
+
+
+@app.get("/api/wiki/pages/{page_id}")
+async def get_wiki_page(page_id: str):
+    """Get a specific wiki page."""
+    from src.wiki.wiki_store import WikiStore
+    store = WikiStore.get_instance()
+    page = store.get_page(page_id)
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found")
+    return page.to_dict()
+
+
+@app.post("/api/wiki/search")
+async def search_wiki(request: dict):
+    """Search the personal wiki."""
+    from src.wiki.wiki_store import WikiStore
+    store = WikiStore.get_instance()
+    results = store.search(request.get("query", ""), include_claims=request.get("include_claims", True))
+    return {"results": results}
+
+
+@app.get("/api/wiki/claims")
+async def list_claims():
+    """Get claim store statistics and recent claims."""
+    from src.wiki.claim_store import ClaimStore
+    store = ClaimStore.get_instance()
+    return store.stats()
+
+
+@app.post("/api/wiki/claims/search")
+async def search_claims(request: dict):
+    """Search atomic claims."""
+    from src.wiki.claim_store import ClaimStore
+    store = ClaimStore.get_instance()
+    results = store.search(
+        request.get("query", ""),
+        min_confidence=request.get("min_confidence", 0.5),
+    )
+    return {"claims": results}
+
+
+# ── Background Scheduler ─────────────────────────────────────────────────────
+
+@app.get("/api/agent/scheduler/status")
+async def scheduler_status():
+    """Get background scheduler status and task states."""
+    return background_scheduler.status()
+
+
+@app.post("/api/agent/scheduler/{agent_id}/enable")
+async def enable_scheduled_agent(agent_id: str):
+    """Enable a background scheduled agent."""
+    background_scheduler.enable(agent_id)
+    return {"agent_id": agent_id, "enabled": True}
+
+
+@app.post("/api/agent/scheduler/{agent_id}/disable")
+async def disable_scheduled_agent(agent_id: str):
+    """Disable a background scheduled agent."""
+    background_scheduler.disable(agent_id)
+    return {"agent_id": agent_id, "enabled": False}
+
+
+# ── SSE Event Stream (Global) ────────────────────────────────────────────────
+
+@app.get("/api/agent/events")
+async def agent_event_stream():
+    """
+    Global SSE event stream — subscribe to ALL agent events across all sessions.
+    Frontend connects once and receives CortexEvent objects.
+    """
+    from src.runtime.event_bus import runtime_events
+
+    subscriber_id = f"sse-{uuid.uuid4().hex[:8]}"
+    queue = runtime_events.subscribe(subscriber_id)
+
+    async def generator():
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield event.to_sse()
+                except asyncio.TimeoutError:
+                    yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            runtime_events.unsubscribe(subscriber_id)
+
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -4379,5 +4812,5 @@ if __name__ == "__main__":
         host=HOST,
         port=PORT,
         reload=False,
-        timeout_keep_alive=120,   # Keep proxy connections alive longer
+        timeout_keep_alive=120,
     )

@@ -1,9 +1,13 @@
-# Agentic RAG + LLM Wiki — Final Production Architecture
-## Cortex Lab v4.0 — Web + Mobile + Always-On Local Intelligence
+# Agentic RAG + LLM Wiki — Production Architecture
+## Cortex Lab v6.0 — Autonomous Intelligence Edition
 
-> **Version:** 4.0 — Tiered Intelligence Edition  
-> **Design Basis:** RAG-Architecture v3.0 + Agentic-RAG-Wiki + OpenClaude provider patterns + claw-code Rust runtime patterns  
-> **Core Principle:** Route fast. Retrieve smart. Store once. Build Wikipedia forever.
+> **Version:** 6.0 — Pi-Mono Source-Level Integration  
+> **Design Basis:** RAG-Architecture v3.0 + LLM Wiki Engine + Pi-Mono agent loop (source-studied, not doc-summarized)  
+> **Core Insight:** Agents are CONFIGURATIONS (system prompt + tools), not separate classes. The LLM IS the planner.  
+> **Critical Gap:** §17.2 contains honest gap analysis between this doc and actual backend code  
+> **Runtime Foundation:** CortexAgentLoop — one universal class, 17+ configurations  
+> **Target Applications:** 10 Deep Applications from Cortex-Deep-Applications.md  
+> **Roadmap Strategy:** ADDITIVE — preserve working code, add missing capabilities alongside
 
 ---
 
@@ -23,8 +27,13 @@
 12. [Storage Strategy — Local + Sync](#12-storage-strategy--local--sync)
 13. [Observability and Self-Improvement Loop](#13-observability-and-self-improvement-loop)
 14. [Production Gaps Analysis and Resolutions](#14-production-gaps-analysis-and-resolutions)
-15. [Implementation Roadmap](#15-implementation-roadmap)
+15. [Implementation Roadmap (Legacy)](#15-implementation-roadmap)
 16. [Success Metrics](#16-success-metrics)
+17. [Autonomous Agent Runtime — Pi-Mono Source-Level Patterns](#17-autonomous-agent-runtime--learned-from-pi-mono-source-code) *(§17.1-17.13: gap analysis, agent-as-config, exact loop, tools, sessions, compaction, steering, extensions, retry, RPC events, tool catalog)*
+18. [Frontend Application Architecture — Web](#18-frontend-application-architecture--web) *(routing, state management, steering UI, event-driven architecture)*
+19. [Backend Service Architecture — Bridge from Current Code](#19-backend-service-architecture--bridge-from-current-code) *(what exists vs what to add, service layout, scheduling, API endpoints)*
+20. [Cursor Agent Development Protocol](#20-cursor-agent-development-protocol) *(mandatory reading, implementation principles)*
+21. [Implementation Roadmap — Honest Bridge](#21-implementation-roadmap--honest-bridge-from-current-code) *(Phase 0-5, preserving existing code)*
 
 ---
 
@@ -1489,6 +1498,1151 @@ The v3.0 RAG-Architecture is **research-grade approaching production-grade**. It
 
 ---
 
-*Agentic RAG + LLM Wiki Architecture v4.0*  
-*Core insight: Route fast. Retrieve smart. Store once. Build Wikipedia forever.*  
-*Simple things instant. Complex things thorough. Nothing wasted. Knowledge compounding.*
+---
+
+## 17. Autonomous Agent Runtime — Learned from Pi-Mono Source Code
+
+> **MANDATORY DIRECTIVE FOR ALL CURSOR AGENTS:**
+>
+> The pi-mono codebase is the canonical reference for autonomous agent architecture. Before building ANY agent system in Cortex, you MUST read the actual source files listed below — not summaries, not docs, the CODE ITSELF.
+>
+> **Required source reading (in this order):**
+> 1. `pi-mono/packages/coding-agent/src/core/agent-session.ts` — the `prompt()` method (lines ~929-1066), `_handleAgentEvent`, steering/followUp queue mechanics, retry state machine, compaction triggers
+> 2. `pi-mono/packages/coding-agent/src/core/tools/tool-definition-wrapper.ts` — how `ToolDefinition` wraps to `AgentTool` via `wrapToolDefinition()`
+> 3. `pi-mono/packages/coding-agent/src/core/extensions/runner.ts` — `ExtensionRunner.emit()`, `emitToolCall()`, `emitToolResult()`, `emitBeforeAgentStart()`
+> 4. `pi-mono/packages/coding-agent/src/core/session-manager.ts` — JSONL persistence, `buildSessionContext()`, `appendMessage()`, `appendCompaction()`
+> 5. `pi-mono/packages/coding-agent/src/core/compaction/compaction.ts` — `prepareCompaction()`, `compact()`, `shouldCompact()`, `isContextOverflow()`
+> 6. `pi-mono/packages/coding-agent/src/core/skills.ts` — `loadSkills()`, `formatSkillsForPrompt()`
+> 7. `pi-mono/packages/coding-agent/src/core/system-prompt.ts` — `buildSystemPrompt()` construction pattern
+> 8. `pi-mono/packages/coding-agent/src/modes/rpc/rpc-types.ts` — the complete RPC command/response/event protocol
+> 9. `pi-mono/packages/coding-agent/src/core/sdk.ts` — `createAgentSession()` wiring pattern
+
+### 17.1 The Critical Architectural Insight
+
+**Pi-mono has NO multi-agent orchestrator.** There is no "L0" or "L1" controller deciding what the agent does. There is ONE agent loop per session. The LLM itself decides what tools to call based on its system prompt and the tools registered.
+
+**What Cortex calls "17 agents" should actually be: ONE agent loop runtime with 17 different CONFIGURATIONS** (system prompt + tool set + session config). The "orchestrator" is just a configuration that has `spawn_agent` and `dissolve_team` in its tool set. The "Timeline Agent" is just a configuration that has `query_timeline_index` and `build_event_timeline` in its tool set.
+
+This is the single most important architectural decision for Cortex. It eliminates:
+- Custom agent classes for each of the 17 agents
+- Complex agent-to-agent message bus (agents are tool calls from the orchestrator)
+- Separate dispatch/routing logic (the LLM routes by choosing which tools to call)
+
+### 17.2 Honest Gap Analysis — Current Code vs Architecture
+
+**What the current backend actually has (WORKING):**
+- `AgentOrchestrator` is a request/response pipeline with keyword routing and `asyncio.gather` — not an autonomous loop
+- `MasterOrchestratorService` in `runtime/` is a thin state wrapper for wake/sleep — not an always-on governor
+- 15 specialized agents are separate Python classes each calling `retriever.retrieve()` then `llm.generate_faithful()` — not tool-using autonomous agents
+- Tools: `AVAILABLE_TOOLS` lists 7 tools but only 4 are wired (`search_memories`, `find_entity`, `summarize_topic`, `delete_memory`). Three are advertised but NOT implemented
+- Hybrid retrieval (dense + sparse + graph + temporal + proposition) — working
+- Cross-encoder reranking — working
+- CRAG, Self-RAG, FLARE quality loops — working
+- DuckDB metadata store — well-structured
+- FAISS vector store with hot/warm/cold — working
+- Knowledge graph (NetworkX) — working
+- Ingestion pipeline — working
+- Large FastAPI surface (~60+ endpoints) — working
+- Runtime safety/permission system — working scaffolding
+
+**What the docs claimed but isn't real yet:**
+- Wiki Engine (Plane 3) — not implemented
+- Tiered routing (T0-T4) — not implemented
+- Claim extraction pipeline — not implemented
+- AnswerPlan shared contract — not implemented
+- Background agent scheduling — not implemented
+- Agent-to-agent communication protocol — not implemented
+- Session persistence (JSONL) — not implemented
+- Steering/follow-up queues — not implemented
+- Extension hook system — not implemented
+- Auto-retry state machine — not implemented
+- RAPTOR and community retrieval channels — stubs returning empty arrays
+
+### 17.3 The Agent-As-Configuration Pattern
+
+Instead of 17 separate agent classes, implement ONE `CortexAgentLoop` class that takes a configuration:
+
+```python
+@dataclass
+class AgentConfig:
+    agent_id: str                           # e.g. "timeline", "orchestrator", "wiki_agent"
+    system_prompt: str                      # Full prompt from Orchestrator.md §6
+    tools: list[ToolDefinition]             # Pydantic-validated tool definitions
+    extensions: list[Extension]             # Lifecycle hooks
+    session_config: SessionConfig           # Persistence, compaction thresholds
+    scheduling: ScheduleConfig | None       # For background agents: heartbeat, cron
+    resource_tier_minimum: int              # Minimum resource tier to run (1-4)
+    max_turns: int                          # Safety limit on autonomous turns
+    max_tool_chain_depth: int               # Safety limit on nested tool calls
+
+# "Timeline Agent" is just:
+timeline_config = AgentConfig(
+    agent_id="timeline",
+    system_prompt=TIMELINE_AGENT_PROMPT,
+    tools=[query_timeline_index, retrieve_memory_by_time, build_event_timeline,
+           detect_temporal_gaps, detect_recurrence_patterns],
+    extensions=[AuditExtension(), DomainScopingExtension("timeline")],
+    session_config=SessionConfig(persist=True, compact_threshold=0.8),
+    scheduling=None,
+    resource_tier_minimum=1,
+    max_turns=20,
+    max_tool_chain_depth=5,
+)
+
+# "L1 Orchestrator" is just:
+orchestrator_config = AgentConfig(
+    agent_id="orchestrator",
+    system_prompt=RUNTIME_ORCHESTRATOR_PROMPT,
+    tools=[retrieve_memory, search_wiki, search_claims,
+           classify_query_tier, analyze_query_intent,
+           spawn_agent, collect_agent_results, dissolve_team,
+           arbitrate_conflict, compress_evidence, generate_answer_plan],
+    extensions=[CRAGExtension(), SelfRAGExtension(), FLAREExtension(),
+                ObservabilityExtension(), CacheExtension()],
+    session_config=SessionConfig(persist=True, compact_threshold=0.8),
+    scheduling=None,
+    resource_tier_minimum=1,
+    max_turns=50,
+    max_tool_chain_depth=10,
+)
+```
+
+### 17.4 The Exact Agent Loop (From Pi-Mono `agent-session.ts`)
+
+This is the actual execution flow extracted from pi-mono's `prompt()` method at lines 929-1066 of `agent-session.ts`, translated to Cortex's Python runtime:
+
+```python
+class CortexAgentLoop:
+    """
+    Universal agent runtime. Maps 1:1 to pi-mono's AgentSession.
+    
+    Pi-mono source references:
+    - prompt() flow: agent-session.ts lines 929-1066
+    - Event handling: _handleAgentEvent / _processAgentEvent
+    - Retry: _handleRetryableError, _retryPromise coordination
+    - Compaction: _checkCompaction, _runAutoCompaction
+    - Queues: _queueSteer, _queueFollowUp
+    """
+
+    async def prompt(self, text: str, options: PromptOptions = None) -> None:
+        # STEP 1: Extension command check (pi-mono: _tryExecuteExtensionCommand)
+        if text.startswith("/") and self._try_extension_command(text):
+            return
+
+        # STEP 2: Input hook (pi-mono: _extensionRunner.emitInput)
+        for ext in self.extensions:
+            result = ext.on_input(text, options)
+            if result.handled:
+                return
+            if result.transform:
+                text = result.text
+
+        # STEP 3: Skill expansion (pi-mono: _expandSkillCommand)
+        text = self._expand_skill_command(text)
+
+        # STEP 4: If already streaming, queue instead (pi-mono lines 971-981)
+        if self.is_streaming:
+            behavior = options.streaming_behavior if options else "steer"
+            if behavior == "followUp":
+                self._queue_follow_up(text)
+            else:
+                self._queue_steer(text)
+            return
+
+        # STEP 5: Pre-prompt compaction check (pi-mono lines 1010-1013)
+        last_assistant = self._find_last_assistant_message()
+        if last_assistant:
+            await self._check_compaction(last_assistant, skip_aborted=False)
+
+        # STEP 6: Build messages (pi-mono lines 1017-1039)
+        messages = [UserMessage(content=text)]
+        messages.extend(self._drain_pending_next_turn_messages())
+
+        # STEP 7: before_agent_start hook (pi-mono lines 1041-1058)
+        for ext in self.extensions:
+            ext_result = ext.on_before_agent_start(text, self.system_prompt)
+            if ext_result.custom_messages:
+                messages.extend(ext_result.custom_messages)
+            if ext_result.system_prompt_override:
+                self.agent.system_prompt = ext_result.system_prompt_override
+
+        # STEP 8: Run the core agent loop (pi-mono: this.agent.prompt(messages))
+        # This is the AUTONOMY mechanism — the agent calls tools in a loop
+        # until it decides to emit end_turn with no more tool calls
+        await self.agent.prompt(messages)
+
+        # STEP 9: Wait for retry to complete (pi-mono: this.waitForRetry())
+        await self._wait_for_retry()
+```
+
+### 17.5 Tool Definitions — The Pydantic Pattern
+
+Pi-mono uses Typebox schemas. Cortex uses Pydantic. The pattern is identical — schema-first, validated, with execute function:
+
+```python
+from pydantic import BaseModel, Field
+
+class ToolDefinition(BaseModel):
+    """Maps to pi-mono's ToolDefinition interface in tool-definition-wrapper.ts"""
+    name: str
+    label: str
+    description: str
+    parameters: type[BaseModel]                      # Pydantic model for input validation
+    permission_model: str = "auto"                    # auto | user_confirm | plan_mode_only
+    execute: Callable[..., Awaitable[ToolResult]]     # The actual function
+    prompt_snippet: str | None = None                 # Injected into system prompt
+    prompt_guidelines: str | None = None              # Additional guidelines
+    concurrency_safe: bool = True                     # Safe for parallel execution
+    truncate_output: int = 50_000                     # Max chars in output (pi-mono: ~50KB)
+
+class ToolResult(BaseModel):
+    content: str
+    is_error: bool = False
+    details: dict | None = None
+
+# Complete tool catalog for all Cortex agent configurations in §17.11
+```
+
+### 17.6 Session Persistence — JSONL Tree (Exact Pi-Mono Format)
+
+From `session-manager.ts`: JSONL append-only tree with compaction boundaries.
+
+```python
+# Session header (first line of JSONL file)
+{"type": "session", "version": 3, "id": "uuid", "parentId": "uuid-or-null",
+ "title": "Session title", "createdAt": "iso8601"}
+
+# Message entries (subsequent lines)
+{"type": "message", "role": "user", "content": "...", "timestamp": "iso8601"}
+{"type": "message", "role": "assistant", "content": "...", "tool_use": [...], "timestamp": "iso8601"}
+{"type": "message", "role": "toolResult", "tool_call_id": "...", "content": "...", "is_error": false}
+{"type": "message", "role": "custom", "source": "extension_name", "content": "..."}
+
+# Compaction boundary (from compaction.ts)
+{"type": "compaction", "summary": "...", "firstKeptEntryId": "entry-uuid", "timestamp": "iso8601"}
+
+# buildSessionContext() logic:
+# 1. Walk from leaf to root of session tree
+# 2. Find latest compaction entry
+# 3. Return: [compaction.summary] + [all messages after firstKeptEntryId]
+# 4. If no compaction: return all messages
+
+# File layout:
+# data/sessions/{agent_id}/{session_id}.jsonl
+# data/sessions/{agent_id}/{session_id}_fork_{n}.jsonl
+# data/sessions/index.json  ← session tree metadata
+```
+
+### 17.7 Compaction — Two-Path Trigger (Pi-Mono `_checkCompaction`)
+
+```python
+class CompactionEngine:
+    """
+    Two trigger paths from agent-session.ts _checkCompaction:
+    
+    PATH 1 — OVERFLOW (context tokens > model limit):
+      - One-shot: _overflowRecoveryAttempted prevents infinite loop
+      - Strip failed assistant message from state
+      - Run compaction → if willRetry=True: agent.continue()
+    
+    PATH 2 — THRESHOLD (approaching limit):
+      - shouldCompact(tokens, contextWindow, settings) → True
+      - Run compaction → willRetry=False (turn already completed)
+    """
+    
+    def should_compact(self, current_tokens: int, context_window: int,
+                       threshold: float = 0.8) -> bool:
+        return current_tokens > (context_window * threshold)
+    
+    def is_context_overflow(self, error_message: str) -> bool:
+        overflow_signals = ["context_length_exceeded", "max_tokens", "too many tokens"]
+        return any(s in error_message.lower() for s in overflow_signals)
+    
+    async def compact(self, session: SessionManager, llm) -> CompactionResult:
+        context = session.get_messages_before_boundary()
+        summary = await llm.generate(
+            system="Summarize preserving: key facts, decisions, tool results, "
+                   "entity references, open tasks. Be thorough.",
+            messages=[{"role": "user", "content": self._format_for_summary(context)}]
+        )
+        return session.append_compaction(summary=summary.text)
+```
+
+### 17.8 Tool Lifecycle Hooks — Extension Chain (Pi-Mono Pattern)
+
+From `agent-session.ts` where `agent.beforeToolCall → runner.emitToolCall` and `agent.afterToolCall → runner.emitToolResult`:
+
+```python
+class ToolLifecycleHooks:
+    """
+    Pi-mono installs these on the Agent object (agent-session.ts).
+    ExtensionRunner.emitToolCall can BLOCK (return error to model).
+    ExtensionRunner.emitToolResult can REWRITE content/details/isError.
+    """
+
+    async def before_tool_call(self, event: ToolCallEvent) -> ToolCallDecision:
+        # Permission gate (from SafeToolRuntime, already in backend)
+        if event.tool.permission_model == "user_confirm":
+            approval = await self.request_user_approval(event)
+            if not approval.granted:
+                return ToolCallDecision.BLOCK(reason=approval.reason)
+        # Safety policy (already in backend: safety.py)
+        if not self.safety_policy.allows(event.tool_name, event.params):
+            return ToolCallDecision.BLOCK(reason="policy_violation")
+        # Extension chain — each extension can mutate params
+        for ext in self.extensions:
+            event.params = await ext.transform_tool_input(event)
+        return ToolCallDecision.ALLOW(params=event.params)
+
+    async def after_tool_call(self, event: ToolResultEvent) -> ToolResultEvent:
+        # Truncation (pi-mono: ~50KB / 2000 lines)
+        event.content = self.truncate_if_needed(event.content, max_chars=50_000)
+        # Audit (already in backend: trace.py)
+        await self.audit_log.record(event)
+        # Extension chain — each extension can rewrite output
+        for ext in self.extensions:
+            event = await ext.transform_tool_result(event)
+        return event
+```
+
+### 17.9 Steering and Follow-Up Queues (Pi-Mono Lines 244-271, 484-505)
+
+```python
+class SteeringFollowUpManager:
+    """
+    STEERING: delivered BETWEEN tool execution rounds
+              (after tools complete, before next LLM call)
+    FOLLOW-UP: delivered ONLY when agent is fully idle
+               (no tools, no steering pending)
+    
+    From agent-session.ts: _steeringMessages[], _followUpMessages[]
+    Modes: "one-at-a-time" | "all" (configurable per session)
+    """
+    
+    def queue_steer(self, text: str) -> None:
+        self._steering.append(text)
+        self._emit_queue_update()  # UI gets real-time queue state
+    
+    def queue_follow_up(self, text: str) -> None:
+        self._follow_up.append(text)
+        self._emit_queue_update()
+    
+    def on_message_start_user(self, message_text: str) -> None:
+        """Pi-mono: remove from display queue when message starts processing."""
+        idx = self._try_find_in(self._steering, message_text)
+        if idx >= 0:
+            self._steering.pop(idx)
+            self._emit_queue_update()
+            return
+        idx = self._try_find_in(self._follow_up, message_text)
+        if idx >= 0:
+            self._follow_up.pop(idx)
+            self._emit_queue_update()
+
+# Cortex usage:
+# - Wiki Agent uses follow-up queue for "now consolidate" after claim extraction
+# - Presence Agent uses follow-up for idle-time engagement
+# - Frontend SteeringBar sends POST /api/sessions/{id}/steer during T3/T4 streaming
+# - Orchestrator uses steering to redirect mid-execution
+```
+
+### 17.10 Extension System — Pluggable Cross-Cutting Concerns
+
+From `extensions/runner.ts`: `ExtensionRunner` iterates extensions' handlers per event. `session_before_*` merges last non-cancel result. `cancel` short-circuits.
+
+```
+EXTENSION LIFECYCLE HOOKS (ordered, from pi-mono ExtensionRunner):
+
+1. input                    → transform or handle user input (can: handled | transform)
+2. before_agent_start       → inject messages, modify system prompt
+3. context                  → filter or augment context sent to LLM
+4. before_provider_request  → inspect/modify raw provider payload
+5. tool_call                → gate, modify, or replace tool executions (can: block)
+6. tool_result              → rewrite tool outputs (can: rewrite content/isError)
+7. message_start/delta/end  → observe or modify streaming output
+8. agent_end                → post-processing, cleanup, side effects
+9. session_before_compact   → extensions can provide custom compaction
+10. session_compact          → notification after compaction completes
+
+CORTEX BUILT-IN EXTENSIONS:
+  WikiUpdateExtension     → on agent_end, check if wiki pages need patching
+  SafetyGateExtension     → on tool_call, enforce SafeToolRuntime policy (already in backend)
+  ObservabilityExtension  → on every hook, emit pipeline events (already in backend: trace.py)
+  CacheInvalidationExt    → on tool_result for writes, invalidate cache entries
+  SessionMemoryExtension  → on agent_end, extract thought objects for Crystallizer
+  PresenceContextExt      → on before_agent_start, inject ambient context
+```
+
+### 17.11 Auto-Retry — Exact Pi-Mono State Machine
+
+From `agent-session.ts` `_handleRetryableError`:
+
+```python
+class RetryStateMachine:
+    """
+    On agent_end with retryable error:
+    1. Create _retryPromise (so waitForRetry() can await)
+    2. Increment _retryAttempt
+    3. Emit auto_retry_start
+    4. Strip failed assistant message
+    5. Sleep with exponential backoff (2^attempt * base_delay)
+    6. agent.continue() — resumes the loop
+    7. On success: auto_retry_end(success=True)
+    8. On max retries: auto_retry_end(success=False)
+    """
+    
+    RETRYABLE_ERRORS = [
+        "rate_limit", "429", "500", "502", "503", "529",
+        "overloaded", "ECONNRESET", "ETIMEDOUT", "fetch failed"
+    ]
+    
+    async def handle_retryable_error(self, error_text: str) -> bool:
+        if not self.settings.enabled or self._attempt >= self.settings.max_retries:
+            self._emit("auto_retry_end", success=False, attempt=self._attempt)
+            return False
+        self._attempt += 1
+        delay = self.settings.base_delay_ms * (2 ** (self._attempt - 1))
+        self._emit("auto_retry_start", attempt=self._attempt,
+                    max_attempts=self.settings.max_retries, delay_ms=delay)
+        self.agent.strip_last_assistant()
+        await asyncio.sleep(delay / 1000)
+        asyncio.get_event_loop().call_soon(
+            lambda: asyncio.ensure_future(self.agent.continue_()))
+        return True
+```
+
+**Errors are INFORMATION, not crashes.** Tool results with `is_error=True` are sent back to the model. The model decides whether to retry, try a different tool, or inform the user. This is the core pi-mono philosophy.
+
+### 17.12 RPC Event Protocol — From Pi-Mono `rpc-types.ts`
+
+The frontend communicates with agent sessions via this event protocol. These are the ACTUAL event types from pi-mono, extended for Cortex:
+
+```typescript
+// Core agent events (from pi-agent-core, emitted by agent-session.ts)
+type AgentEvent =
+  | { type: "agent_start" }
+  | { type: "agent_end"; messages: AgentMessage[] }
+  | { type: "turn_start"; turnIndex: number; timestamp: string }
+  | { type: "turn_end"; turnIndex: number; message: AssistantMessage; toolResults: ToolResult[] }
+  | { type: "message_start"; message: AgentMessage }
+  | { type: "message_update"; assistantMessageEvent: TextDelta | ThinkingDelta }
+  | { type: "message_end"; message: AgentMessage }
+  | { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
+  | { type: "tool_execution_update"; toolCallId: string; content: string }
+  | { type: "tool_execution_end"; toolCallId: string; result: string; isError: boolean }
+
+// Session events (from AgentSessionEvent in agent-session.ts lines 112-129)
+type AgentSessionEvent = AgentEvent
+  | { type: "queue_update"; steering: string[]; followUp: string[] }
+  | { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
+  | { type: "compaction_end"; reason: string; result?: CompactionResult; aborted: boolean; willRetry: boolean }
+  | { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
+  | { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
+
+// Cortex-specific extensions:
+type CortexEvent = AgentSessionEvent
+  | { type: "tier_selected"; tier: "T0"|"T1"|"T2"|"T3"|"T4"; reason: string }
+  | { type: "retrieval_channel_complete"; channel: string; results: number }
+  | { type: "evidence_ready"; evidence: Evidence[]; fusion: string }
+  | { type: "quality_loop"; loop: "crag"|"self_rag"|"flare"; score: number }
+  | { type: "wiki_update"; pageId: string; operation: "PATCH"|"CREATE"|"LINT" }
+  | { type: "belief_shift"; topic: string; shiftType: string }
+  | { type: "presence_initiative"; message: string; priority: number }
+```
+
+### 17.13 Complete Tool Catalog — All Agent Configurations
+
+Every tool the system needs, with the agent configurations that use each:
+
+```
+RETRIEVAL TOOLS (shared across most agents):
+  retrieve_memory       → semantic search over event plane (dense+sparse+temporal)
+  search_wiki           → wiki page/section lookup
+  search_claims         → claim plane search by entity+domain+confidence
+  query_graph           → graph traversal with hop limit
+  search_by_time        → temporal index query (NOT YET IMPLEMENTED in backend)
+
+ANALYSIS TOOLS (used by specialized agent configs):
+  build_event_timeline  → construct chronological event sequence
+  detect_temporal_gaps  → find missing time periods
+  trace_causal_chain    → follow cause→effect edges (NOT YET IMPLEMENTED)
+  detect_belief_change  → compare claims across time
+  analyze_pattern       → find recurring patterns across events
+  score_importance      → evaluate significance of evidence
+  decompose_query       → split complex query into sub-queries
+
+ORCHESTRATION TOOLS (used by orchestrator config):
+  classify_query_tier   → run the tier routing classifier
+  spawn_agent           → start a new CortexAgentLoop with a given config
+  collect_agent_results → gather results from spawned agents
+  dissolve_team         → clean up spawned agent sessions
+  arbitrate_conflict    → resolve contradictory evidence
+  generate_answer_plan  → produce the unified AnswerPlan contract
+
+WIKI TOOLS (used by wiki agent config):
+  extract_claims        → LLM-based atomic claim extraction from events
+  upsert_claim          → write/update claim in claim plane
+  patch_wiki_page       → apply structured patch to wiki markdown
+  create_wiki_page      → scaffold new wiki page from template
+  lint_wiki_page        → run contradiction/staleness checks
+  compact_wiki_section  → compress old claims into canonical text
+
+WRITE TOOLS (used by agents that modify state):
+  ingest_memory         → write to event plane
+  update_graph_edge     → add/update graph relations
+  invalidate_cache      → clear affected cache entries
+
+STATUS: Tools marked "NOT YET IMPLEMENTED" exist in AVAILABLE_TOOLS in
+  backend/src/agents/orchestrator.py but fall through to None.
+  IMPLEMENTATION PRIORITY: search_by_time (Week 2), trace_causal_chain (Week 3),
+  detect_belief_evolution (Week 3).
+```
+
+---
+
+## 18. Frontend Application Architecture — Web
+
+### 18.1 Design Philosophy
+
+The Cortex web frontend is a **personal intelligence dashboard** driven by real-time agent events from §17.12. Every view consumes CortexEvent streams. The frontend never polls — it subscribes.
+
+### 18.2 Application Routing
+
+```
+ROUTE STRUCTURE (Next.js App Router):
+
+/                           → Dashboard (Life OS daily view)
+/chat                       → Chat with RAG (primary interaction)
+/chat/[conversationId]      → Specific conversation with full context
+
+/memories                   → Memory Browser (all planes)
+/memories/wiki              → Wiki Page Browser (Plane 3)
+/memories/claims            → Claim Explorer (Plane 2)
+/memories/events            → Event Timeline (Plane 1)
+/memories/graph             → Knowledge Graph Visualizer (Plane 4)
+
+/mirror                     → Deep Self Mirror (Application 3)
+/mirror/thinking            → Thinking Style Profile
+/mirror/communication       → Communication Pattern Profile
+/mirror/emotional           → Emotional Pattern Map
+/mirror/honesty             → Behavioral Honesty Report
+
+/chronicle                  → Life Chronicle (Application 2)
+/chronicle/moments          → Captured Moments Gallery
+/chronicle/albums           → Auto-generated Albums
+/chronicle/timeline         → Scrollable Life Timeline
+
+/presence                   → Presence Agent Settings + History
+/relationships              → Relationship Memory Engine (Application 6)
+/decisions                  → Decision Oracle + Decision Log (Application 9)
+/learning                   → Personal Knowledge Amplifier (Application 10)
+/gaps                       → Gap Intelligence System (Application 5)
+
+/dashboard                  → Life OS Dashboard (Application 7)
+/dashboard/daily            → Daily Brief
+/dashboard/weekly           → Weekly Synthesis
+/dashboard/monthly          → Monthly Chronicle
+
+/observability              → System Observability (RAG traces, agent metrics)
+/observability/traces       → Pipeline Trace Explorer
+/observability/agents       → Agent Performance Dashboard
+/observability/wiki         → Wiki Health and Growth Metrics
+
+/settings                   → System Configuration
+/settings/presence          → Presence Agent Persona Configuration
+/settings/privacy           → Privacy Tier Configuration
+/settings/providers         → LLM Provider Selection
+/settings/ambient           → Ambient/Voice Configuration
+```
+
+### 18.3 Core Frontend Components Architecture
+
+```
+src/
+├── app/                          ← Next.js App Router pages
+│   ├── layout.tsx                ← Root layout with providers
+│   ├── page.tsx                  ← Dashboard (Life OS daily view)
+│   ├── chat/
+│   │   ├── page.tsx              ← Chat list + new chat
+│   │   └── [id]/page.tsx         ← Conversation view
+│   ├── mirror/
+│   ├── chronicle/
+│   ├── dashboard/
+│   ├── memories/
+│   ├── presence/
+│   ├── relationships/
+│   ├── decisions/
+│   ├── learning/
+│   ├── gaps/
+│   ├── observability/
+│   └── settings/
+│
+├── components/
+│   ├── core/                     ← Shared primitives
+│   │   ├── StreamingMessage.tsx   ← SSE streaming text with tier badge
+│   │   ├── EvidenceCard.tsx       ← Source citation with confidence
+│   │   ├── ConfidenceBadge.tsx    ← Visual confidence indicator
+│   │   ├── TierBadge.tsx          ← T0-T4 retrieval tier indicator
+│   │   ├── AgentBadge.tsx         ← Which agent produced this
+│   │   ├── TimelineEntry.tsx      ← Chronological event display
+│   │   └── WikiPageCard.tsx       ← Wiki page preview card
+│   │
+│   ├── chat/                     ← Chat-specific components
+│   │   ├── ChatPanel.tsx          ← Main chat interface
+│   │   ├── MessageBubble.tsx      ← Message with evidence + agent attribution
+│   │   ├── SteeringBar.tsx        ← Mid-stream query refinement (steering queue)
+│   │   ├── PipelineVisualizer.tsx ← Live retrieval pipeline visualization
+│   │   ├── AnswerPlanDebug.tsx    ← Developer view of AnswerPlan object
+│   │   └── TierEscalation.tsx     ← "Searching deeper..." progressive UI
+│   │
+│   ├── mirror/                   ← Deep Self Mirror components
+│   │   ├── SelfMirrorReport.tsx   ← Biweekly synthesis view
+│   │   ├── ThinkingProfile.tsx    ← Cognitive style visualization
+│   │   ├── BehaviorGapChart.tsx   ← Stated vs actual values chart
+│   │   └── PatternTimeline.tsx    ← Pattern evidence timeline
+│   │
+│   ├── chronicle/                ← Life Chronicle components
+│   │   ├── MomentCard.tsx         ← Rich moment with media
+│   │   ├── AlbumGrid.tsx          ← Photo/moment album layout
+│   │   ├── LifeTimeline.tsx       ← Scrollable life timeline
+│   │   └── MomentCapture.tsx      ← Capture interface (camera/voice)
+│   │
+│   ├── dashboard/                ← Life OS Dashboard components
+│   │   ├── DailyBrief.tsx         ← Morning intelligence brief
+│   │   ├── WeeklySynthesis.tsx    ← Weekly review interface
+│   │   ├── GoalDriftChart.tsx     ← Goal progress visualization
+│   │   ├── MoodHeatmap.tsx        ← Emotional pattern heatmap
+│   │   └── GapIntelligenceBrief.tsx ← Weekly gap report
+│   │
+│   ├── wiki/                     ← Wiki Browser components
+│   │   ├── WikiPageViewer.tsx     ← Full wiki page with sections
+│   │   ├── WikiGraph.tsx          ← Inter-page link visualization
+│   │   ├── ClaimExplorer.tsx      ← Browse atomic claims
+│   │   └── WikiHealthDashboard.tsx ← Confidence, staleness, coverage
+│   │
+│   ├── relationships/            ← Relationship Engine components
+│   │   ├── RelationshipCard.tsx   ← Person profile with health signal
+│   │   ├── DriftAlert.tsx         ← Relationship drift warning
+│   │   ├── ContextBrief.tsx       ← Pre-meeting context assembly
+│   │   └── RelationshipTimeline.tsx
+│   │
+│   ├── presence/                 ← Presence Agent components
+│   │   ├── PersonaConfig.tsx      ← Configure companion personality
+│   │   ├── InitiativeLog.tsx      ← History of proactive engagements
+│   │   └── ContextSummary.tsx     ← Current context assembly view
+│   │
+│   └── observability/            ← System monitoring components
+│       ├── TraceExplorer.tsx       ← Full trace visualization
+│       ├── AgentMetrics.tsx        ← Per-agent performance
+│       ├── TierDistribution.tsx    ← Query tier distribution chart
+│       └── WikiGrowthChart.tsx     ← Wiki page/claim growth over time
+│
+├── lib/
+│   ├── api.ts                    ← Backend API client (all endpoints)
+│   ├── types.ts                  ← Full TypeScript types mirroring backend
+│   ├── sse.ts                    ← SSE streaming utilities
+│   ├── websocket.ts              ← WebSocket for ambient/real-time
+│   ├── stores/                   ← State management
+│   │   ├── chat-store.ts         ← Chat state (conversations, messages)
+│   │   ├── session-store.ts      ← Active session state
+│   │   ├── agent-store.ts        ← Agent status and metrics
+│   │   ├── wiki-store.ts         ← Wiki page cache
+│   │   └── presence-store.ts     ← Presence agent state
+│   └── hooks/                    ← React hooks
+│       ├── useStreamingRAG.ts    ← SSE streaming with tier events
+│       ├── useAgentEvents.ts     ← Real-time agent event subscription
+│       ├── usePipelineTrace.ts   ← Live pipeline visualization data
+│       ├── useWikiPage.ts        ← Wiki page fetching with cache
+│       └── usePresence.ts        ← Presence agent connection
+```
+
+### 18.4 State Management — Zustand + IndexedDB
+
+```
+ChatStore → localStorage:     conversations, messages, streaming state, tier info
+WikiStore → IndexedDB:         page cache (large pages), health metrics
+AgentStore → in-memory:        agent statuses, traces, tier distribution
+PresenceStore → localStorage:  persona config, engagement history
+SystemStore → in-memory:       resource tier, health, provider status
+```
+
+### 18.5 The Steering UI — Real-Time Mid-Query Refinement
+
+When a T3/T4 query is streaming, the frontend shows a `SteeringBar`:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Searching deep (T3, agents: timeline + causal)              │
+│  ┌────────────────────────────────────────────────────┐     │
+│  │ Focus on the career implications specifically...   │  ←  │
+│  └────────────────────────────────────────────────────┘     │
+│  [Send Guidance]  [Let it finish]  [Abort]                  │
+└─────────────────────────────────────────────────────────────┘
+
+POST /api/sessions/{id}/steer → steering queue (§17.9)
+→ LLM sees guidance after current tools finish
+→ adjusts response direction without restarting
+```
+
+### 18.6 Event-Driven UI Architecture
+
+All frontend components subscribe to the CortexEvent stream (§17.12) via SSE:
+
+```typescript
+// Core hook: useAgentEvents(sessionId) → CortexEvent stream
+function useChatStream(sessionId: string) {
+  const events = useAgentEvents(sessionId);
+  
+  // React to events:
+  // tier_selected       → show TierBadge, estimate wait time
+  // tool_execution_*    → show PipelineVisualizer step
+  // message_update      → append text_delta to message bubble
+  // queue_update        → update SteeringBar queue display
+  // evidence_ready      → populate EvidenceCard citations
+  // auto_retry_start    → show retry indicator with countdown
+  // compaction_start    → show "compacting context..." indicator
+}
+```
+
+Background events drive the entire dashboard:
+- `wiki_update` → refresh WikiStore page cache
+- `belief_shift` → update Mirror dashboard
+- `presence_initiative` → show ambient notification
+- `gap_signal` → update Gap Intelligence panel
+
+---
+
+## 19. Backend Service Architecture — Bridge from Current Code
+
+### 19.1 What Already Exists (Do NOT Rewrite)
+
+The current backend has substantial working infrastructure that MUST be preserved:
+- `backend/src/agents/orchestrator.py` — working request pipeline with query analysis, multi-agent dispatch, CRAG/Self-RAG/FLARE quality loops
+- `backend/src/agents/specialized.py` — 15 specialized agent classes with retrieval + generation patterns
+- `backend/src/retrieval/hybrid_retriever.py` — 5-channel parallel retrieval with RRF fusion + cross-encoder rerank
+- `backend/src/storage/` — DuckDB metadata, FAISS vectors, NetworkX graph — all working
+- `backend/src/ingestion/__init__.py` — full ingestion pipeline with entity/topic extraction
+- `backend/src/runtime/` — safety, contracts, task manager, permission gate
+- `backend/server.py` — 60+ API endpoints
+
+**The upgrade strategy is ADDITIVE, not rewrite.** Add the autonomous loop, wiki engine, and deep applications alongside existing code. Migrate the orchestrator to use the new loop incrementally.
+
+### 19.2 Service Layout — New Additions
+
+```
+backend/
+├── server.py                          ← FastAPI main (existing)
+├── src/
+│   ├── engine.py                      ← CortexRAGEngine (existing, extended)
+│   │
+│   ├── agents/                        ← Agent implementations
+│   │   ├── orchestrator.py            ← L1 Runtime Orchestrator (existing, extended)
+│   │   ├── specialized.py             ← 15 L2 agents (existing, extended)
+│   │   ├── autonomous_loop.py         ← NEW: Pi-mono style agent loop runtime
+│   │   ├── session_manager.py         ← NEW: JSONL session persistence
+│   │   ├── tool_lifecycle.py          ← NEW: beforeToolCall/afterToolCall hooks
+│   │   ├── steering.py               ← NEW: Steering + follow-up queues
+│   │   ├── compaction.py             ← NEW: Session compaction engine
+│   │   └── extension_runner.py       ← NEW: Extension lifecycle manager
+│   │
+│   ├── applications/                  ← NEW: Deep Application services
+│   │   ├── __init__.py
+│   │   ├── session_forge/            ← Application 1: Session Memory Forge
+│   │   │   ├── crystallizer.py        ← Session Crystallizer agent
+│   │   │   ├── gap_mapper.py          ← Gap Mapper agent (7-day window)
+│   │   │   ├── belief_detector.py     ← Belief Update Detector (weekly)
+│   │   │   └── summary_forge.py       ← Structured Summary Forge (72h)
+│   │   │
+│   │   ├── self_mirror/              ← Application 3: Deep Self Mirror
+│   │   │   ├── thought_archaeologist.py
+│   │   │   ├── communication_archaeologist.py
+│   │   │   ├── emotional_archaeologist.py
+│   │   │   ├── behavioral_honesty.py
+│   │   │   └── mirror_report.py       ← Biweekly synthesis generator
+│   │   │
+│   │   ├── presence/                 ← Application 4: Presence Agent
+│   │   │   ├── presence_agent.py      ← Always-on companion runtime
+│   │   │   ├── context_assembler.py   ← 30-min context assembly loop
+│   │   │   ├── initiative_scorer.py   ← Proactive engagement scoring
+│   │   │   ├── idle_detector.py       ← User idle window detection
+│   │   │   └── persona_manager.py     ← User-configured persona handling
+│   │   │
+│   │   ├── gap_intelligence/         ← Application 5: Gap Intelligence
+│   │   │   ├── knowledge_gaps.py
+│   │   │   ├── attention_gaps.py
+│   │   │   ├── blind_spot_gaps.py
+│   │   │   └── weekly_digest.py
+│   │   │
+│   │   ├── relationships/            ← Application 6: Relationship Memory
+│   │   │   ├── relationship_tracker.py
+│   │   │   ├── drift_detector.py
+│   │   │   ├── context_brief.py
+│   │   │   └── milestone_awareness.py
+│   │   │
+│   │   ├── life_os/                  ← Application 7: Life OS Dashboard
+│   │   │   ├── daily_brief.py
+│   │   │   ├── weekly_synthesis.py
+│   │   │   └── monthly_chronicle.py
+│   │   │
+│   │   ├── decision_oracle/          ← Application 9: Decision Oracle
+│   │   │   ├── decision_retriever.py
+│   │   │   ├── pattern_analyzer.py
+│   │   │   └── outcome_tracker.py
+│   │   │
+│   │   └── knowledge_amplifier/      ← Application 10: Knowledge Amplifier
+│   │       ├── knowledge_graph_builder.py
+│   │       ├── gap_recommender.py
+│   │       └── connection_finder.py
+│   │
+│   ├── wiki/                         ← NEW: Wiki Engine (from Architecture §4)
+│   │   ├── __init__.py
+│   │   ├── wiki_store.py             ← Markdown page CRUD with frontmatter
+│   │   ├── wiki_agent.py             ← Always-on Wiki Agent (§8 system prompt)
+│   │   ├── claim_extractor.py        ← LLM-based atomic claim extraction
+│   │   ├── claim_store.py            ← DuckDB claim CRUD + dedup
+│   │   ├── page_patcher.py           ← PATCH/CREATE/LINT/COMPACT operations
+│   │   ├── wiki_indexer.py           ← Section vector index + BM25 + entity registry
+│   │   └── wiki_scheduler.py         ← Background scheduling (lint, compact, snapshot)
+│   │
+│   ├── routing/                      ← NEW: Tiered Routing (from Architecture §5)
+│   │   ├── __init__.py
+│   │   ├── tier_classifier.py        ← < 80ms routing classifier
+│   │   ├── cache_checker.py          ← T0 exact + semantic cache
+│   │   ├── entity_checker.py         ← T1 wiki entity lookup
+│   │   ├── complexity_scorer.py      ← Complexity scoring heuristics
+│   │   └── intent_classifier.py      ← SetFit intent classification
+│   │
+│   ├── scheduler/                    ← NEW: Background Agent Scheduler
+│   │   ├── __init__.py
+│   │   ├── heartbeat.py              ← Paperclip-pattern heartbeat scheduling
+│   │   ├── cron.py                   ← Cron-style scheduled tasks
+│   │   └── idle_detector.py          ← System idle detection for background work
+│   │
+│   └── communication/               ← NEW: Agent-to-Agent Communication
+│       ├── __init__.py
+│       ├── event_bus.py              ← CONTROL + DATA + EVENT bus
+│       ├── message_envelope.py       ← Production message envelope schema
+│       └── handoff.py                ← delegate/consult/verify/arbitrate/escalate
+```
+
+### 19.2 Background Agent Scheduling (Heartbeat Pattern)
+
+Following Paperclip's heartbeat scheduling and pi-mono's always-running agent pattern:
+
+```
+BACKGROUND AGENT SCHEDULES:
+
+CONTINUOUS (always-on during active hours):
+  - Presence Agent: context assembly every 30 min, initiative scoring on idle
+  - Wiki Agent: claim extraction on every ingestion event
+
+FREQUENT (minutes):
+  - Session Crystallizer: runs 15-20 min after each session closes
+  - Cache invalidation: on every wiki patch event
+
+DAILY:
+  - Gap Mapper: scans last 7 days of sessions (runs at 2 AM)
+  - Daily Brief Generator: assembles morning brief (runs at configured wake time)
+  - Wiki Lint: checks pages not linted in 48+ hours
+
+WEEKLY:
+  - Belief Update Detector: scans full month of sessions (runs Sunday)
+  - Weekly Synthesis: assembles weekly review (runs Sunday evening)
+  - Wiki Meso Compaction: topic summaries from claim clusters
+  - Goal Drift Alert: goal alignment check
+  - Mood Pattern Report: emotional trend analysis
+  - Decision Outcome Check: 2-week/1-month/3-month loops
+
+BIWEEKLY:
+  - Self Mirror Report: all Mirror Agents synthesize observations
+
+MONTHLY:
+  - Monthly Chronicle: narrative of the month
+  - Wiki Macro Compaction: canonical archive synthesis for old events
+  - Knowledge Amplifier: full knowledge graph gap analysis
+
+ALL BACKGROUND AGENTS:
+  - Check resource governor before starting (respect Tier 2/3/4 restrictions)
+  - Throttle to never consume > 20% compute during active sessions
+  - Carry goal_ancestry metadata (Paperclip pattern): every task knows WHY it exists
+  - Emit events on EVENT_BUS for observability
+  - Auto-retry on failure with exponential backoff (pi-mono pattern)
+```
+
+### 19.3 New API Endpoints for Deep Applications
+
+```
+NEW ENDPOINTS (added to server.py):
+
+# Wiki Engine
+POST   /api/wiki/pages                    ← List wiki pages with filters
+GET    /api/wiki/pages/{page_id}          ← Get full wiki page
+GET    /api/wiki/pages/{page_id}/history  ← Page revision history
+POST   /api/wiki/search                   ← Search wiki sections
+GET    /api/wiki/claims                   ← List claims with filters
+GET    /api/wiki/health                   ← Wiki health metrics
+POST   /api/wiki/compact                  ← Trigger manual compaction
+
+# Self Mirror (Application 3)
+GET    /api/mirror/report                 ← Latest Self Mirror Report
+GET    /api/mirror/thinking               ← Thinking style profile
+GET    /api/mirror/communication          ← Communication pattern profile
+GET    /api/mirror/emotional              ← Emotional pattern map
+GET    /api/mirror/honesty                ← Behavioral honesty data
+GET    /api/mirror/history                ← Historical mirror reports
+
+# Presence Agent (Application 4)
+GET    /api/presence/context              ← Current context summary
+GET    /api/presence/initiatives          ← Initiative queue
+POST   /api/presence/persona              ← Update persona configuration
+GET    /api/presence/engagement-history   ← Past proactive engagements
+POST   /api/presence/engage               ← Trigger engagement (for testing)
+
+# Gap Intelligence (Application 5)
+GET    /api/gaps/weekly                   ← Weekly gap digest
+GET    /api/gaps/knowledge                ← Knowledge gap map
+GET    /api/gaps/attention                ← Attention gap analysis
+GET    /api/gaps/blind-spots              ← Blind spot candidates
+
+# Relationships (Application 6)
+GET    /api/relationships                 ← All tracked relationships
+GET    /api/relationships/{entity_id}     ← Single relationship profile
+GET    /api/relationships/drift           ← Drift alerts
+GET    /api/relationships/brief/{entity_id} ← Pre-meeting context brief
+
+# Life OS Dashboard (Application 7)
+GET    /api/dashboard/daily               ← Today's daily brief
+GET    /api/dashboard/weekly              ← This week's synthesis
+GET    /api/dashboard/monthly             ← This month's chronicle
+GET    /api/dashboard/monthly/{year}/{month} ← Historical monthly chronicle
+
+# Decision Oracle (Application 9)
+GET    /api/decisions                     ← Decision ledger
+GET    /api/decisions/{id}                ← Single decision record
+POST   /api/decisions/oracle              ← Consult decision oracle
+GET    /api/decisions/patterns            ← Decision pattern analysis
+
+# Knowledge Amplifier (Application 10)
+GET    /api/learning/knowledge-map        ← Personal knowledge graph
+GET    /api/learning/gaps                 ← Highest-leverage knowledge gaps
+GET    /api/learning/connections           ← Recently discovered connections
+
+# Agent Sessions (pi-mono pattern)
+GET    /api/sessions                      ← List agent sessions
+GET    /api/sessions/{id}                 ← Get session (JSONL content)
+POST   /api/sessions/{id}/steer           ← Inject steering message
+POST   /api/sessions/{id}/follow-up       ← Queue follow-up message
+POST   /api/sessions/{id}/abort           ← Abort running session
+
+# Background Agent Status
+GET    /api/agents/status                 ← All background agent statuses
+GET    /api/agents/{id}/history           ← Agent execution history
+SSE    /api/agents/events                 ← Real-time agent events stream
+```
+
+---
+
+## 20. Cursor Agent Development Protocol
+
+> **MANDATORY READING for all cursor agents. This section exists because the architecture is complex and a wrong implementation path wastes days.**
+
+### 20.1 Before You Write Any Code
+
+```
+STEP 1: Understand what already exists
+  Read: backend/src/agents/orchestrator.py (current dispatch pattern)
+  Read: backend/src/agents/specialized.py (current 15 agent classes)
+  Read: backend/src/engine.py (CortexRAGEngine wiring)
+  Read: backend/server.py (existing API surface)
+  Read: backend/src/runtime/contracts.py (existing data models)
+  
+STEP 2: Understand the pi-mono architecture patterns
+  Read: pi-mono/packages/coding-agent/src/core/agent-session.ts
+    → Focus on: prompt() method, _handleAgentEvent, retry state machine
+  Read: pi-mono/packages/coding-agent/src/core/session-manager.ts
+    → Focus on: JSONL format, buildSessionContext(), appendCompaction()
+  Read: pi-mono/packages/coding-agent/src/core/extensions/runner.ts
+    → Focus on: emit(), emitToolCall(), emitToolResult()
+  Read: pi-mono/packages/coding-agent/src/modes/rpc/rpc-types.ts
+    → Focus on: RpcCommand variants, AgentSessionEvent types
+
+STEP 3: Understand the target architecture
+  Read: This document §17 (Autonomous Agent Runtime)
+  Read: Orchestrator.md §21 (CortexAgentLoop implementation)
+  Read: Cortex-Deep-Applications.md (the 10 applications to build)
+```
+
+### 20.2 Non-Negotiable Implementation Principles
+
+```
+1. AGENTS ARE CONFIGURATIONS, NOT CLASSES
+   Use AgentConfig (§17.3) to define agents. Do NOT create new classes
+   per agent. The CortexAgentLoop is the ONLY agent runtime class.
+
+2. THE LLM IS THE PLANNER
+   No separate planning module. The model decides what tools to call
+   based on its system prompt + tool results. Pi-mono proves this at scale.
+
+3. ERRORS ARE INFORMATION
+   Tool results with is_error=True go back to the model. The model decides
+   how to recover. Never crash on tool failure. Never hide errors.
+
+4. SESSIONS ARE DURABLE
+   Every agent interaction → JSONL. Sessions resume, branch, compact.
+   No agent state is purely in-memory.
+
+5. HOOKS OVER HARDCODING
+   Use beforeToolCall/afterToolCall for policy enforcement.
+   Use extensions for cross-cutting concerns. No scattered if-statements.
+
+6. CONTEXT IS FINITE, KNOWLEDGE IS INFINITE
+   Compaction keeps long-running agents operational.
+   The wiki compounds knowledge without context cost.
+
+7. ADDITIVE, NOT REWRITE
+   The current backend works. Add new capabilities alongside.
+   Migrate existing code incrementally. Never break working endpoints.
+```
+
+---
+
+## 21. Implementation Roadmap — Honest Bridge from Current Code
+
+> **Key insight:** The current backend has ~60% of the infrastructure working. The roadmap is about ADDING the missing 40%, not rewriting the existing 60%.
+
+### Phase 0 — Autonomous Runtime Foundation (Weeks 1-3)
+
+**Goal:** Build the CortexAgentLoop that ALL future agents use.
+**Depends on:** Nothing — this is the foundation.
+**Preserves:** All existing orchestrator, retrieval, storage code.
+
+```
+BACKEND:
+1. backend/src/agents/autonomous_loop.py — CortexAgentLoop class (§17.4)
+   - prompt() with extension hooks, steering queue check
+   - Tool execution with before/after hooks
+   - Auto-retry state machine (§17.11)
+   - Event emission matching CortexEvent protocol (§17.12)
+2. backend/src/agents/session_persistence.py — JSONL session manager (§17.6)
+   - Append-only JSONL with session tree (fork/branch)
+   - buildSessionContext() with compaction boundary
+3. backend/src/agents/compaction_engine.py — Compaction (§17.7)
+   - Threshold-based + overflow-based triggers
+   - LLM-summarized compaction
+4. backend/src/agents/steering_manager.py — Queues (§17.9)
+5. backend/src/agents/extension_runner.py — Extension chain (§17.10)
+6. backend/src/agents/agent_configs.py — AgentConfig definitions (§17.3)
+   - Convert existing 15 specialized agents to AgentConfig instances
+   - Each config: system prompt + tool list + session settings
+7. Wire 3 missing tools in orchestrator.py:
+   - search_by_time, trace_causal_chain, detect_belief_evolution
+
+FRONTEND: None this phase (backend-only)
+VALIDATION: Unit tests for loop, session persistence, compaction, retry
+```
+
+### Phase 1 — Wiki Engine + Tiered Routing (Weeks 3-7)
+
+**Goal:** The two highest-impact upgrades — makes queries fast and knowledge compound.
+**Depends on:** Phase 0 (Wiki Agent runs on CortexAgentLoop).
+
+```
+BACKEND:
+1. backend/src/wiki/ — Full wiki engine (Architecture §4, §8)
+   - wiki_store.py: markdown page CRUD + frontmatter
+   - claim_extractor.py: LLM atomic claim extraction
+   - claim_store.py: DuckDB claim table + deduplication
+   - page_patcher.py: PATCH/CREATE/LINT/COMPACT
+   - wiki_indexer.py: section FAISS + BM25 + entity registry
+   - wiki_agent.py: background agent on CortexAgentLoop (§8 system prompt)
+2. backend/src/routing/ — Tiered routing (Architecture §5)
+   - tier_classifier.py: <80ms routing decision
+   - T0: exact + semantic cache with wiki revision hash
+   - T1: wiki page direct + shallow dense
+3. Wire wiki + routing into existing CortexRAGEngine
+4. New API endpoints: /api/wiki/* (§19.3)
+
+FRONTEND:
+1. src/components/wiki/ — WikiPageViewer, ClaimExplorer
+2. src/app/memories/wiki/ — Wiki browser page
+3. src/components/chat/TierBadge.tsx — Show which tier answered
+
+VALIDATION: Routing precision <5% wrong tier on 100-query eval set
+```
+
+### Phase 2 — Session Forge + AnswerPlan (Weeks 7-11)
+
+**Goal:** Application 1 (the foundation for all other apps) + stream/non-stream parity.
+**Depends on:** Phase 1 (Crystallizer writes to wiki via claims).
+
+```
+BACKEND:
+1. backend/src/applications/session_forge/ — 4 Forge agents as AgentConfigs
+   - Session Crystallizer (runs 15min after session close)
+   - Gap Mapper (daily, 7-day window)
+   - Belief Update Detector (weekly)
+   - Summary Forge (72h arcs)
+2. backend/src/scheduler/ — Background agent scheduling
+   - heartbeat.py, cron.py, idle_detector.py
+3. Introduce AnswerPlan shared object (Architecture §7.3)
+   - Refactor stream + non-stream to consume same AnswerPlan
+4. Wire T3 chain-of-retrieval + T4 frontier expansion
+
+FRONTEND:
+1. src/app/chat/ — Upgrade with AnswerPlan, progressive tier display
+2. src/components/chat/SteeringBar.tsx — Mid-stream guidance
+3. src/components/chat/PipelineVisualizer.tsx — Live pipeline steps
+4. SSE streaming using CortexEvent protocol (§17.12)
+
+VALIDATION: Stream/non-stream parity >0.92 semantic similarity
+```
+
+### Phase 3 — Mirror + Gaps + Presence (Weeks 11-18)
+
+**Goal:** Applications 3, 4, 5 — the psychological/relational intelligence layer.
+**Depends on:** Phase 2 (Forge produces the data these apps consume).
+
+```
+BACKEND:
+1. backend/src/applications/self_mirror/ — 4 Archaeologist agents + report
+2. backend/src/applications/gap_intelligence/ — 3 gap detectors + digest
+3. backend/src/applications/presence/ — Always-on companion agent
+   - Context assembly, idle detection, initiative scoring
+   - Persona configuration
+4. New API endpoints: /api/mirror/*, /api/gaps/*, /api/presence/*
+
+FRONTEND:
+1. src/app/mirror/ — Self Mirror dashboard (reports, profiles, charts)
+2. src/app/gaps/ — Gap Intelligence (weekly digest, recommendations)
+3. src/app/presence/ — Presence config, engagement history
+4. src/components/dashboard/ — DailyBrief, GoalDriftChart, MoodHeatmap
+```
+
+### Phase 4 — Relationships + Life OS + Decisions + Knowledge (Weeks 18-26)
+
+**Goal:** Applications 6, 7, 8, 9, 10 — the synthesis and wisdom layer.
+**Depends on:** Phase 3 (Presence and Mirror data feed these apps).
+
+```
+BACKEND: Remaining 5 deep application service modules
+FRONTEND: Remaining 5 deep application pages + dashboards
+```
+
+### Phase 5 — Production Hardening (Weeks 26-30)
+
+```
+1. Sustained 48h operation test — all background agents running
+2. Wiki stress: 10K+ pages, query performance validation
+3. Background agent reliability: zero missed scheduled runs / 7 days
+4. Privacy audit: zero cross-tier leakage
+5. Full observability: every agent, tool call, wiki mutation traced
+6. Production sign-off against Orchestrator.md §19 checklist
+```
+
+---
+
+*Agentic RAG + LLM Wiki Architecture v6.0 — Pi-Mono Source-Level Integration*  
+*Core insight: Agents are configurations. The LLM is the planner. Errors are information.*  
+*Route fast. Retrieve smart. Store once. Build Wikipedia forever.*  
+*Autonomous agents that loop, recover, persist, and compound knowledge.*  
+*Honest about gaps. Additive to what works. Production-grade when built.*

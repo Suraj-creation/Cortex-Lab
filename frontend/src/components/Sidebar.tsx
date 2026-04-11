@@ -14,6 +14,8 @@ import {
   Loader2,
   CheckCircle2,
   Clock,
+  Bot,
+  BookOpen,
 } from "lucide-react";
 import { RuntimeApprovalSummary } from "@/lib/types";
 
@@ -23,7 +25,7 @@ interface Conversation {
   date: string;
 }
 
-type ActiveView = "chat" | "memories" | "graph" | "dashboard" | "observability" | "ambient" | "documents";
+type ActiveView = "chat" | "agent" | "wiki" | "memories" | "graph" | "dashboard" | "observability" | "ambient" | "documents";
 
 interface Props {
   open: boolean;
@@ -51,6 +53,8 @@ export function Sidebar({
   if (!open) return null;
 
   const navItems: { view: ActiveView; icon: typeof Brain; label: string }[] = [
+    { view: "agent", icon: Bot, label: "Agent Chat" },
+    { view: "wiki", icon: BookOpen, label: "Personal Wiki" },
     { view: "memories", icon: Brain, label: "Memory Browser" },
     { view: "graph", icon: Network, label: "Knowledge Graph" },
     { view: "dashboard", icon: BarChart3, label: "RAG Dashboard" },

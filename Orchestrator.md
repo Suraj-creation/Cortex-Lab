@@ -1,9 +1,13 @@
 # Orchestrator — Production-Grade Autonomous Multi-Agent Runtime
 
-**Document Status:** Production Architecture Specification — Agent 2.0  
+**Document Status:** Production Architecture Specification — Agent 4.0  
 **Classification:** Master Design Blueprint (Living Document)  
-**Agents Defined:** 17 total (L0 + L1 + 15 Specialized)  
-**Design Principle:** Selection + Structure + Context = Signal over Noise
+**Core Insight:** Agents are CONFIGURATIONS (system prompt + tools), not separate classes  
+**Agents Defined:** 17 core as AgentConfig instances + Deep Application agents  
+**Runtime:** ONE CortexAgentLoop class, from pi-mono source-level study (not doc summaries)  
+**Gap Analysis:** §21.1.1 contains honest comparison of current code vs target  
+**Strategy:** ADDITIVE — preserve working code, add missing capabilities alongside  
+**Target Applications:** 10 Deep Applications from Cortex-Deep-Applications.md
 
 ---
 
@@ -43,7 +47,12 @@
 17. [Resource Governor Policies](#17-resource-governor-policies)
 18. [Safety, Privacy, and Audit Layer](#18-safety-privacy-and-audit-layer)
 19. [Production Readiness Checklist](#19-production-readiness-checklist)
-20. [Development Phases](#20-development-phases)
+20. [Development Phases (Legacy)](#20-development-phases)
+21. [Autonomous Agent Loop — Pi-Mono Source-Level Integration](#21-autonomous-agent-loop-architecture--pi-mono-source-level-integration) *(gap analysis, CortexAgentLoop, SessionManager, AgentConfig instances)*
+22. [Frontend-Backend Integration — RPC Event Protocol](#22-frontend-backend-integration--rpc-inspired-event-protocol) *(pi-mono event types, steering UI, real-time architecture)*
+23. [Deep Applications Implementation Specifications](#23-deep-applications-implementation-specifications)
+24. [Cursor Agent Development Protocol](#24-cursor-agent-development-protocol) *(mandatory prep, non-negotiable rules)*
+25. [Implementation Phases — Honest Bridge](#25-implementation-phases--honest-bridge-from-current-code) *(Phase A-G, preserving existing code)*
 
 ---
 
@@ -75,12 +84,7 @@ Drawing from production agentic system patterns:
 - **Lazy load, eager prefetch**: Heavy subsystems (embeddings, local model, indexer) are pre-fetched in parallel at startup but only activated when needed.
 - **Memory hierarchy with provenance**: All stored memory includes source, confidence, timestamp, and agent attribution.
 - **Skill-based reuse**: Common reasoning patterns are encoded as named, reusable skills — not hardcoded prompt strings.
-
-### 1.3 Signal vs. Noise: The Ingestion Contract
-
-The Master-Orchestrator's primary value is **not storing everything** — it is **knowing what not to store**.
-
-Noise categories (always discard):
+up
 - Filler speech: "um", "uh", "yeah", "okay", "right"
 - Ambient cross-talk not directed at or involving the user
 - Repeated restatements within the same turn (keep the final, clearest version)
@@ -2380,6 +2384,748 @@ The system is production-ready when all of the following are verified:
 
 ---
 
-*Orchestrator.md — Agent 2.0 Production Architecture*  
-*Designed for: always-on, health-aware, noise-filtered, structurally rich, deeply agentic personal intelligence*  
+---
+
+## 21. Autonomous Agent Loop Architecture — Pi-Mono Source-Level Integration
+
+> **MANDATORY DIRECTIVE FOR ALL CURSOR AGENTS:**
+>
+> Read the ACTUAL SOURCE CODE, not docs. The docs are helpful but incomplete. The source reveals critical patterns (race condition prevention in steering queues, synchronous retry promise coordination, extension cancel short-circuiting) that no document captures.
+>
+> **Required source reading (in exact order):**
+> 1. `pi-mono/packages/coding-agent/src/core/agent-session.ts` — Read the `prompt()` method (lines ~929-1066), `_handleAgentEvent`, `_checkCompaction`, `_handleRetryableError`, `_queueSteer`/`_queueFollowUp`, `_steeringMessages[]`/`_followUpMessages[]` arrays
+> 2. `pi-mono/packages/coding-agent/src/core/extensions/runner.ts` — Read `emit()`, `emitToolCall()`, `emitToolResult()`, `emitBeforeAgentStart()`
+> 3. `pi-mono/packages/coding-agent/src/core/session-manager.ts` — Read JSONL format, `buildSessionContext()`, `appendCompaction()`, `fork()`, `branch()`
+> 4. `pi-mono/packages/coding-agent/src/core/compaction/compaction.ts` — Read `prepareCompaction()`, `compact()`, `shouldCompact()`, `isContextOverflow()`
+> 5. `pi-mono/packages/coding-agent/src/core/tools/` — Read ALL files: tool-definition-wrapper.ts, read.ts, bash.ts, edit.ts — understand ToolDefinition schema with Typebox
+> 6. `pi-mono/packages/coding-agent/src/modes/rpc/rpc-types.ts` — Read ALL RpcCommand variants, RpcResponse shapes, AgentSessionEvent types
+> 7. `pi-mono/packages/coding-agent/src/core/sdk.ts` — Read `createAgentSession()` wiring
+
+### 21.1 The Fundamental Insight: Agents Are Configurations
+
+**Pi-mono has NO multi-agent orchestrator.** There is ONE `AgentSession` class. What makes different "agents" different is: system prompt + tool set + session config. The same runtime runs everything.
+
+**Critical implication for Cortex:** What we call "17 agents" should be 17 `AgentConfig` instances, NOT 17 separate Python classes. The `AgentOrchestrator` in `backend/src/agents/orchestrator.py` currently contains hardcoded routing logic. In the target architecture, the LLM decides routing by choosing which tools to call.
+
+### 21.1.1 Honest Gap: Current Code vs Target
+
+| Component | Current Code | Target Architecture |
+|-----------|-------------|-------------------|
+| Agent dispatch | `AgentOrchestrator` with keyword routing + `asyncio.gather` | LLM in orchestrator config calls `spawn_agent` tool |
+| 15 agents | 15 separate Python classes, each with `execute()` method | 15 `AgentConfig` instances with system prompt + tool list |
+| Tool system | 7 tools in `AVAILABLE_TOOLS`, only 4 wired | Full tool catalog per agent config, all validated |
+| Session state | In-memory only, lost on restart | JSONL persistence with tree/fork/compaction |
+| Error handling | Mix of try/except and `generate_faithful` fallback | `is_error=True` tool results → model decides |
+| Steering | Not implemented | Steering + follow-up queues per session |
+| Extensions | Not implemented | Extension runner with 10 lifecycle hooks |
+| Background agents | Not implemented | Heartbeat-scheduled long-lived sessions |
+
+**Strategy: ADDITIVE migration.** Keep the existing orchestrator working while building CortexAgentLoop alongside. Migrate agents one by one.
+
+### 21.2 The CortexAgentLoop — Exact Pi-Mono Translation
+
+This maps 1:1 to pi-mono's `AgentSession`. Every method references the pi-mono source location.
+
+```python
+@dataclass
+class AgentConfig:
+    """One per agent type. The ONLY thing that varies between agents."""
+    agent_id: str
+    system_prompt: str
+    tools: list[ToolDefinition]       # Pydantic-validated (see §17.5 in Architecture doc)
+    extensions: list[Extension]       # Lifecycle hooks
+    session_config: SessionConfig     # Persistence, compaction thresholds
+    scheduling: ScheduleConfig | None # For background agents
+    max_turns: int = 50               # Safety limit
+    max_tool_chain: int = 10          # Safety limit on nested calls
+
+
+class CortexAgentLoop:
+    """
+    Pi-mono source: agent-session.ts
+    This is the UNIVERSAL runtime. L0, L1, all 15 L2 agents,
+    and all background agents use this SAME class.
+    """
+
+    # === INTERNAL STATE (from agent-session.ts lines 244-271) ===
+    _steering_messages: list[str]           # Plain text for UI display
+    _follow_up_messages: list[str]          # Plain text for UI display
+    _pending_next_turn: list[CustomMessage] # Delivered with next prompt
+    _overflow_recovery_attempted: bool      # One-shot compaction guard
+    _retry_attempt: int                     # Current retry count
+    _is_streaming: bool                     # True during LLM call
+
+    async def prompt(self, text: str, options: PromptOptions = None) -> None:
+        """
+        Pi-mono: agent-session.ts lines 929-1066
+        The main entry point. Steps match pi-mono exactly.
+        """
+        # 1. Extension command (pi-mono: _tryExecuteExtensionCommand)
+        if text.startswith("/") and self._try_extension_command(text):
+            return
+
+        # 2. Input hook (pi-mono: _extensionRunner.emitInput)
+        for ext in self.extensions:
+            result = await ext.on_input(text, options)
+            if result.handled: return
+            if result.transform: text = result.text
+
+        # 3. Skill expansion (pi-mono: _expandSkillCommand)
+        text = self._expand_skill_command(text)
+
+        # 4. If streaming, queue instead (pi-mono lines 971-981)
+        if self._is_streaming:
+            behavior = getattr(options, 'streaming_behavior', 'steer')
+            if behavior == "followUp":
+                self._queue_follow_up(text)
+            else:
+                self._queue_steer(text)
+            return
+
+        # 5. Pre-prompt compaction (pi-mono lines 1010-1013)
+        last_assistant = self._find_last_assistant()
+        if last_assistant:
+            await self._check_compaction(last_assistant, skip_aborted=False)
+
+        # 6. Build messages (pi-mono lines 1017-1039)
+        messages = [UserMessage(content=text)]
+        messages.extend(self._drain_pending_next_turn())
+
+        # 7. before_agent_start hook (pi-mono lines 1041-1058)
+        for ext in self.extensions:
+            r = await ext.on_before_agent_start(text, self._system_prompt)
+            if r.custom_messages: messages.extend(r.custom_messages)
+            if r.system_prompt_override: self._system_prompt = r.system_prompt_override
+
+        # 8. Run core agent loop (pi-mono: this.agent.prompt(messages))
+        # This loops internally: model → tools → results → model
+        # until model emits end_turn with no tool calls
+        await self._agent_core.prompt(messages)
+
+        # 9. Wait for retry (pi-mono: this.waitForRetry())
+        await self._wait_for_retry()
+
+    async def _on_agent_event(self, event: AgentEvent) -> None:
+        """
+        Pi-mono: _handleAgentEvent / _processAgentEvent
+        Called for every event from the core agent.
+        """
+        # Track queue consumption on message_start(user)
+        if event.type == "message_start" and event.message.role == "user":
+            self._overflow_recovery_attempted = False
+            text = self._get_user_text(event.message)
+            self._remove_from_queues(text)
+
+        # Persist messages on message_end
+        if event.type == "message_end":
+            await self.session.append_message(event.message)
+
+        # Retry/compaction on agent_end
+        if event.type == "agent_end":
+            last_asst = self._find_last_assistant()
+            if last_asst and self._is_retryable_error(last_asst):
+                initiated = await self._handle_retryable_error(last_asst)
+                if initiated: return  # Skip compaction, retry in progress
+            self._resolve_retry()
+            if last_asst:
+                await self._check_compaction(last_asst, skip_aborted=True)
+
+        # Emit to extensions + external subscribers
+        await self._emit_extension_event(event)
+        self._emit(event)
+
+    async def _execute_single_tool(self, tool_call: ToolCall) -> ToolResult:
+        """
+        Pi-mono: beforeToolCall → execute → afterToolCall
+        ExtensionRunner.emitToolCall can BLOCK.
+        ExtensionRunner.emitToolResult can REWRITE.
+        """
+        self._emit(ToolExecutionStart(tool_call))
+
+        # Before hook chain (can block)
+        decision = await self.extension_runner.emit_tool_call(tool_call)
+        if decision.blocked:
+            return ToolResult(id=tool_call.id,
+                              content=f"Blocked: {decision.reason}", is_error=True)
+
+        # Execute with timeout
+        try:
+            tool = self._get_tool(tool_call.name)
+            output = await asyncio.wait_for(
+                tool.execute(tool_call.id, decision.params, self._abort_signal),
+                timeout=tool.timeout_seconds)
+            result = ToolResult(id=tool_call.id, content=output.content, is_error=False)
+        except Exception as e:
+            result = ToolResult(id=tool_call.id,
+                                content=f"Error: {type(e).__name__}: {e}", is_error=True)
+
+        # After hook chain (can rewrite content, details, is_error)
+        result = await self.extension_runner.emit_tool_result(result)
+
+        # Truncate (pi-mono: ~50KB)
+        if len(result.content) > 50_000:
+            result.content = result.content[:50_000] + "\n... [truncated]"
+
+        self._emit(ToolExecutionEnd(tool_call, result))
+        return result
+
+    async def _check_compaction(self, last_assistant, skip_aborted: bool):
+        """
+        Pi-mono: _checkCompaction — TWO trigger paths.
+        PATH 1 (overflow): one-shot recovery, strip error, compact, retry
+        PATH 2 (threshold): shouldCompact(tokens, window) → compact
+        """
+        if not self.config.session_config.auto_compaction:
+            return
+
+        error_text = self._get_error_text(last_assistant)
+        if error_text and self.compaction.is_context_overflow(error_text):
+            if self._overflow_recovery_attempted:
+                return
+            self._overflow_recovery_attempted = True
+            self._emit(CompactionStart(reason="overflow"))
+            await self._run_auto_compaction(will_retry=True)
+            return
+
+        current_tokens = self._estimate_context_tokens()
+        if self.compaction.should_compact(current_tokens, self.context_window):
+            self._emit(CompactionStart(reason="threshold"))
+            await self._run_auto_compaction(will_retry=False)
+
+    async def _handle_retryable_error(self, last_assistant) -> bool:
+        """
+        Pi-mono: _handleRetryableError
+        Exponential backoff with abortable sleep.
+        """
+        error_text = self._get_error_text(last_assistant)
+        if not error_text: return False
+        if self._retry_attempt >= self.config.retry_max: return False
+
+        self._retry_attempt += 1
+        delay = self.config.retry_base_delay * (2 ** (self._retry_attempt - 1))
+        self._emit(AutoRetryStart(
+            attempt=self._retry_attempt, max=self.config.retry_max,
+            delay_ms=delay, error=error_text))
+        self._agent_core.strip_last_assistant()
+        await asyncio.sleep(delay / 1000)
+        asyncio.get_event_loop().call_soon(
+            lambda: asyncio.ensure_future(self._agent_core.continue_()))
+        return True
+
+    # === Public API (from agent-session.ts public surface) ===
+
+    async def steer(self, text: str): self._queue_steer(text)
+    async def follow_up(self, text: str): self._queue_follow_up(text)
+    async def abort(self): self._agent_core.abort()
+    async def compact(self, instructions: str = None): ...
+    def subscribe(self, listener: Callable) -> Callable: ...
+    def get_session_stats(self) -> SessionStats: ...
+```
+
+### 21.3 Session Persistence (From Pi-Mono `session-manager.ts`)
+
+```python
+class CortexSessionManager:
+    """
+    JSONL append-only tree. Maps to pi-mono's SessionManager.
+    
+    Key pi-mono methods to study:
+    - create / open / continueRecent / inMemory / forkFrom / list / listAll
+    - appendMessage / appendCompaction / appendCustomEntry
+    - buildSessionContext (compaction-aware message reconstruction)
+    - branch / branchWithSummary
+    - _persist (defers file creation until first assistant message)
+    """
+
+    # JSONL format (identical to pi-mono version 3):
+    # Line 1: {"type":"session","version":3,"id":"uuid","parentId":null,"title":"...","createdAt":"iso8601"}
+    # Line N: {"type":"message","role":"user|assistant|toolResult|custom","content":"...","timestamp":"iso8601"}
+    # Line M: {"type":"compaction","summary":"...","firstKeptEntryId":"uuid","timestamp":"iso8601"}
+
+    def build_context(self) -> list[Message]:
+        """
+        Pi-mono pattern:
+        1. Walk leaf → root of session tree via parentId
+        2. Find latest compaction entry
+        3. Return: [compaction.summary as system message] + [all entries after firstKeptEntryId]
+        4. If no compaction: return all messages
+        5. NEVER send messages before compaction boundary to LLM
+        """
+        ...
+
+    def append_message(self, message: AgentMessage) -> None:
+        """Append to JSONL. Defers file creation until first assistant message."""
+        ...
+
+    def append_compaction(self, summary: str) -> CompactionResult:
+        """Write compaction entry. Original messages preserved."""
+        ...
+
+    def fork(self, title: str) -> "CortexSessionManager":
+        """Create branched session. parentId → current session."""
+        ...
+
+    # File layout:
+    # data/sessions/{agent_id}/{session_id}.jsonl
+    # data/sessions/index.json  ← tree metadata
+```
+
+### 21.4 AgentConfig Instances — How Each Layer Uses the Loop
+
+**The only thing that varies between agents is the configuration.** The runtime is always CortexAgentLoop.
+
+```python
+# L0 — Master Orchestrator
+L0_CONFIG = AgentConfig(
+    agent_id="l0_master",
+    system_prompt=L0_MASTER_PROMPT,  # From Orchestrator.md §4
+    tools=[noise_filter, relevance_score, session_lifecycle,
+           health_sample, resource_tier_enforce, privacy_gate,
+           route_to_orchestrator],
+    extensions=[SafetyGateExtension(), AuditExtension()],
+    session_config=SessionConfig(persist=True, compact_threshold=0.8,
+                                 max_age_hours=24),  # Compacts daily
+    scheduling=ScheduleConfig(always_on=True),
+    max_turns=100,
+)
+
+# L1 — Runtime Orchestrator (per-query)
+L1_CONFIG = AgentConfig(
+    agent_id="l1_orchestrator",
+    system_prompt=L1_ORCHESTRATOR_PROMPT,  # From Orchestrator.md §5
+    tools=[retrieve_memory, search_wiki, search_claims, query_graph,
+           classify_query_tier, analyze_query_intent,
+           spawn_agent, collect_agent_results, dissolve_team,
+           arbitrate_conflict, compress_evidence, generate_answer_plan],
+    extensions=[CRAGExtension(), SelfRAGExtension(), FLAREExtension(),
+                ObservabilityExtension(), CacheExtension()],
+    session_config=SessionConfig(persist=True),  # Per-query, for trace replay
+    scheduling=None,  # On-demand
+    max_turns=50,
+)
+
+# L2 Example — Timeline Agent
+TIMELINE_CONFIG = AgentConfig(
+    agent_id="timeline",
+    system_prompt=TIMELINE_AGENT_PROMPT,  # From §6 Agent 01
+    tools=[query_timeline_index, retrieve_memory_by_time,
+           build_event_timeline, detect_temporal_gaps,
+           detect_recurrence_patterns],
+    extensions=[AuditExtension(), DomainScopingExtension("timeline")],
+    session_config=SessionConfig(persist=True),
+    max_turns=20,
+)
+
+# Background — Wiki Agent
+WIKI_AGENT_CONFIG = AgentConfig(
+    agent_id="wiki_agent",
+    system_prompt=WIKI_AGENT_PROMPT,  # From Architecture doc §8
+    tools=[extract_claims, upsert_claim, patch_wiki_page,
+           create_wiki_page, lint_wiki_page, compact_wiki_section],
+    extensions=[ThrottleExtension(max_compute_pct=0.20),
+                HeartbeatExtension(ScheduleConfig(on_ingest=True, daily="02:00"))],
+    session_config=SessionConfig(persist=True, compact_threshold=0.7,
+                                 max_age_hours=168),  # Compacts weekly
+    scheduling=ScheduleConfig(on_ingest=True, daily="02:00"),
+    max_turns=200,
+)
+
+# Background — Presence Agent
+PRESENCE_CONFIG = AgentConfig(
+    agent_id="presence",
+    system_prompt=PRESENCE_AGENT_PROMPT,
+    tools=[assemble_context, score_initiative, detect_idle,
+           retrieve_memory, search_wiki, read_mood_signal],
+    extensions=[ThrottleExtension(max_compute_pct=0.10),
+                HeartbeatExtension(ScheduleConfig(interval_min=30))],
+    session_config=SessionConfig(persist=True, compact_threshold=0.7),
+    scheduling=ScheduleConfig(continuous=True, interval_min=30),
+    max_turns=50,
+)
+```
+
+**Migration plan:** The existing 15 agent classes in `specialized.py` each become an `AgentConfig` by extracting their system prompt and identifying their tool needs. The existing `execute()` methods' retrieval patterns become tool implementations.
+
+---
+
+## 22. Frontend-Backend Integration — RPC-Inspired Event Protocol
+
+### 22.1 Communication Patterns
+
+```
+PATTERN 1: REST (standard)
+  Used for: memory CRUD, wiki page reads, settings, agent status
+  Existing: ~60+ endpoints in backend/server.py (all preserved)
+
+PATTERN 2: SSE (streaming, pi-mono inspired)
+  Used for: RAG chat streaming, pipeline events, background agent events
+  Session-specific: POST /api/rag/chat?stream=true → CortexEvent stream
+  Global: GET /api/agents/events → background CortexEvent stream
+  Event types follow §17.12 of Architecture doc (pi-mono AgentSessionEvent + Cortex additions)
+
+PATTERN 3: WebSocket (bidirectional)
+  Used for: ambient voice, Presence Agent engagement, steering commands
+  Existing: /ws/ambient (voice), /ws/presence (engagement)
+  New: steering/follow-up commands via WS or REST
+
+PATTERN 4: Service Worker (offline-first)
+  Used for: T0/T1 cache, wiki page sync, push notifications
+```
+
+### 22.2 Real-Time Event Architecture (Pi-Mono RPC Pattern)
+
+The frontend subscribes to CortexEvent streams that match the exact event types from pi-mono's `rpc-types.ts`, extended for Cortex:
+
+```typescript
+// Core hook for all components
+function useAgentSession(sessionId: string) {
+  const [state, dispatch] = useReducer(sessionReducer, initialState);
+  
+  useEffect(() => {
+    const es = new EventSource(`/api/sessions/${sessionId}/events`);
+    es.onmessage = (e) => dispatch(JSON.parse(e.data));
+    return () => es.close();
+  }, [sessionId]);
+
+  return state;
+}
+
+// Reducer handles ALL pi-mono + Cortex event types
+function sessionReducer(state: SessionState, event: CortexEvent): SessionState {
+  switch (event.type) {
+    // Pi-mono core events
+    case "agent_start":       return { ...state, isRunning: true };
+    case "agent_end":         return { ...state, isRunning: false };
+    case "message_update":    return appendDelta(state, event.assistantMessageEvent);
+    case "tool_execution_start": return addToolStep(state, event);
+    case "tool_execution_end":   return completeToolStep(state, event);
+    case "queue_update":      return { ...state, steering: event.steering, followUp: event.followUp };
+    case "compaction_start":  return { ...state, isCompacting: true };
+    case "auto_retry_start":  return { ...state, retrying: true, retryAttempt: event.attempt };
+    
+    // Cortex-specific events
+    case "tier_selected":     return { ...state, tier: event.tier };
+    case "evidence_ready":    return { ...state, evidence: event.evidence };
+    case "quality_loop":      return addQualityResult(state, event);
+    case "wiki_update":       return invalidateWikiCache(state, event);
+    case "presence_initiative": return showInitiative(state, event);
+    default: return state;
+  }
+}
+```
+
+### 22.3 Steering UI — Mid-Query Refinement
+
+```
+During T3/T4 streaming, the SteeringBar appears:
+
+┌─────────────────────────────────────────────────────────┐
+│  Deep retrieval active (T3, agents: timeline + causal)   │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │ Focus on career aspects specifically...          │ ←  │
+│  └──────────────────────────────────────────────────┘   │
+│  [Send Guidance]  [Let it finish]  [Abort]              │
+└─────────────────────────────────────────────────────────┘
+
+POST /api/sessions/{id}/steer → CortexAgentLoop._queue_steer()
+→ LLM sees guidance after current tools finish
+→ Response adjusts without restart
+
+The SteeringBar shows queue state from "queue_update" events.
+When a steering message starts processing, it disappears from the bar
+(pi-mono pattern: on_message_start_user removes from display queue).
+```
+
+---
+
+## 23. Deep Applications Implementation Specifications
+
+### 23.1 Application → Agent Mapping
+
+Each deep application from `Cortex-Deep-Applications.md` maps to specific agents and background services:
+
+| Application | Backend Service | Primary Agents | Scheduling | Frontend Route |
+|------------|----------------|----------------|------------|----------------|
+| 1. Session Memory Forge | `applications/session_forge/` | Crystallizer, Gap Mapper, Belief Detector, Summary Forge | 15min, 24h, 7d, 72h | /memories + toast notifications |
+| 3. Deep Self Mirror | `applications/self_mirror/` | 4 Archaeologist agents + Report generator | 72h + biweekly | /mirror |
+| 4. Presence Agent | `applications/presence/` | Presence Agent + Context Assembler + Initiative Scorer | Continuous + 30min | /presence + push notifications |
+| 5. Gap Intelligence | `applications/gap_intelligence/` | Knowledge/Attention/Blind Spot Gap agents | Weekly (Monday) | /gaps |
+| 6. Relationship Memory | `applications/relationships/` | Relationship Tracker + Drift Detector | Continuous + weekly | /relationships |
+| 7. Life OS Dashboard | `applications/life_os/` | Daily/Weekly/Monthly generators | Daily/Weekly/Monthly | /dashboard |
+| 9. Decision Oracle | `applications/decision_oracle/` | Decision Retriever + Pattern Analyzer + Outcome Tracker | On-demand + 2w/1m/3m | /decisions |
+| 10. Knowledge Amplifier | `applications/knowledge_amplifier/` | Graph Builder + Gap Recommender + Connection Finder | Monthly + on-demand | /learning |
+
+### 23.2 Agent-to-Agent Communication Flows for Deep Applications
+
+```
+FLOW 1: Session Crystallizer → Wiki Agent → Cache Invalidation
+  Session closes
+  → Crystallizer extracts thought objects + decision records + open loops
+  → sessions_send to Wiki Agent: { type: "new_claims", claims: [...] }
+  → Wiki Agent patches relevant wiki pages
+  → Emit wiki_page_patched event
+  → Cache invalidation extension clears affected T0/T1 entries
+
+FLOW 2: Gap Mapper → Presence Agent → User
+  Gap Mapper detects high-severity attention gap
+  → sessions_send to Presence Agent: { type: "gap_signal", severity: "high", ... }
+  → Presence Agent scores initiative (is this a good time?)
+  → If score > threshold AND user is idle:
+    → Emit presence_initiative event to frontend
+    → Frontend shows notification or speaks via TTS
+  → If score < threshold:
+    → Queue in initiative_queue for next idle window
+
+FLOW 3: Belief Detector → Reflection Agent → Wiki Agent
+  Belief Detector detects shift in user position
+  → sessions_send to Reflection Agent: { type: "belief_shift", ... }
+  → Reflection Agent classifies shift type (REFINEMENT/REVERSAL/EXPANSION)
+  → sessions_send to Wiki Agent: { type: "wiki_update_required", page_id: "...", ... }
+  → Wiki Agent patches wiki page "Evolving Beliefs" section
+
+FLOW 4: Decision Log Agent → Decision Oracle (on outcome check)
+  Heartbeat scheduler triggers 2-week outcome check
+  → Decision Log Agent retrieves decision record
+  → Searches recent sessions for outcome evidence
+  → If outcome found: update decision record, compute outcome_match
+  → sessions_send to Meta-Learning Agent if outcome reveals lesson
+  → Emit decision_outcome_check event to frontend
+
+FLOW 5: Mirror Agents → Self Mirror Report → User
+  Biweekly scheduler triggers Mirror Agent batch
+  → All 4 Mirror Agents run in parallel (pi-mono TeamMode)
+  → Each produces domain-specific observations
+  → Mirror Report generator merges:
+    Section 1: Stable truths (high-confidence, multi-instance)
+    Section 2: Unstable truths (present but variable)
+    Section 3: Gap data (stated vs actual)
+  → Store as wiki page in timelines/
+  → Emit mirror_report_ready event to frontend
+```
+
+### 23.3 Goal Ancestry for Background Tasks (Paperclip Pattern)
+
+Every background task in Cortex carries goal ancestry metadata:
+
+```json
+{
+  "task_id": "uuid",
+  "agent_id": "session_crystallizer",
+  "mission": "build_complete_self_model",
+  "goal": "structured_session_intelligence",
+  "sub_goal": "extract_thought_objects_from_session_xyz",
+  "reason": "session closed with 47 turns containing decision-relevant content",
+  "priority": "normal",
+  "scheduled_by": "heartbeat_scheduler",
+  "created_at": "iso8601",
+  "parent_task_id": null,
+  "trace_id": "uuid"
+}
+```
+
+This metadata is:
+- Logged in every audit record
+- Used by L0 to prioritize competing background tasks
+- Used by observability dashboard to show "why is this running?"
+- Used by resource governor to decide what to defer under Tier 2/3
+
+---
+
+## 24. Cursor Agent Development Protocol
+
+> **MANDATORY for all cursor agents. Read this BEFORE writing any code.**
+
+### 24.1 The Three-Step Preparation
+
+```
+STEP 1: UNDERSTAND WHAT EXISTS (read actual source, not just docs)
+  backend/src/agents/orchestrator.py  → Current dispatch: keyword routing + asyncio.gather
+  backend/src/agents/specialized.py   → Current 15 agents: separate classes with execute()
+  backend/src/engine.py               → CortexRAGEngine wiring
+  backend/src/runtime/contracts.py    → Data models, state machine types
+  backend/src/runtime/safety.py       → SafeToolRuntime (working, preserve it)
+  backend/server.py                   → 60+ API endpoints (working, extend don't rewrite)
+
+STEP 2: READ PI-MONO SOURCE (not docs — the code itself)
+  agent-session.ts      → prompt() method lines 929-1066
+                        → _handleAgentEvent / _processAgentEvent
+                        → _steeringMessages[] / _followUpMessages[]
+                        → _checkCompaction two-path trigger
+                        → _handleRetryableError state machine
+  extensions/runner.ts  → emit(), emitToolCall(can BLOCK), emitToolResult(can REWRITE)
+  session-manager.ts    → JSONL format, buildSessionContext(), appendCompaction()
+  compaction.ts         → shouldCompact(), isContextOverflow(), compact()
+  rpc-types.ts          → ALL RpcCommand variants, AgentSessionEvent types
+  tools/*.ts            → ToolDefinition schema with Typebox
+
+STEP 3: READ THE ARCHITECTURE
+  This document §21 → CortexAgentLoop implementation
+  Agentic-RAG-Architecture.md §17 → Gap analysis, agent-as-config pattern
+  Cortex-Deep-Applications.md → What we're building toward
+```
+
+### 24.2 Non-Negotiable Implementation Rules
+
+```
+1. AGENTS ARE CONFIGURATIONS, NOT CLASSES
+   Use AgentConfig (§21.4). ONE CortexAgentLoop class, many configs.
+   Do NOT create new agent classes with custom execution logic.
+
+2. THE LLM IS THE PLANNER
+   No separate routing module. The model calls tools based on its prompt.
+   The orchestrator's "routing" IS the LLM choosing which tools to invoke.
+
+3. ERRORS ARE INFORMATION
+   ToolResult(is_error=True) goes to model. Model decides recovery.
+   NEVER raise exceptions that kill the loop. NEVER hide errors.
+
+4. SESSIONS ARE DURABLE
+   Every interaction → JSONL. Resume, branch, compact.
+   Even quick T0/T1 lookups persist for trace replay.
+
+5. HOOKS OVER HARDCODING
+   Safety, audit, caching, throttling → extensions with lifecycle hooks.
+   NOT if-statements scattered through agent code.
+
+6. EVENTS FOR EVERYTHING
+   agent_start, tool_execution_*, wiki_update, gap_signal, etc.
+   Frontend and observability depend on these. Silence = invisible.
+
+7. ADDITIVE, NOT REWRITE
+   The current backend has working retrieval, storage, ingestion, safety.
+   Add CortexAgentLoop alongside. Migrate agents incrementally.
+   Never break working endpoints.
+```
+
+### 24.3 Frontend Rules
+
+```
+1. EVENTS DRIVE UI — subscribe to CortexEvent SSE. Never poll.
+2. PROGRESSIVE DISCLOSURE — show tier badge, then pipeline steps, then evidence.
+3. STEERING IS FIRST-CLASS — SteeringBar during T3/T4. Pi-mono queue pattern.
+4. CONFIDENCE IS VISIBLE — every claim, evidence, output shows confidence.
+5. DEEP APPS ARE ROUTES — /mirror, /chronicle, /presence are full pages, not tabs.
+```
+
+### 24.4 Validation Checklist
+
+```
+NEW AGENT: schema validity ✓ tool hooks fire ✓ JSONL well-formed ✓
+           errors → is_error ✓ events emitted ✓ resource governor respected ✓
+
+NEW FRONTEND VIEW: SSE subscription ✓ confidence shown ✓ loading states ✓
+                   error states graceful ✓ responsive ✓
+```
+
+---
+
+## 25. Implementation Phases — Honest Bridge from Current Code
+
+> **Key principle:** The current backend has ~60% working infrastructure. These phases ADD the missing 40%. Nothing working gets rewritten.
+
+### Phase A — CortexAgentLoop + Sessions (Weeks 1-3)
+
+**Goal:** The universal runtime that ALL future agents use.  
+**Preserves:** All existing orchestrator, retrieval, storage, safety code.
+
+```
+NEW FILES:
+  backend/src/agents/autonomous_loop.py  → CortexAgentLoop (§21.2)
+  backend/src/agents/session_persistence.py → JSONL SessionManager (§21.3)
+  backend/src/agents/compaction_engine.py → Compaction (two-path trigger)
+  backend/src/agents/steering_manager.py → Steering + follow-up queues
+  backend/src/agents/extension_runner.py → Extension lifecycle (10 hooks)
+  backend/src/agents/agent_configs.py → All AgentConfig instances (§21.4)
+  backend/src/agents/retry_machine.py → Auto-retry state machine
+
+FIX EXISTING:
+  backend/src/agents/orchestrator.py → Wire 3 missing tools:
+    search_by_time, trace_causal_chain, detect_belief_evolution
+
+VALIDATION: Unit tests for loop, JSONL persistence, compaction, retry, steering
+```
+
+### Phase B — Wiki Engine + Tiered Routing (Weeks 3-7)
+
+**Goal:** Knowledge compounds. Queries get fast.
+
+```
+NEW FILES:
+  backend/src/wiki/ → Full wiki engine (Architecture §4, §8)
+  backend/src/routing/ → Tiered routing (Architecture §5)
+
+WIRE INTO EXISTING:
+  backend/src/engine.py → Add wiki + routing alongside existing RAG engine
+
+NEW ENDPOINTS: /api/wiki/*
+FRONTEND: WikiPageViewer, TierBadge, basic /memories/wiki page
+
+VALIDATION: Routing precision <5% wrong tier on 100-query eval set
+```
+
+### Phase C — 15-Agent Migration + Session Forge (Weeks 7-12)
+
+**Goal:** All agents on CortexAgentLoop. Application 1 (Session Forge) live.
+
+```
+MIGRATE: 15 agents from separate classes → AgentConfig instances
+NEW: Session Forge agents (Crystallizer, Gap Mapper, Belief Detector, Summary)
+NEW: Background scheduler (heartbeat, cron, idle detection)
+NEW: Agent-to-agent communication via event bus
+
+FRONTEND: Session summary viewer, SSE streaming upgrade with CortexEvent types
+```
+
+### Phase D — AnswerPlan + T3/T4 + SteeringBar (Weeks 12-16)
+
+**Goal:** Stream/non-stream parity. Deep retrieval. Mid-query refinement.
+
+```
+NEW: AnswerPlan shared contract
+REFACTOR: Stream + non-stream paths both consume AnswerPlan
+NEW: T3 chain-of-retrieval, T4 frontier expansion
+FRONTEND: SteeringBar, PipelineVisualizer, progressive tier display
+
+VALIDATION: stream/non-stream parity >0.92 semantic similarity
+```
+
+### Phase E — Mirror + Gaps + Presence (Weeks 16-22)
+
+**Goal:** Applications 3, 4, 5 — psychological and relational intelligence.
+
+```
+NEW: 4 Mirror Archaeologist AgentConfigs + biweekly report
+NEW: 3 Gap detector AgentConfigs + weekly digest
+NEW: Presence Agent AgentConfig (long-lived session, continuous)
+FRONTEND: /mirror, /gaps, /presence pages
+```
+
+### Phase F — Remaining Applications (Weeks 22-28)
+
+**Goal:** Applications 6, 7, 9, 10 — synthesis and wisdom.
+
+```
+NEW: Relationship Engine, Life OS, Decision Oracle, Knowledge Amplifier
+FRONTEND: /relationships, /dashboard, /decisions, /learning
+```
+
+### Phase G — Production Hardening (Weeks 28-32)
+
+```
+1. 48h sustained operation test (all background agents)
+2. Wiki stress: 10K+ pages, query latency SLOs
+3. Agent perf: all 15 meet p99 < 15s
+4. Privacy: zero cross-tier leakage
+5. Observability: every agent, tool, wiki mutation traced
+6. Frontend: Lighthouse >90, SSE/WS stability
+7. Sign-off against §19 checklist
+```
+
+---
+
+*Orchestrator.md — Agent 4.0 Production Architecture (Pi-Mono Source-Level)*  
+*Core insight: Agents are configurations. One runtime. Many prompts. Many tools.*  
+*Honest about gaps. Additive to working code. Production-grade when built.*  
+*Pi-mono patterns: the model IS the planner. Errors are information. Sessions are durable.*  
 *Selection + Structure + Context = Intelligence that earns trust*
+*10 deep applications that make a second mind real*

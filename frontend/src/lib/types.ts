@@ -591,3 +591,117 @@ export interface RuntimeApprovalSummary {
   failed: number;
   completed: number;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Autonomous Agent Runtime Types (Pi-Mono Integration)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export type CortexEventType =
+  | "agent_start"
+  | "agent_end"
+  | "turn_start"
+  | "turn_end"
+  | "message_start"
+  | "message_update"
+  | "message_end"
+  | "tool_execution_start"
+  | "tool_execution_update"
+  | "tool_execution_end"
+  | "queue_update"
+  | "compaction_start"
+  | "compaction_end"
+  | "auto_retry_start"
+  | "auto_retry_end"
+  | "tier_selected"
+  | "retrieval_channel_complete"
+  | "evidence_ready"
+  | "quality_loop"
+  | "wiki_update"
+  | "belief_shift"
+  | "gap_signal"
+  | "presence_initiative"
+  | "keepalive";
+
+export interface CortexEvent {
+  type: CortexEventType;
+  data: Record<string, unknown>;
+  timestamp: string;
+  session_id: string;
+  agent_id: string;
+  trace_id: string;
+}
+
+export interface TierClassification {
+  tier: "T0" | "T1" | "T2" | "T3" | "T4";
+  complexity: number;
+  intent: string;
+  entities: string[];
+  topics: string[];
+  sub_queries: string[];
+  confidence: number;
+  cache_key: string;
+  recommended_agents: string[];
+  estimated_latency_ms: number;
+}
+
+export interface AgentSessionInfo {
+  session_id: string;
+  agent_id: string;
+  is_running: boolean;
+  is_streaming: boolean;
+  message_count: number;
+  turn_count: number;
+  steering: {
+    steering: string[];
+    followUp: string[];
+  };
+}
+
+export interface AgentQueryResponse {
+  answer: string;
+  tier: TierClassification;
+  turns: number;
+  session_id: string | null;
+  tool_results: Array<{
+    tool_call_id: string;
+    content: string;
+    is_error: boolean;
+  }>;
+}
+
+export interface AgentConfigInfo {
+  agent_id: string;
+  tool_count: number;
+  max_turns: number;
+  scheduling: {
+    always_on: boolean;
+    continuous: boolean;
+    on_ingest: boolean;
+    interval_min: number;
+  } | null;
+}
+
+export interface WikiPageInfo {
+  id: string;
+  title: string;
+  content: string;
+  topics: string[];
+  claim_ids: string[];
+  created_at: string;
+  updated_at: string;
+  version: number;
+}
+
+export interface ToolExecutionEvent {
+  toolCallId: string;
+  toolName: string;
+  args?: Record<string, unknown>;
+  result?: string;
+  isError?: boolean;
+}
+
+export interface AgentTurnInfo {
+  turn: number;
+  has_tool_calls: boolean;
+  timestamp: string;
+}

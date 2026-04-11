@@ -10,19 +10,24 @@ import { RAGDashboard } from "@/components/RAGDashboard";
 import { ObservabilityDashboard } from "@/components/ObservabilityDashboard";
 import { AmbientPanel } from "@/components/AmbientPanel";
 import { DocumentsPanel } from "@/components/DocumentsPanel";
+import { AgentChatPanel } from "@/components/agent/AgentChatPanel";
+import { WikiBrowser } from "@/components/agent/WikiBrowser";
+import { useGlobalAgentEvents } from "@/lib/agent/useAgentEvents";
 import { getRuntimeSafetyExecutorStatus, getRuntimeSafetyPermissions } from "@/lib/api";
 import { ModelStatus, RuntimeApprovalSummary } from "@/lib/types";
 
-type ActiveView = "chat" | "memories" | "graph" | "dashboard" | "observability" | "ambient" | "documents";
+type ActiveView = "chat" | "agent" | "wiki" | "memories" | "graph" | "dashboard" | "observability" | "ambient" | "documents";
 
 export default function Home() {
+  useGlobalAgentEvents();
+
   const [modelStatus, setModelStatus] = useState<ModelStatus>({
     status: "loading",
     model_loaded: false,
     model_info: {},
   });
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [activeView, setActiveView] = useState<ActiveView>("chat");
+  const [activeView, setActiveView] = useState<ActiveView>("agent");
   const [conversations, setConversations] = useState<
     { id: string; title: string; date: string }[]
   >([]);
@@ -187,6 +192,8 @@ export default function Home() {
           sidebarOpen={sidebarOpen}
           onToggleSidebar={() => setSidebarOpen((p) => !p)}
         />
+        {activeView === "agent" && <AgentChatPanel />}
+        {activeView === "wiki" && <WikiBrowser />}
         {activeView === "chat" && activeConversation && (
           <ChatPanel
             key={activeConversation}
