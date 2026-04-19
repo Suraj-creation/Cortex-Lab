@@ -251,7 +251,7 @@ Ask: "What have I learned about AI recently?"
 
 ## ☁️ Deploy on Render
 
-Cortex Lab now includes a Render Blueprint to provision frontend, backend, persistent backend disk, and managed PostgreSQL in one flow.
+Cortex Lab includes a free-tier-friendly Render Blueprint that provisions frontend + backend without paid resources by default (ephemeral cloud storage).
 
 - Blueprint file: [render.yaml](render.yaml)
 - Full deployment runbook: [docs/render-deployment.md](docs/render-deployment.md)

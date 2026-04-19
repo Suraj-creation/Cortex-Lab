@@ -6,10 +6,6 @@ services:
     buildCommand: pip install -r requirements.render.txt
     startCommand: python server.py
     autoDeploy: true
-    disk:
-      name: cortex-data
-      mountPath: /var/data/cortex
-      sizeGB: 20
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.10
@@ -18,17 +14,13 @@ services:
       - key: SKIP_LOCAL_MODEL
         value: "true"
       - key: CORTEX_DATA_DIR
-        value: /var/data/cortex
+        value: /tmp/cortex
       - key: CORS_ALLOW_ORIGINS
         value: https://cortex-frontend.onrender.com
       - key: CORS_ALLOW_ORIGIN_REGEX
         value: ^https://.*\.onrender\.com$|^https://.*\.trycloudflare\.com$|^https?://(localhost|127\.0\.0\.1)(:\d+)?$
       - key: GOOGLE_API_KEY
         sync: false
-      - key: DATABASE_URL
-        fromDatabase:
-          name: cortex-postgres
-          property: connectionString
 
   - type: web
     name: cortex-frontend
@@ -44,8 +36,3 @@ services:
         value: "1"
       - key: NEXT_PUBLIC_API_BASE_URL
         value: https://cortex-backend.onrender.com/api
-
-databases:
-  - name: cortex-postgres
-    databaseName: cortex
-    user: cortex
