@@ -32,6 +32,8 @@ class KnowledgeGraph:
     def __init__(self, data_dir: str = "data/graph"):
         self.data_dir = data_dir
         os.makedirs(data_dir, exist_ok=True)
+        self._nx_graph_path = os.path.join(self.data_dir, "knowledge_graph.json")
+        self._fallback_graph_path = os.path.join(self.data_dir, "knowledge_graph_fallback.json")
 
         # Inverted name/alias index for O(1) entity lookups (§3.5)
         self._name_index: Dict[str, str] = {}   # lowercase_name -> entity_id
@@ -238,6 +240,15 @@ class KnowledgeGraph:
                 for alias in data.get("aliases", []):
                     if alias:
                         self._alias_index[alias.lower()] = nid
+        else:
+            for nid, data in self._nodes.items():
+                name = str(data.get("canonical_name", "") or "").lower()
+                if name:
+                    self._name_index[name] = nid
+                for alias in data.get("aliases", []) or []:
+                    alias_key = str(alias or "").lower().strip()
+                    if alias_key:
+                        self._alias_index[alias_key] = nid
 
     def merge_entities(self, keep_id: str, merge_id: str):
         """Merge two entity nodes (merge_id → keep_id)."""
@@ -271,6 +282,96 @@ class KnowledgeGraph:
 
         # Remove merged node
         self.graph.remove_node(merge_id)
+
+    def remove_memory_references(self, memory_id: str, prune_orphan_nodes: bool = True) -> Dict[str, int]:
+        """Remove references to a deleted memory across nodes/edges."""
+        stats = {
+            "nodes_updated": 0,
+            "nodes_removed": 0,
+            "edges_updated": 0,
+            "edges_removed": 0,
+        }
+        if not memory_id:
+            return stats
+
+        if self.graph is not None:
+            nodes_to_remove: List[str] = []
+            for node_id, data in list(self.graph.nodes(data=True)):
+                memory_ids = [str(mid) for mid in (data.get("memory_ids", []) or []) if mid]
+                if memory_id not in memory_ids:
+                    continue
+
+                updated = [mid for mid in memory_ids if mid != memory_id]
+                if updated:
+                    nx.set_node_attributes(self.graph, {node_id: {"memory_ids": updated}})
+                    stats["nodes_updated"] += 1
+                elif prune_orphan_nodes:
+                    nodes_to_remove.append(node_id)
+
+            for node_id in nodes_to_remove:
+                if node_id in self.graph:
+                    self.graph.remove_node(node_id)
+                    stats["nodes_removed"] += 1
+
+            edges_to_remove: List[Tuple[str, str]] = []
+            for source_id, target_id, data in list(self.graph.edges(data=True)):
+                memory_ids = [str(mid) for mid in (data.get("memory_ids", []) or []) if mid]
+                if memory_id not in memory_ids:
+                    continue
+
+                updated = [mid for mid in memory_ids if mid != memory_id]
+                if updated:
+                    nx.set_edge_attributes(
+                        self.graph,
+                        {(source_id, target_id): {"memory_ids": updated}},
+                    )
+                    stats["edges_updated"] += 1
+                else:
+                    edges_to_remove.append((source_id, target_id))
+
+            for source_id, target_id in edges_to_remove:
+                if self.graph.has_edge(source_id, target_id):
+                    self.graph.remove_edge(source_id, target_id)
+                    stats["edges_removed"] += 1
+
+            if stats["nodes_removed"] > 0:
+                self._rebuild_name_index()
+
+            if any(v > 0 for v in stats.values()):
+                self._maybe_auto_save()
+            return stats
+
+        # Fallback graph representation
+        for node_id in list(self._nodes.keys()):
+            memory_ids = [str(mid) for mid in (self._nodes[node_id].get("memory_ids", []) or []) if mid]
+            if memory_id not in memory_ids:
+                continue
+            updated = [mid for mid in memory_ids if mid != memory_id]
+            if updated:
+                self._nodes[node_id]["memory_ids"] = updated
+                stats["nodes_updated"] += 1
+            elif prune_orphan_nodes:
+                self._nodes.pop(node_id, None)
+                stats["nodes_removed"] += 1
+
+        kept_edges = []
+        for edge in self._edges:
+            memory_ids = [str(mid) for mid in (edge.get("memory_ids", []) or []) if mid]
+            if memory_id not in memory_ids:
+                kept_edges.append(edge)
+                continue
+            updated = [mid for mid in memory_ids if mid != memory_id]
+            if updated:
+                edge["memory_ids"] = updated
+                kept_edges.append(edge)
+                stats["edges_updated"] += 1
+            else:
+                stats["edges_removed"] += 1
+        self._edges = kept_edges
+
+        if any(v > 0 for v in stats.values()):
+            self._maybe_auto_save()
+        return stats
 
     def get_community_summaries(self) -> List[Dict]:
         """Get community clusters with entity names (GraphRAG-style)."""
@@ -350,24 +451,107 @@ class KnowledgeGraph:
         if self.graph is not None:
             data = nx.node_link_data(self.graph)
             data["multigraph"] = False  # Always save as simple DiGraph
-            with open(os.path.join(self.data_dir, "knowledge_graph.json"), "w") as f:
+            with open(self._nx_graph_path, "w") as f:
                 json.dump(data, f, default=str)
             print(f"  ✓ Knowledge graph saved ({self.graph.number_of_nodes()} nodes, {self.graph.number_of_edges()} edges)")
+        else:
+            payload = {
+                "format": "fallback-v1",
+                "saved_at": datetime.now().isoformat(),
+                "nodes": self._nodes,
+                "edges": self._edges,
+            }
+            with open(self._fallback_graph_path, "w") as f:
+                json.dump(payload, f, default=str)
+            print(f"  ✓ Knowledge graph fallback saved ({len(self._nodes)} nodes, {len(self._edges)} edges)")
 
     def _load(self):
-        path = os.path.join(self.data_dir, "knowledge_graph.json")
-        if os.path.exists(path) and self.graph is not None:
+        if self.graph is not None:
+            if os.path.exists(self._nx_graph_path):
+                try:
+                    with open(self._nx_graph_path) as f:
+                        data = json.load(f)
+                    # Force multigraph=False so we always get a plain DiGraph
+                    data["multigraph"] = False
+                    loaded = nx.node_link_graph(data, directed=True)
+                    # Ensure we always have a DiGraph, not a MultiDiGraph
+                    if isinstance(loaded, nx.MultiDiGraph):
+                        self.graph = nx.DiGraph(loaded)
+                    else:
+                        self.graph = loaded
+                    print(f"  ✓ Knowledge graph loaded ({self.graph.number_of_nodes()} nodes)")
+                    return
+                except Exception as e:
+                    print(f"  ⚠ Failed to load graph: {e}")
+
+            # Fallback migration path: load snapshot produced by no-NetworkX mode.
+            if os.path.exists(self._fallback_graph_path):
+                try:
+                    with open(self._fallback_graph_path) as f:
+                        data = json.load(f) or {}
+                    nodes = data.get("nodes", {}) or {}
+                    edges = data.get("edges", []) or []
+                    self.graph = nx.DiGraph()
+                    for node_id, node_data in nodes.items():
+                        self.graph.add_node(node_id, **(node_data or {}))
+                    for edge in edges:
+                        source = str(edge.get("source_id", "") or edge.get("source", "")).strip()
+                        target = str(edge.get("target_id", "") or edge.get("target", "")).strip()
+                        if not source or not target:
+                            continue
+                        attrs = dict(edge)
+                        attrs.pop("source_id", None)
+                        attrs.pop("target_id", None)
+                        attrs.pop("source", None)
+                        attrs.pop("target", None)
+                        self.graph.add_edge(source, target, **attrs)
+                    print(f"  ✓ Knowledge graph loaded from fallback snapshot ({self.graph.number_of_nodes()} nodes)")
+                except Exception as e:
+                    print(f"  ⚠ Failed to load fallback graph snapshot: {e}")
+            return
+
+        # No-NetworkX fallback mode
+        if os.path.exists(self._fallback_graph_path):
             try:
-                with open(path) as f:
-                    data = json.load(f)
-                # Force multigraph=False so we always get a plain DiGraph
-                data["multigraph"] = False
-                loaded = nx.node_link_graph(data, directed=True)
-                # Ensure we always have a DiGraph, not a MultiDiGraph
-                if isinstance(loaded, nx.MultiDiGraph):
-                    self.graph = nx.DiGraph(loaded)
-                else:
-                    self.graph = loaded
-                print(f"  ✓ Knowledge graph loaded ({self.graph.number_of_nodes()} nodes)")
+                with open(self._fallback_graph_path) as f:
+                    data = json.load(f) or {}
+                self._nodes = data.get("nodes", {}) or {}
+                self._edges = data.get("edges", []) or []
+                print(f"  ✓ Knowledge graph fallback loaded ({len(self._nodes)} nodes, {len(self._edges)} edges)")
+                return
             except Exception as e:
-                print(f"  ⚠ Failed to load graph: {e}")
+                print(f"  ⚠ Failed to load fallback graph: {e}")
+
+        # Legacy compatibility: parse NetworkX node-link JSON without NetworkX.
+        if os.path.exists(self._nx_graph_path):
+            try:
+                with open(self._nx_graph_path) as f:
+                    data = json.load(f) or {}
+
+                self._nodes = {}
+                self._edges = []
+
+                for node in data.get("nodes", []) or []:
+                    node_id = str(node.get("id", "") or "").strip()
+                    if not node_id:
+                        continue
+                    payload = dict(node)
+                    payload.pop("id", None)
+                    self._nodes[node_id] = payload
+
+                edge_list = data.get("links", []) or data.get("edges", []) or []
+                for edge in edge_list:
+                    source = str(edge.get("source", "") or edge.get("source_id", "")).strip()
+                    target = str(edge.get("target", "") or edge.get("target_id", "")).strip()
+                    if not source or not target:
+                        continue
+                    payload = dict(edge)
+                    payload["source_id"] = source
+                    payload["target_id"] = target
+                    payload.pop("source", None)
+                    payload.pop("target", None)
+                    self._edges.append(payload)
+
+                print(f"  ✓ Knowledge graph loaded from legacy node-link ({len(self._nodes)} nodes, {len(self._edges)} edges)")
+            except Exception as e:
+                print(f"  ⚠ Failed to parse legacy graph file: {e}")

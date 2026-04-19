@@ -326,26 +326,35 @@ class HybridRetriever:
     def _rebuild_bm25_index(self):
         """Rebuild the BM25 inverted index from all memories.
         Uses inverted posting lists for O(q×avgDF) retrieval (§4.6)."""
-        memory_texts = self.metadata.get_memory_texts(limit=5000)
-
         # Build inverted index: token → {mid: term_frequency}
         self._bm25_inverted: Dict[str, Dict[str, int]] = {}
         self._bm25_doc_lengths: Dict[str, int] = {}
 
-        for mid, content in memory_texts:
-            tokens = self._tokenize(content)
-            self._bm25_doc_lengths[mid] = len(tokens)
+        batch_size = 2000
+        offset = 0
+        while True:
+            memory_texts = self.metadata.get_memory_texts(limit=batch_size, offset=offset)
+            if not memory_texts:
+                break
 
-            # Count term frequencies
-            tf_map: Dict[str, int] = defaultdict(int)
-            for t in tokens:
-                tf_map[t] += 1
+            for mid, content in memory_texts:
+                tokens = self._tokenize(content)
+                self._bm25_doc_lengths[mid] = len(tokens)
 
-            # Add to inverted index
-            for token, freq in tf_map.items():
-                if token not in self._bm25_inverted:
-                    self._bm25_inverted[token] = {}
-                self._bm25_inverted[token][mid] = freq
+                # Count term frequencies
+                tf_map: Dict[str, int] = defaultdict(int)
+                for t in tokens:
+                    tf_map[t] += 1
+
+                # Add to inverted index
+                for token, freq in tf_map.items():
+                    if token not in self._bm25_inverted:
+                        self._bm25_inverted[token] = {}
+                    self._bm25_inverted[token][mid] = freq
+
+            if len(memory_texts) < batch_size:
+                break
+            offset += len(memory_texts)
 
         self._bm25_doc_count = len(self._bm25_doc_lengths)
         self._bm25_avg_dl = (
@@ -487,32 +496,51 @@ class HybridRetriever:
     def _rebuild_proposition_index(self):
         """Pre-compute proposition embeddings for all memories.
         Uses batch embedding to minimize API calls (§4.6)."""
-        memory_props = self.metadata.get_memory_propositions(limit=2000)
         self._prop_index = {}
 
-        # Flatten all propositions into a single list for batch embedding
-        flat_props = []  # [(mem_id, prop_text), ...]
-        for mem_id, propositions in memory_props:
-            for prop in propositions:
-                flat_props.append((mem_id, prop))
+        memory_batch_size = 1000
+        embed_batch_size = 256
+        offset = 0
+        total_props = 0
 
-        if not flat_props:
-            self._prop_last_count = self.metadata.count_memories()
-            return
+        while True:
+            memory_props = self.metadata.get_memory_propositions(
+                limit=memory_batch_size,
+                offset=offset,
+            )
+            if not memory_props:
+                break
 
-        # Batch embed all propositions at once
-        all_texts = [prop for _, prop in flat_props]
-        print(f"  📋 Embedding {len(all_texts)} propositions (batch)...")
-        all_embeddings = self.embeddings.embed_batch(all_texts)
+            flat_props = []  # [(mem_id, prop_text), ...]
+            for mem_id, propositions in memory_props:
+                for prop in propositions:
+                    if isinstance(prop, str) and prop.strip():
+                        flat_props.append((mem_id, prop.strip()))
 
-        # Reconstruct per-memory index
-        for (mem_id, prop_text), prop_emb in zip(flat_props, all_embeddings):
-            if mem_id not in self._prop_index:
-                self._prop_index[mem_id] = []
-            self._prop_index[mem_id].append((prop_text, prop_emb))
+            for i in range(0, len(flat_props), embed_batch_size):
+                batch = flat_props[i:i + embed_batch_size]
+                if not batch:
+                    continue
+
+                texts = [prop_text for _, prop_text in batch]
+                embeddings = self.embeddings.embed_batch(texts)
+
+                for (mem_id, prop_text), prop_emb in zip(batch, embeddings):
+                    if mem_id not in self._prop_index:
+                        self._prop_index[mem_id] = []
+                    self._prop_index[mem_id].append((prop_text, prop_emb))
+
+                total_props += len(batch)
+
+            if len(memory_props) < memory_batch_size:
+                break
+            offset += len(memory_props)
 
         self._prop_last_count = self.metadata.count_memories()
-        print(f"  📋 Proposition index rebuilt: {len(all_texts)} propositions across {len(self._prop_index)} memories")
+        print(
+            f"  📋 Proposition index rebuilt: {total_props} propositions "
+            f"across {len(self._prop_index)} memories"
+        )
 
     # ─── Channel 6: PageIndex Document Retrieval ──────────────────────
 

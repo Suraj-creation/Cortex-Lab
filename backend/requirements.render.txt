@@ -1,0 +1,37 @@
+# Render-oriented dependency set for production cloud deployment.
+# This keeps core API, RAG, and Gemini paths while avoiding optional
+# heavyweight local voice packages that are not required on Render.
+
+# API
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+python-multipart==0.0.20
+websockets==15.0.1
+
+# Core runtime
+numpy==2.3.2
+python-dotenv==1.1.1
+pydantic==2.11.7
+pydantic-settings==2.10.1
+requests==2.32.4
+duckdb==1.3.2
+networkx==3.5
+
+# Retrieval + embeddings
+faiss-cpu==1.12.0
+sentence-transformers==5.1.0
+transformers==4.55.4
+torch==2.8.0
+safetensors==0.6.2
+scikit-learn==1.7.1
+
+# Document/wiki indexing
+pageindex==0.0.4
+
+# Cloud AI
+google-genai==1.32.0
+
+# Production server extras used by uvicorn[standard]
+httptools==0.6.4
+uvloop==0.21.0
+watchfiles==1.1.0

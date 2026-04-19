@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { listWikiPages, searchWiki, getClaimStats } from "@/lib/agent/api";
+import { listWikiPages, searchWiki, getClaimStats, rebuildWikiFromMemories } from "@/lib/agent/api";
 import type { WikiPageInfo } from "@/lib/types";
 import ReactMarkdown from "react-markdown";
 
@@ -12,6 +12,7 @@ export function WikiBrowser() {
   const [stats, setStats] = useState<{ total_pages: number; total_topics: number; total_linked_claims: number } | null>(null);
   const [claimStats, setClaimStats] = useState<{ total: number; active: number; topics: number } | null>(null);
   const [loading, setLoading] = useState(false);
+  const [rebuilding, setRebuilding] = useState(false);
 
   const loadPages = useCallback(async () => {
     setLoading(true);
@@ -50,6 +51,17 @@ export function WikiBrowser() {
     setLoading(false);
   }, [searchQuery, loadPages]);
 
+  const handleRebuild = useCallback(async () => {
+    setRebuilding(true);
+    try {
+      await rebuildWikiFromMemories(300, 8);
+      await loadPages();
+    } catch {
+      // rebuild failed
+    }
+    setRebuilding(false);
+  }, [loadPages]);
+
   return (
     <div className="flex h-full bg-zinc-950">
       {/* Sidebar */}
@@ -70,6 +82,13 @@ export function WikiBrowser() {
               className="px-2 py-1 bg-zinc-700 text-zinc-300 rounded text-xs hover:bg-zinc-600"
             >
               Go
+            </button>
+            <button
+              onClick={handleRebuild}
+              disabled={rebuilding}
+              className="px-2 py-1 bg-zinc-800 text-zinc-300 rounded text-xs border border-zinc-700 hover:bg-zinc-700 disabled:opacity-60"
+            >
+              {rebuilding ? "Rebuilding" : "Rebuild"}
             </button>
           </div>
 

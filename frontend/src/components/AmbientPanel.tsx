@@ -21,7 +21,9 @@ import {
 } from "lucide-react";
 import {
   startAmbient,
+  startAmbientLive,
   stopAmbient,
+  stopAmbientLive,
   pauseAmbient,
   resumeAmbient,
   getAmbientStatus,
@@ -102,7 +104,10 @@ export function AmbientPanel({ onBack }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const result = await startAmbient();
+      const useLiveMode =
+        status?.operating_mode === "gemini_live" ||
+        (status?.stt_provider === "gemini" && status?.tts_provider === "gemini");
+      const result = useLiveMode ? await startAmbientLive() : await startAmbient();
       if (!result.success) setError(result.error || "Failed to start");
       await fetchStatus();
     } catch (e: unknown) {
@@ -114,7 +119,11 @@ export function AmbientPanel({ onBack }: Props) {
   const handleStop = async () => {
     setLoading(true);
     try {
-      await stopAmbient();
+      if (status?.live?.running) {
+        await stopAmbientLive();
+      } else {
+        await stopAmbient();
+      }
       await fetchStatus();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Stop failed");
@@ -142,6 +151,7 @@ export function AmbientPanel({ onBack }: Props) {
     status?.status === "speech_detected" ||
     status?.status === "transcribing";
   const isPaused = status?.status === "paused";
+  const isLiveMode = status?.operating_mode === "gemini_live";
 
   const tabs: { id: AmbientTab; label: string; icon: typeof Mic }[] = [
     { id: "live", label: "Live", icon: Radio },
@@ -179,6 +189,11 @@ export function AmbientPanel({ onBack }: Props) {
                   <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider">
                     {STATUS_LABELS[status?.status || "idle"]}
                   </span>
+                  {isLiveMode && (
+                    <span className="rounded-full border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-violet-600">
+                      Gemini Live
+                    </span>
+                  )}
                 </div>
               </div>
             </div>
@@ -264,6 +279,16 @@ export function AmbientPanel({ onBack }: Props) {
                 TTS: {status.tts_provider === "gemini" ? "Gemini" : "Piper"}
               </span>
             )}
+            {status.live?.running && (
+              <span className="text-[10px] font-medium text-violet-600">
+                Live: {status.live.state}
+              </span>
+            )}
+            {status.live?.running && typeof status.live.user_turns === "number" && (
+              <span className="text-[10px] text-slate-400">
+                Turns: {status.live.user_turns}/{status.live.assistant_turns || 0}
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -316,8 +341,8 @@ const DEFAULT_CONFIG: AmbientConfig = {
   auto_ingest: true,
   silence_timeout_s: 120,
   min_speech_ms: 500,
-  stt_provider: "traditional",
-  tts_provider: "traditional",
+  stt_provider: "gemini",
+  tts_provider: "gemini",
   tts_enabled: true,
   tts_voice: "en_US-lessac-medium",
   tts_speed: 1.0,
@@ -326,6 +351,10 @@ const DEFAULT_CONFIG: AmbientConfig = {
   whisper_language: null,
   record_raw_audio: false,
   gemini_tts_voice: "Kore",
+  live_mode: "gemini_live",
+  energy_gate_threshold: 700,
+  energy_min_speech_ms: 320,
+  energy_silence_ms: 420,
 };
 
 function AmbientSettings({ status }: { status: AmbientState | null }) {
@@ -445,6 +474,36 @@ function AmbientSettings({ status }: { status: AmbientState | null }) {
           Voice Providers
         </h3>
         <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-4">
+          <div>
+            <span className="text-xs text-slate-600 font-medium">Runtime Path</span>
+            <p className="text-[10px] text-slate-400 mt-0.5">
+              Gemini Live keeps always-on cloud listening with full-duplex assistant responses.
+            </p>
+            <div className="flex gap-1.5 mt-2">
+              <button
+                onClick={() => updateField("live_mode", "gemini_live")}
+                disabled={!providers?.gemini_available}
+                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-all ${
+                  (config.live_mode || "classic") === "gemini_live"
+                    ? "bg-violet-100 text-violet-700 border border-violet-200"
+                    : "bg-slate-50 text-slate-500 border border-slate-200 hover:bg-slate-100"
+                } disabled:opacity-40`}
+              >
+                Gemini Live
+              </button>
+              <button
+                onClick={() => updateField("live_mode", "classic")}
+                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-all ${
+                  (config.live_mode || "classic") === "classic"
+                    ? "bg-indigo-100 text-indigo-700 border border-indigo-200"
+                    : "bg-slate-50 text-slate-500 border border-slate-200 hover:bg-slate-100"
+                }`}
+              >
+                Classic
+              </button>
+            </div>
+          </div>
+
           {/* STT Provider */}
           <div>
             <div className="flex items-center justify-between mb-2">
@@ -592,50 +651,122 @@ function AmbientSettings({ status }: { status: AmbientState | null }) {
           Voice Activity Detection
         </h3>
         <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-4">
-          <div>
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="text-xs text-slate-500">VAD Threshold</span>
-              <span className="text-xs font-mono text-slate-700">
-                {config.vad_threshold.toFixed(2)}
-              </span>
-            </div>
-            <input
-              type="range"
-              min={0.1}
-              max={0.9}
-              step={0.05}
-              value={config.vad_threshold}
-              onChange={(e) =>
-                updateField("vad_threshold", parseFloat(e.target.value))
-              }
-              className="w-full"
-            />
-            <div className="flex justify-between text-[9px] text-slate-400 mt-0.5">
-              <span>Sensitive (0.1)</span>
-              <span>Strict (0.9)</span>
-            </div>
-          </div>
-          <div>
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="text-xs text-slate-500">
-                Min Speech Duration (ms)
-              </span>
-              <span className="text-xs font-mono text-slate-700">
-                {config.min_speech_ms}
-              </span>
-            </div>
-            <input
-              type="range"
-              min={200}
-              max={2000}
-              step={100}
-              value={config.min_speech_ms}
-              onChange={(e) =>
-                updateField("min_speech_ms", parseInt(e.target.value))
-              }
-              className="w-full"
-            />
-          </div>
+          {(config.live_mode || "classic") === "gemini_live" ? (
+            <>
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-xs text-slate-500">Energy Gate Threshold</span>
+                  <span className="text-xs font-mono text-slate-700">
+                    {Math.round(config.energy_gate_threshold || 700)}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={200}
+                  max={2500}
+                  step={50}
+                  value={config.energy_gate_threshold || 700}
+                  onChange={(e) =>
+                    updateField("energy_gate_threshold", parseInt(e.target.value))
+                  }
+                  className="w-full"
+                />
+                <div className="flex justify-between text-[9px] text-slate-400 mt-0.5">
+                  <span>More Sensitive</span>
+                  <span>More Strict</span>
+                </div>
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-xs text-slate-500">
+                    Min Speech Window (ms)
+                  </span>
+                  <span className="text-xs font-mono text-slate-700">
+                    {config.energy_min_speech_ms || 320}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={160}
+                  max={1200}
+                  step={40}
+                  value={config.energy_min_speech_ms || 320}
+                  onChange={(e) =>
+                    updateField("energy_min_speech_ms", parseInt(e.target.value))
+                  }
+                  className="w-full"
+                />
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-xs text-slate-500">
+                    End-of-Turn Silence (ms)
+                  </span>
+                  <span className="text-xs font-mono text-slate-700">
+                    {config.energy_silence_ms || 420}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={200}
+                  max={1400}
+                  step={40}
+                  value={config.energy_silence_ms || 420}
+                  onChange={(e) =>
+                    updateField("energy_silence_ms", parseInt(e.target.value))
+                  }
+                  className="w-full"
+                />
+              </div>
+            </>
+          ) : (
+            <>
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-xs text-slate-500">VAD Threshold</span>
+                  <span className="text-xs font-mono text-slate-700">
+                    {config.vad_threshold.toFixed(2)}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0.1}
+                  max={0.9}
+                  step={0.05}
+                  value={config.vad_threshold}
+                  onChange={(e) =>
+                    updateField("vad_threshold", parseFloat(e.target.value))
+                  }
+                  className="w-full"
+                />
+                <div className="flex justify-between text-[9px] text-slate-400 mt-0.5">
+                  <span>Sensitive (0.1)</span>
+                  <span>Strict (0.9)</span>
+                </div>
+              </div>
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-xs text-slate-500">
+                    Min Speech Duration (ms)
+                  </span>
+                  <span className="text-xs font-mono text-slate-700">
+                    {config.min_speech_ms}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={200}
+                  max={2000}
+                  step={100}
+                  value={config.min_speech_ms}
+                  onChange={(e) =>
+                    updateField("min_speech_ms", parseInt(e.target.value))
+                  }
+                  className="w-full"
+                />
+              </div>
+            </>
+          )}
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <span className="text-xs text-slate-500">

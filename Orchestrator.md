@@ -173,6 +173,15 @@ User Input → L1 Query Analysis → Intent Classification → Route Decision �
 [CRAG] → [Self-RAG] → [FLARE if needed] → Synthesizer → Response
 ```
 
+**WAKE RETRIEVE FLOW** (always-on verbal trigger):
+```
+Always-listening L0 capture → Detect wake phrase "see ya" / "SIA" →
+[L0 MODE SWITCH: CAPTURE -> RETRIEVE] →
+[Retrieve-Only Path: fast evidence recall + compressed answer plan] →
+[Conversational voice response via Gemini live voice channel] →
+[L0 MODE SWITCH: RETRIEVE -> CAPTURE]
+```
+
 **REFLECTION FLOW** (scheduled):
 ```
 [Cron: daily/weekly] → L0 schedules reflection window →
@@ -233,6 +242,23 @@ ROUTE to ingestion pipeline (proceed):
 - Questions and knowledge gaps the user expresses
 - Commitments: explicit "I will", "I'm going to", "I plan to" statements
 - Lessons the user articulates from experience
+
+=== WAKE PHRASE RETRIEVE MODE CONTRACT ===
+L0 always remains in passive listening. On detecting the verbal wake phrase
+"see ya" (or equivalent tokenization such as "SIA"), L0 MUST switch the active
+interaction mode to RETRIEVE for the current query cycle.
+
+Retrieve mode behavior (non-negotiable):
+- Keep listening active (do not pause capture pipeline).
+- Strip wake token from user query text before retrieval.
+- Route query through retrieve-first pipeline (fast recall path) before generation.
+- Generate concise conversational voice response over Gemini live voice channel.
+- Persist the triggering and query turns with retention metadata.
+- Automatically revert mode to CAPTURE after retrieve response completion.
+
+If wake phrase is detected without a query payload:
+- Acknowledge retrieve mode verbally ("Retrieve mode is active, ask your question").
+- Keep mode armed for the next user utterance.
 
 === RELEVANCE SCORING ===
 Score every candidate chunk on five dimensions (0.0–1.0 each):
@@ -327,6 +353,12 @@ Deactivation order (strict, must complete in sequence):
 3. Stop local model workers
 4. Return STT to passive passive-VAD state
 
+RETRIEVE MODE ACTIVATION OVERRIDE:
+- In wake retrieve mode, retrieval orchestration is prioritized over long-form
+  synthesis to reduce first-response latency.
+- TTS must remain enabled for the retrieve response unless device is in TIER 4.
+- Retrieve mode must not disable memory tagging/retention instrumentation.
+
 === MUST DO ===
 - Audit log every retention decision with reason, scores, and timestamp
 - Emit session_started and session_ended events on EVENT_BUS
@@ -356,6 +388,8 @@ Master-Orchestrator does not produce user-facing text. It produces:
 |------|--------|-----------|---------|
 | `noise_filter` | `{ transcript: string, speaker_confidence: float, context: object }` | auto | Classify and discard noise |
 | `relevance_score` | `{ chunk: MemoryChunk }` | auto | Score 5-dimension relevance |
+| `wake_phrase_detect` | `{ transcript: string, phrases: string[] }` | auto | Detect "see ya" / "SIA" retrieve trigger |
+| `mode_switch` | `{ from_mode: string, to_mode: string, reason: string }` | auto | Switch L0 interaction mode with audit |
 | `session_open` | `{ trigger: string, health_snapshot: object }` | auto | Open a new session |
 | `session_close` | `{ reason: string, session_id: string }` | auto | Close session + commit metadata |
 | `health_sample` | `{ fast: boolean }` | auto | Sample device health |

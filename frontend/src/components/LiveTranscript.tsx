@@ -24,18 +24,21 @@ function getSpeakerColor(label: string): string {
 
 export function LiveTranscript({ status }: Props) {
   const [turns, setTurns] = useState<ConversationTurn[]>([]);
+  const [partialTurns, setPartialTurns] = useState<Record<string, ConversationTurn>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
+  const seenTurnIdsRef = useRef<Set<string>>(new Set());
 
   const isActive = useCallback(() => {
     return (
       status?.status === "listening" ||
       status?.status === "speech_detected" ||
-      status?.status === "transcribing"
+      status?.status === "transcribing" ||
+      status?.live?.running
     );
-  }, [status?.status]);
+  }, [status?.status, status?.live?.running]);
 
   // Poll live transcript as fallback
   useEffect(() => {
@@ -80,15 +83,59 @@ export function LiveTranscript({ status }: Props) {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data.type === "transcript") {
+          if (data.type === "live_partial") {
+            const turnId = String(data.live_turn_id || "");
+            if (!turnId) return;
+            setPartialTurns((prev) => ({
+              ...prev,
+              [turnId]: {
+                speaker_label: data.speaker_label || "USER",
+                speaker_name: data.speaker_name || data.speaker_label || "Speaker",
+                text: data.text || "",
+                timestamp: Number(data.timestamp || 0),
+                confidence: Number(data.confidence || 0),
+                speaker_confidence: Number(data.speaker_confidence || 0),
+                live_turn_id: turnId,
+              },
+            }));
+            return;
+          }
+
+          if (data.type === "live_final_turn" || data.type === "transcript") {
+            const turnId = String(data.live_turn_id || "");
+            if (turnId) {
+              if (seenTurnIdsRef.current.has(turnId)) {
+                if (data.type === "live_final_turn") {
+                  setPartialTurns((prev) => {
+                    const next = { ...prev };
+                    delete next[turnId];
+                    return next;
+                  });
+                }
+                return;
+              }
+              seenTurnIdsRef.current.add(turnId);
+            }
+
+            if (data.type === "live_final_turn" && turnId) {
+              setPartialTurns((prev) => {
+                const next = { ...prev };
+                delete next[turnId];
+                return next;
+              });
+            }
+
             setTurns((prev) => [
               ...prev,
               {
                 speaker_label: data.speaker_label,
                 speaker_name: data.speaker_name,
                 text: data.text,
-                timestamp: data.timestamp,
-                confidence: data.confidence,
+                timestamp: Number(data.timestamp || 0),
+                confidence: Number(data.confidence || 0),
+                speaker_confidence: Number(data.speaker_confidence || 0),
+                live_turn_id: turnId || undefined,
+                retention_trace: data.retention_trace || undefined,
               },
             ]);
           }
@@ -203,6 +250,34 @@ export function LiveTranscript({ status }: Props) {
                 )}
               </div>
               <p className="text-sm text-slate-600 leading-relaxed">
+                {turn.text}
+              </p>
+            </div>
+          </div>
+        ))}
+        {Object.values(partialTurns).map((turn) => (
+          <div key={`partial-${turn.live_turn_id || turn.timestamp}`} className="flex gap-3 opacity-75">
+            <div
+              className={`h-7 w-7 rounded-lg flex items-center justify-center flex-shrink-0 border ${getSpeakerColor(
+                turn.speaker_label
+              )}`}
+            >
+              {turn.speaker_label === "USER" ? (
+                <User size={12} />
+              ) : (
+                <Users size={12} />
+              )}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-0.5">
+                <span className="text-xs font-medium text-slate-500">
+                  {turn.speaker_name || turn.speaker_label}
+                </span>
+                <span className="text-[10px] text-violet-400 uppercase tracking-wider">
+                  partial
+                </span>
+              </div>
+              <p className="text-sm text-slate-500 leading-relaxed italic">
                 {turn.text}
               </p>
             </div>

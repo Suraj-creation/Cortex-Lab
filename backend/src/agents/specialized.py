@@ -7,7 +7,7 @@ compatibility with the current 5-agent runtime paths.
 import re
 import time
 from collections import Counter
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from src.agents.prompt_layers import compose_specialized_system_prompt
 from src.llm import LocalLLM
@@ -25,11 +25,11 @@ SPECIALIZED_AGENT_ORDER = [
     "journaling",
     "wellbeing",
     "cognitive",
-    "decisions",
+    "decision_log",
     "emotional",
     "behavioral",
     "social",
-    "goals",
+    "goal",
     "meta_learning",
 ]
 
@@ -627,23 +627,250 @@ class MetaLearningAgent(DomainSpecializedAgent):
         )
 
 
-def build_specialized_agents(llm: LocalLLM, retriever: HybridRetriever) -> Dict[str, BaseAgent]:
-    """Build the full 15-agent registry used by orchestrator routing."""
+class LoopBackedSpecializedAgent(BaseAgent):
+    """Adapter that executes specialist work through CortexAgentLoop runtime."""
 
-    return {
-        "timeline": TimelineAgent(llm, retriever),
-        "causal": CausalAgent(llm, retriever),
-        "reflection": ReflectionAgent(llm, retriever),
-        "planning": PlanningAgent(llm, retriever),
-        "arbitration": ArbitrationAgent(llm, retriever),
-        "academic": AcademicIntelligenceAgent(llm, retriever),
-        "journaling": PersonalJournalingAgent(llm, retriever),
-        "wellbeing": PersonalWellbeingAgent(llm, retriever),
-        "cognitive": CognitivePatternsAgent(llm, retriever),
-        "decisions": DecisionLogAgent(llm, retriever),
-        "emotional": EmotionalIntelligenceAgent(llm, retriever),
-        "behavioral": BehavioralHabitsAgent(llm, retriever),
-        "social": SocialIntelligenceAgent(llm, retriever),
-        "goals": GoalVisionAgent(llm, retriever),
-        "meta_learning": MetaLearningAgent(llm, retriever),
+    def __init__(
+        self,
+        name: str,
+        runtime_agent_id: str,
+        llm: LocalLLM,
+        retriever: HybridRetriever,
+        *,
+        extra_instructions: str = "",
+        retrieval_top_k: int = 12,
+        evidence_top_k: int = 8,
+        runtime_task_manager: Any = None,
+    ):
+        super().__init__(
+            name=name,
+            llm=llm,
+            retriever=retriever,
+            prompt_key=runtime_agent_id,
+            retrieval_top_k=retrieval_top_k,
+            evidence_top_k=evidence_top_k,
+        )
+        self.runtime_agent_id = runtime_agent_id
+        self.extra_instructions = extra_instructions
+        self.runtime_task_manager = runtime_task_manager
+
+    async def execute(self, query: MemoryQuery, context: str = "") -> AgentResponse:
+        from src.agents.agent_configs import ALL_AGENT_CONFIGS
+        from src.agents.autonomous_loop import CortexAgentLoop
+        from src.agents.llm_adapter import make_cortex_loop_llm_fn
+
+        t0 = time.time()
+        results = await self.retriever.retrieve(query, top_k=self.retrieval_top_k)
+        evidence = self._evidence_texts(results, max_items=self.evidence_top_k)
+
+        config = ALL_AGENT_CONFIGS.get(self.runtime_agent_id) or ALL_AGENT_CONFIGS.get("planning")
+        llm_fn = make_cortex_loop_llm_fn(
+            self.llm,
+            preferred_provider=config.llm_provider,
+        )
+
+        metadata = dict(getattr(query, "metadata", {}) or {})
+        parent_task_id = str(metadata.get("runtime_parent_task_id", "")).strip() or None
+
+        loop = CortexAgentLoop(
+            config=config,
+            llm_fn=llm_fn,
+            runtime_task_manager=self.runtime_task_manager,
+            parent_task_id=parent_task_id,
+        )
+
+        prompt_parts = [
+            f"User query: {query.raw_query}",
+            "",
+            "Execution constraints:",
+            "- Stay grounded in available evidence and tool outputs.",
+            "- If evidence is insufficient, state uncertainty explicitly.",
+            "- Return concise, actionable reasoning.",
+        ]
+        if self.extra_instructions:
+            prompt_parts.extend(["", f"Domain instructions: {self.extra_instructions}"])
+        if context:
+            prompt_parts.extend(["", f"Session context:\n{context[:2000]}"])
+        if evidence:
+            prompt_parts.extend(
+                [
+                    "",
+                    "Prefetched evidence excerpts:",
+                    "\n".join(f"- {snippet[:500]}" for snippet in evidence[:8]),
+                ]
+            )
+
+        result = await loop.prompt("\n".join(prompt_parts))
+        answer = str(result.get("text", "")).strip()
+
+        if not answer:
+            if evidence:
+                answer = self.llm.generate_faithful(
+                    query.raw_query,
+                    evidence,
+                    session_context=self._compose_layered_context(
+                        query,
+                        context,
+                        extra_instructions=self.extra_instructions,
+                    ),
+                )
+            else:
+                answer = self._fallback_no_info_answer(query)
+
+        tool_results = list(result.get("tool_results", []) or [])
+        confidence = min(0.42 + len(results) * 0.04 + len(tool_results) * 0.02, 0.92)
+
+        elapsed = (time.time() - t0) * 1000
+        return AgentResponse(
+            agent_name=self.name,
+            answer=answer,
+            evidence=results[:5],
+            confidence=confidence,
+            reasoning_trace=(
+                f"{self.name} loop-backed agent: turns={result.get('turns', 0)}, "
+                f"tool_results={len(tool_results)}, evidence={len(results)}"
+            ),
+            processing_time_ms=elapsed,
+        )
+
+
+def build_specialized_agents(
+    llm: LocalLLM,
+    retriever: HybridRetriever,
+    runtime_task_manager: Any = None,
+) -> Dict[str, BaseAgent]:
+    """Build loop-backed 15-agent registry used by orchestrator routing."""
+
+    agents: Dict[str, BaseAgent] = {
+        "timeline": LoopBackedSpecializedAgent(
+            name="timeline",
+            runtime_agent_id="timeline",
+            llm=llm,
+            retriever=retriever,
+            extra_instructions="Build chronological timelines and highlight temporal gaps.",
+            retrieval_top_k=15,
+            runtime_task_manager=runtime_task_manager,
+        ),
+        "causal": LoopBackedSpecializedAgent(
+            name="causal",
+            runtime_agent_id="causal",
+            llm=llm,
+            retriever=retriever,
+            extra_instructions="Trace causal chains and distinguish correlation from causation.",
+            retrieval_top_k=15,
+            runtime_task_manager=runtime_task_manager,
+        ),
+        "reflection": LoopBackedSpecializedAgent(
+            name="reflection",
+            runtime_agent_id="reflection",
+            llm=llm,
+            retriever=retriever,
+            extra_instructions="Track belief evolution and turning-point evidence.",
+            retrieval_top_k=20,
+            runtime_task_manager=runtime_task_manager,
+        ),
+        "planning": LoopBackedSpecializedAgent(
+            name="planning",
+            runtime_agent_id="planning",
+            llm=llm,
+            retriever=retriever,
+            extra_instructions="Decompose complex goals into dependency-aware steps.",
+            retrieval_top_k=14,
+            runtime_task_manager=runtime_task_manager,
+        ),
+        "arbitration": LoopBackedSpecializedAgent(
+            name="arbitration",
+            runtime_agent_id="arbitration",
+            llm=llm,
+            retriever=retriever,
+            extra_instructions="Resolve contradictory evidence with transparent confidence weighting.",
+            retrieval_top_k=14,
+            runtime_task_manager=runtime_task_manager,
+        ),
+        "academic": LoopBackedSpecializedAgent(
+            name="academic",
+            runtime_agent_id="academic",
+            llm=llm,
+            retriever=retriever,
+            extra_instructions="Focus on learning outcomes, gaps, and study prioritization.",
+            runtime_task_manager=runtime_task_manager,
+        ),
+        "journaling": LoopBackedSpecializedAgent(
+            name="journaling",
+            runtime_agent_id="journaling",
+            llm=llm,
+            retriever=retriever,
+            extra_instructions="Preserve user voice and reflective narrative continuity.",
+            runtime_task_manager=runtime_task_manager,
+        ),
+        "wellbeing": LoopBackedSpecializedAgent(
+            name="wellbeing",
+            runtime_agent_id="wellbeing",
+            llm=llm,
+            retriever=retriever,
+            extra_instructions="Surface wellbeing patterns safely without diagnosis.",
+            runtime_task_manager=runtime_task_manager,
+        ),
+        "cognitive": LoopBackedSpecializedAgent(
+            name="cognitive",
+            runtime_agent_id="cognitive",
+            llm=llm,
+            retriever=retriever,
+            extra_instructions="Analyze reasoning quality and recurring cognitive patterns.",
+            runtime_task_manager=runtime_task_manager,
+        ),
+        "decision_log": LoopBackedSpecializedAgent(
+            name="decision_log",
+            runtime_agent_id="decision_log",
+            llm=llm,
+            retriever=retriever,
+            extra_instructions="Track decisions, rationale, and outcome loops over time.",
+            runtime_task_manager=runtime_task_manager,
+        ),
+        "emotional": LoopBackedSpecializedAgent(
+            name="emotional",
+            runtime_agent_id="emotional",
+            llm=llm,
+            retriever=retriever,
+            extra_instructions="Capture emotional signals, triggers, and recovery patterns.",
+            runtime_task_manager=runtime_task_manager,
+        ),
+        "behavioral": LoopBackedSpecializedAgent(
+            name="behavioral",
+            runtime_agent_id="behavioral",
+            llm=llm,
+            retriever=retriever,
+            extra_instructions="Measure behavior consistency, drift, and habit reliability.",
+            runtime_task_manager=runtime_task_manager,
+        ),
+        "social": LoopBackedSpecializedAgent(
+            name="social",
+            runtime_agent_id="social",
+            llm=llm,
+            retriever=retriever,
+            extra_instructions="Map relationship context and communication dynamics sensitively.",
+            runtime_task_manager=runtime_task_manager,
+        ),
+        "goal": LoopBackedSpecializedAgent(
+            name="goal",
+            runtime_agent_id="goal",
+            llm=llm,
+            retriever=retriever,
+            extra_instructions="Track goal hierarchy, blockers, and next milestone pressure.",
+            runtime_task_manager=runtime_task_manager,
+        ),
+        "meta_learning": LoopBackedSpecializedAgent(
+            name="meta_learning",
+            runtime_agent_id="meta_learning",
+            llm=llm,
+            retriever=retriever,
+            extra_instructions="Extract cross-domain lessons and strategy improvements.",
+            runtime_task_manager=runtime_task_manager,
+        ),
     }
+
+    # Backward-compatible aliases used by existing query routers.
+    agents["decisions"] = agents["decision_log"]
+    agents["goals"] = agents["goal"]
+
+    return agents

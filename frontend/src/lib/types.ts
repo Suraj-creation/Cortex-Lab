@@ -363,6 +363,33 @@ export type AmbientStatusType =
 
 export type VoiceProviderType = "traditional" | "gemini" | "local";
 
+export type AmbientLiveSessionState =
+  | "idle_listening"
+  | "user_detected"
+  | "live_streaming"
+  | "assistant_responding"
+  | "background_processing"
+  | "degraded";
+
+export interface AmbientLiveStatus {
+  enabled: boolean;
+  running: boolean;
+  paused?: boolean;
+  state: AmbientLiveSessionState;
+  session_id?: string | null;
+  uptime_seconds?: number;
+  native_live_connected?: boolean;
+  native_live_error?: string | null;
+  energy_threshold?: number;
+  segments_detected?: number;
+  user_turns?: number;
+  assistant_turns?: number;
+  memory_jobs?: number;
+  audio_frames?: number;
+  last_audio_level?: number;
+  last_error?: string | null;
+}
+
 export interface VoiceProviders {
   stt_provider: VoiceProviderType;
   tts_provider: VoiceProviderType;
@@ -376,6 +403,8 @@ export interface VoiceProviders {
   supported_stt_providers?: VoiceProviderType[];
   supported_tts_providers?: VoiceProviderType[];
   gemini_tts_voices: string[];
+  live_mode?: "classic" | "gemini_live";
+  live_status?: AmbientLiveStatus;
 }
 
 export interface AmbientState {
@@ -390,6 +419,14 @@ export interface AmbientState {
   stt_provider: VoiceProviderType;
   tts_provider: VoiceProviderType;
   gemini_available: boolean;
+  operating_mode?: "classic" | "gemini_live";
+  no_local_model_policy_enforced?: boolean;
+  local_models_initialized?: {
+    vad: boolean;
+    traditional_stt: boolean;
+    traditional_tts: boolean;
+  };
+  live?: AmbientLiveStatus;
   vad?: {
     threshold: number;
     speech_active: boolean;
@@ -437,6 +474,10 @@ export interface AmbientConfig {
   whisper_language: string | null;
   record_raw_audio: boolean;
   gemini_tts_voice: string;
+  live_mode?: "classic" | "gemini_live";
+  energy_gate_threshold?: number;
+  energy_min_speech_ms?: number;
+  energy_silence_ms?: number;
 }
 
 export interface ConversationTurn {
@@ -445,6 +486,9 @@ export interface ConversationTurn {
   text: string;
   timestamp: number;
   confidence: number;
+  speaker_confidence?: number;
+  live_turn_id?: string;
+  retention_trace?: Record<string, unknown>;
 }
 
 export interface ConversationRecord {
@@ -623,6 +667,7 @@ export type CortexEventType =
   | "keepalive";
 
 export interface CortexEvent {
+  event_id?: string;
   type: CortexEventType;
   data: Record<string, unknown>;
   timestamp: string;
@@ -695,6 +740,7 @@ export interface WikiPageInfo {
 export interface ToolExecutionEvent {
   toolCallId: string;
   toolName: string;
+  occurrence?: number;
   args?: Record<string, unknown>;
   result?: string;
   isError?: boolean;

@@ -31,6 +31,9 @@ class ConversationTurn:
     text: str = ""
     timestamp: float = 0.0    # Unix-like timestamp (seconds since ambient start)
     confidence: float = 0.0   # STT confidence
+    speaker_confidence: float = 0.0  # Speaker-match confidence (voice ID)
+    live_turn_id: str = ""          # Live session turn identifier
+    retention_trace: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -60,6 +63,9 @@ class ConversationRecord:
                     "text": t.text,
                     "timestamp": t.timestamp,
                     "confidence": t.confidence,
+                    "speaker_confidence": t.speaker_confidence,
+                    "live_turn_id": t.live_turn_id,
+                    "retention_trace": t.retention_trace,
                 }
                 for t in self.turns
             ],
@@ -123,6 +129,7 @@ class ConversationSegmenter:
 
         # DuckDB for Phase 6 (raw transcript audit trail)
         self._db = None
+        self._db_backend = "none"
         self._init_duckdb()
 
         # Current in-progress conversation
@@ -148,8 +155,9 @@ class ConversationSegmenter:
             import duckdb
             db_path = f"{self.data_dir}/cortex.duckdb"
             self._db = duckdb.connect(db_path)
+            self._db_backend = "duckdb"
             self._db.execute("""
-                CREATE TABLE IF NOT EXISTS conversations (
+                CREATE TABLE IF NOT EXISTS ambient_conversations (
                     id VARCHAR PRIMARY KEY,
                     started_at TIMESTAMP,
                     ended_at TIMESTAMP,
@@ -164,7 +172,7 @@ class ConversationSegmenter:
                 )
             """)
             self._db.execute("""
-                CREATE TABLE IF NOT EXISTS conversation_turns (
+                CREATE TABLE IF NOT EXISTS ambient_conversation_turns (
                     id VARCHAR PRIMARY KEY,
                     conversation_id VARCHAR,
                     turn_index INTEGER,
@@ -173,17 +181,124 @@ class ConversationSegmenter:
                     timestamp_s FLOAT,
                     text TEXT,
                     confidence FLOAT,
-                    FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+                    speaker_confidence FLOAT DEFAULT 0,
+                    live_turn_id VARCHAR,
+                    retention_trace JSON,
+                    FOREIGN KEY (conversation_id) REFERENCES ambient_conversations(id)
                 )
             """)
+
+            # Ensure newer metadata columns exist for older databases.
+            turn_schema = {
+                row[1]
+                for row in self._db.execute(
+                    "PRAGMA table_info('ambient_conversation_turns')"
+                ).fetchall()
+            }
+            if "speaker_confidence" not in turn_schema:
+                self._db.execute(
+                    "ALTER TABLE ambient_conversation_turns ADD COLUMN speaker_confidence FLOAT DEFAULT 0"
+                )
+            if "live_turn_id" not in turn_schema:
+                self._db.execute(
+                    "ALTER TABLE ambient_conversation_turns ADD COLUMN live_turn_id VARCHAR"
+                )
+            if "retention_trace" not in turn_schema:
+                self._db.execute(
+                    "ALTER TABLE ambient_conversation_turns ADD COLUMN retention_trace JSON"
+                )
+
+            # Best-effort migration from legacy ambient table names.
+            # Only runs when legacy schemas are detected.
+            try:
+                conv_cols = {
+                    row[1]
+                    for row in self._db.execute("PRAGMA table_info('conversations')").fetchall()
+                }
+                if {"started_at", "raw_transcript", "turn_count"}.issubset(conv_cols):
+                    self._db.execute("""
+                        INSERT OR IGNORE INTO ambient_conversations
+                        (id, started_at, ended_at, duration_seconds, participants,
+                         turn_count, topic_labels, importance_score, gemini_summary,
+                         raw_transcript, ingested)
+                        SELECT id, started_at, ended_at, duration_seconds, participants,
+                               turn_count, topic_labels, importance_score, gemini_summary,
+                               raw_transcript, ingested
+                        FROM conversations
+                    """)
+
+                turn_cols = {
+                    row[1]
+                    for row in self._db.execute("PRAGMA table_info('conversation_turns')").fetchall()
+                }
+                if {"conversation_id", "turn_index", "speaker", "text"}.issubset(turn_cols):
+                    self._db.execute("""
+                        INSERT OR IGNORE INTO ambient_conversation_turns
+                        (id, conversation_id, turn_index, speaker, speaker_name,
+                         timestamp_s, text, confidence)
+                        SELECT id, conversation_id, turn_index, speaker, speaker_name,
+                               timestamp_s, text, confidence
+                        FROM conversation_turns
+                    """)
+            except Exception:
+                pass
         except Exception as e:
             print(f"  ⚠ DuckDB init for conversations failed: {e}")
+            self._init_sqlite_fallback()
+
+    def _init_sqlite_fallback(self):
+        """Fallback local DB when DuckDB is unavailable in the runtime environment."""
+        try:
+            import sqlite3
+
+            db_path = f"{self.data_dir}/cortex.sqlite3"
+            self._db = sqlite3.connect(db_path, check_same_thread=False)
+            self._db_backend = "sqlite"
+
+            self._db.execute("""
+                CREATE TABLE IF NOT EXISTS ambient_conversations (
+                    id TEXT PRIMARY KEY,
+                    started_at TEXT,
+                    ended_at TEXT,
+                    duration_seconds REAL,
+                    participants TEXT,
+                    turn_count INTEGER,
+                    topic_labels TEXT,
+                    importance_score REAL DEFAULT 0,
+                    gemini_summary TEXT,
+                    raw_transcript TEXT,
+                    ingested INTEGER DEFAULT 0
+                )
+            """)
+            self._db.execute("""
+                CREATE TABLE IF NOT EXISTS ambient_conversation_turns (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT,
+                    turn_index INTEGER,
+                    speaker TEXT,
+                    speaker_name TEXT,
+                    timestamp_s REAL,
+                    text TEXT,
+                    confidence REAL,
+                    speaker_confidence REAL DEFAULT 0,
+                    live_turn_id TEXT,
+                    retention_trace TEXT
+                )
+            """)
+            self._db.commit()
+            print("  💾 SQLite fallback initialized for ambient conversations")
+        except Exception as sqlite_exc:
+            print(f"  ⚠ SQLite fallback init failed: {sqlite_exc}")
             self._db = None
+            self._db_backend = "none"
 
     # ── Core Processing ──────────────────────────────────────────────────
 
     async def add_turn(self, speaker_label: str, speaker_name: str,
-                       text: str, timestamp: float, confidence: float = 0.0):
+                       text: str, timestamp: float, confidence: float = 0.0,
+                       speaker_confidence: float = 0.0,
+                       live_turn_id: str = "",
+                       retention_trace: Optional[Dict[str, Any]] = None):
         """
         Add a transcribed turn. Automatically segments and ingests.
 
@@ -206,6 +321,9 @@ class ConversationSegmenter:
             text=text.strip(),
             timestamp=timestamp,
             confidence=confidence,
+            speaker_confidence=speaker_confidence,
+            live_turn_id=live_turn_id,
+            retention_trace=dict(retention_trace or {}),
         )
 
         # Merge with previous turn if same speaker and close in time
@@ -216,6 +334,13 @@ class ConversationSegmenter:
             self._current_turns[-1].confidence = max(
                 self._current_turns[-1].confidence, confidence
             )
+            self._current_turns[-1].speaker_confidence = max(
+                self._current_turns[-1].speaker_confidence, speaker_confidence
+            )
+            if live_turn_id:
+                self._current_turns[-1].live_turn_id = live_turn_id
+            if retention_trace:
+                self._current_turns[-1].retention_trace = dict(retention_trace)
         else:
             self._current_turns.append(turn)
 
@@ -256,8 +381,28 @@ class ConversationSegmenter:
         5. Ingest structured summaries into vector store (importance >= 5)
         """
         if len(self._current_turns) < self.MIN_TURNS:
-            self._current_turns = []
-            return
+            # Preserve high-signal single turns (for wake-phrase retrieval queries,
+            # commitments, and short but meaningful utterances).
+            if len(self._current_turns) == 1:
+                only_turn = self._current_turns[0]
+                trace = dict(only_turn.retention_trace or {})
+                decision = str(trace.get("decision", "")).strip().lower()
+                score = float(trace.get("score", 0.0) or 0.0)
+                tags = [str(t).strip().lower() for t in list(trace.get("tags", []) or [])]
+
+                high_signal = (
+                    decision == "keep"
+                    and (
+                        score >= 0.55
+                        or any(tag in {"action_item", "question", "retrieval_query", "retrieve_wake", "technical"} for tag in tags)
+                    )
+                )
+                if not high_signal:
+                    self._current_turns = []
+                    return
+            else:
+                self._current_turns = []
+                return
 
         # Build conversation record
         participants = list(set(t.speaker_label for t in self._current_turns))
@@ -495,8 +640,60 @@ Return ONLY valid JSON:
             return
 
         try:
+            if self._db_backend == "sqlite":
+                self._db.execute(
+                    """
+                    INSERT OR REPLACE INTO ambient_conversations
+                    (id, started_at, ended_at, duration_seconds, participants,
+                     turn_count, topic_labels, importance_score, gemini_summary,
+                     raw_transcript, ingested)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.id,
+                        record.start_time.isoformat() if record.start_time else None,
+                        record.end_time.isoformat() if record.end_time else None,
+                        record.duration_seconds,
+                        json.dumps(record.participants or []),
+                        len(record.turns),
+                        json.dumps(record.topic_labels or []),
+                        record.importance_score,
+                        json.dumps(record.gemini_summary) if record.gemini_summary else None,
+                        raw_transcript,
+                        0,
+                    ),
+                )
+
+                for i, turn in enumerate(record.turns):
+                    turn_id = f"{record.id}_t{i:03d}"
+                    self._db.execute(
+                        """
+                        INSERT OR REPLACE INTO ambient_conversation_turns
+                        (id, conversation_id, turn_index, speaker, speaker_name,
+                         timestamp_s, text, confidence, speaker_confidence,
+                         live_turn_id, retention_trace)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            turn_id,
+                            record.id,
+                            i,
+                            turn.speaker_label,
+                            turn.speaker_name,
+                            turn.timestamp,
+                            turn.text,
+                            turn.confidence,
+                            turn.speaker_confidence,
+                            turn.live_turn_id,
+                            json.dumps(turn.retention_trace or {}),
+                        ),
+                    )
+
+                self._db.commit()
+                return
+
             self._db.execute("""
-                INSERT OR REPLACE INTO conversations
+                INSERT OR REPLACE INTO ambient_conversations
                 (id, started_at, ended_at, duration_seconds, participants,
                  turn_count, topic_labels, importance_score, gemini_summary,
                  raw_transcript, ingested)
@@ -518,14 +715,18 @@ Return ONLY valid JSON:
             for i, turn in enumerate(record.turns):
                 turn_id = f"{record.id}_t{i:03d}"
                 self._db.execute("""
-                    INSERT OR REPLACE INTO conversation_turns
+                    INSERT OR REPLACE INTO ambient_conversation_turns
                     (id, conversation_id, turn_index, speaker, speaker_name,
-                     timestamp_s, text, confidence)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     timestamp_s, text, confidence, speaker_confidence,
+                     live_turn_id, retention_trace)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, [
                     turn_id, record.id, i, turn.speaker_label,
                     turn.speaker_name, turn.timestamp, turn.text,
                     turn.confidence,
+                    turn.speaker_confidence,
+                    turn.live_turn_id,
+                    json.dumps(turn.retention_trace or {}),
                 ])
 
         except Exception as e:
@@ -614,10 +815,17 @@ Return ONLY valid JSON:
             # Mark as ingested in DuckDB
             if self._db and memory_ids:
                 try:
-                    self._db.execute(
-                        "UPDATE conversations SET ingested = TRUE WHERE id = ?",
-                        [record.id]
-                    )
+                    if self._db_backend == "sqlite":
+                        self._db.execute(
+                            "UPDATE ambient_conversations SET ingested = 1 WHERE id = ?",
+                            (record.id,),
+                        )
+                        self._db.commit()
+                    else:
+                        self._db.execute(
+                            "UPDATE ambient_conversations SET ingested = TRUE WHERE id = ?",
+                            [record.id]
+                        )
                 except Exception:
                     pass
 
@@ -701,6 +909,9 @@ Return ONLY valid JSON:
                 "text": t.text,
                 "timestamp": t.timestamp,
                 "confidence": t.confidence,
+                "speaker_confidence": t.speaker_confidence,
+                "live_turn_id": t.live_turn_id,
+                "retention_trace": t.retention_trace,
             }
             for t in self._current_turns
         ]

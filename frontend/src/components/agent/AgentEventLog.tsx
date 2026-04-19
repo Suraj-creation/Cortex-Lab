@@ -74,9 +74,9 @@ function summarizeData(event: CortexEvent): string {
 }
 
 export function AgentEventLog({ sessionId }: { sessionId?: string }) {
-  const session = sessionId
-    ? useAgentStore((s) => s.sessions[sessionId])
-    : null;
+  const session = useAgentStore((s) =>
+    sessionId ? s.sessions[sessionId] || null : null,
+  );
   const globalEvents = useAgentStore((s) => s.globalEvents);
 
   const events = session?.events || globalEvents;

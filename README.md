@@ -249,6 +249,16 @@ Ask: "What have I learned about AI recently?"
 
 ---
 
+## ☁️ Deploy on Render
+
+Cortex Lab now includes a Render Blueprint to provision frontend, backend, persistent backend disk, and managed PostgreSQL in one flow.
+
+- Blueprint file: [render.yaml](render.yaml)
+- Full deployment runbook: [docs/render-deployment.md](docs/render-deployment.md)
+- Render backend dependency set: [backend/requirements.render.txt](backend/requirements.render.txt)
+
+---
+
 ## 📋 Performance Targets
 
 | Metric | Target | How |

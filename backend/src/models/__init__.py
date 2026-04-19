@@ -196,6 +196,39 @@ class AgentResponse:
 
 
 @dataclass
+class AnswerPlan:
+    """Shared answer contract for streaming and non-streaming paths."""
+
+    selected_evidence_ids: List[str] = field(default_factory=list)
+    confidence: float = 0.0
+    confidence_composition: Dict[str, float] = field(default_factory=dict)
+    arbitration_notes: List[str] = field(default_factory=list)
+    generation_policy: str = "default"
+    citation_required: bool = True
+    source_wiki_pages: List[str] = field(default_factory=list)
+    source_claim_ids: List[str] = field(default_factory=list)
+    source_event_ids: List[str] = field(default_factory=list)
+    quality_loops: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "selected_evidence_ids": list(self.selected_evidence_ids),
+            "confidence": round(float(self.confidence), 3),
+            "confidence_composition": {
+                str(k): round(float(v), 3)
+                for k, v in dict(self.confidence_composition).items()
+            },
+            "arbitration_notes": list(self.arbitration_notes),
+            "generation_policy": self.generation_policy,
+            "citation_required": bool(self.citation_required),
+            "source_wiki_pages": list(self.source_wiki_pages),
+            "source_claim_ids": list(self.source_claim_ids),
+            "source_event_ids": list(self.source_event_ids),
+            "quality_loops": dict(self.quality_loops),
+        }
+
+
+@dataclass
 class OrchestratorResponse:
     """Final response from the orchestrator combining all agent outputs."""
     answer: str = ""
@@ -209,6 +242,7 @@ class OrchestratorResponse:
     cache_hit: bool = False
     token_usage: Dict[str, int] = field(default_factory=dict)
     pipeline_trace: Optional["PipelineTrace"] = None
+    answer_plan: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -424,6 +458,7 @@ class PipelineTrace:
 
     # Generation
     generation_details: Dict[str, Any] = field(default_factory=dict)
+    answer_plan: Dict[str, Any] = field(default_factory=dict)
 
     # Cache
     cache_status: Dict[str, Any] = field(default_factory=dict)
@@ -461,6 +496,7 @@ class PipelineTrace:
             "subagent_spawn_records": self.subagent_spawn_records,
             "sidechain_transcript": self.sidechain_transcript,
             "generation_details": self.generation_details,
+            "answer_plan": self.answer_plan,
             "cache_status": self.cache_status,
             "final_confidence": round(self.final_confidence, 3),
             "evidence_count": self.evidence_count,

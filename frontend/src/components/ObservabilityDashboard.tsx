@@ -34,6 +34,7 @@ import {
   resolveRuntimeSafetyPermission,
   subscribeRuntimeTaskEvents,
 } from "@/lib/api";
+import { RuntimeOperationsCenter } from "@/components/observability/RuntimeOperationsCenter";
 
 /* ─── Helpers ────────────────────────────────────────────────────── */
 
@@ -313,6 +314,8 @@ export function ObservabilityDashboard({ onBack }: { onBack: () => void }) {
           </button>
         </div>
       </div>
+
+      <RuntimeOperationsCenter />
 
       {loading && !data ? (
         <div className="flex items-center justify-center py-20">

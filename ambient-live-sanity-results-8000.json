@@ -1,0 +1,84 @@
+{
+  "timestamp_utc": "2026-04-19T05:14:17.592712+00:00",
+  "base_url": "http://localhost:8000",
+  "api_base": "http://localhost:8000/api",
+  "summary": {
+    "required_passed": 11,
+    "required_failed": 0,
+    "overall_pass": true
+  },
+  "checks": [
+    {
+      "name": "pre_stop",
+      "passed": true,
+      "required": false,
+      "detail": "{\"success\":false,\"error\":\"Live mode is not running\",\"status\":\"idle\"}"
+    },
+    {
+      "name": "ambient_config",
+      "passed": true,
+      "required": true,
+      "detail": "{\"enabled\":false,\"vad_threshold\":0.5,\"auto_ingest\":true,\"silence_timeout_s\":120,\"min_speech_ms\":250,\"similarity_threshold\":0.7,\"stt_provider\":\"gemini\",\"whisper_model_size\":\"small\",\"whisper_device\":\"auto\",\"whisper_language\":null,\"tts_provider\":\"gemini\",\"live_mode\":\"gemini_live\",\"energy_gate_threshold\":450.0,\"energy_min_speech_ms\":220,\"energy_silence_ms\":280,\"tts_enabled\":true,\"tts_voice\":\"en_US-lessac-medium\",\"tts_speed\":1.0,\"gemini_tts_voice\":\"Kore\",\"wake_word_enabled\":false,\"wake_word_model\":\"hey_jarvis\",\"wake_word_threshold\":0.5,\"wake_word_mode\":\"manual\",\"audio_device\":null,\"record_raw_audio\":false}"
+    },
+    {
+      "name": "live_start",
+      "passed": true,
+      "required": true,
+      "detail": "{\"success\":true,\"status\":\"listening\",\"mode\":\"gemini_live\",\"live\":{\"enabled\":true,\"running\":true,\"paused\":false,\"state\":\"idle_listening\",\"state_updated_at\":1776575594.2661247,\"session_id\":\"live_78a2f6729ddc\",\"uptime_seconds\":2.1,\"native_live_connected\":false,\"native_live_error\":\"Live connect failed: 1008 None. models/gemini-2.5-flash-live-preview is not found for API version v1beta, or is not supported for bidiGenerateContent. Call\",\"energy_threshold\":450.0,\"interaction_mode\":\"capture\",\"retrieve_mode_armed\":false,\"segments_detected\":9,\"user_turns\":2,\"assistant_turns\":6,\"memory_jobs\":2,\"native_events_seen\":0,\"audio_frames\":5669,\"last_audio_level\":34.164154052734375,\"last_error\":null}}"
+    },
+    {
+      "name": "live_running",
+      "passed": true,
+      "required": true,
+      "detail": "{\"enabled\": true, \"running\": true, \"paused\": false, \"state\": \"idle_listening\", \"state_updated_at\": 1776575594.2661247, \"session_id\": \"live_78a2f6729ddc\", \"uptime_seconds\": 2.1, \"native_live_connected\": false, \"native_live_error\": \"Live connect failed: 1008 None. models/gemini-2.5-flash-live-preview is not found for API version v1beta, or is not supported for bidiGenerateContent. Call\", \"energy_threshold\": 450.0, \"interaction_mode\": \"capture\", \"retrieve_mode_armed\": false, \"segments_detected\": 9, \"user_turns\": 2, \"assistant_turns\": 6, \"memory_jobs\": 2, \"native_events_seen\": 0, \"audio_frames\": 5669, \"last_audio_level\": 34.164154052734375, \"last_error\": null}"
+    },
+    {
+      "name": "tts_synthesize",
+      "passed": true,
+      "required": true,
+      "detail": "bytes=246330"
+    },
+    {
+      "name": "voice_query",
+      "passed": true,
+      "required": true,
+      "detail": "{\"transcript\":\"Remember the sanity check item Alpha 42 for ambient testing.\",\"answer\":\"I cannot find any information about \\\"sanity check item Alpha 42 for ambient testing\\\" in the provided conversation context or evidence excerpts. Therefore, I cannot remember or confirm this item based on the available information.\",\"evidence\":[{\"content\":\"[Source: master-resume] [Section: **Mahindra & Mahindra Financial Analysis Dashboard | Financial Analytics | Data Visualization | Corporate Finance|** 2025]\\n* Designed and developed an Arduino-powered adaptive spoon using IMU sensors and motion   \\n  stabilization techniques to counteract hand tremors. * Enhanced grip stability and usability, enabling i"
+    },
+    {
+      "name": "live_inject_audio",
+      "passed": true,
+      "required": true,
+      "detail": "{\"success\":true,\"injected_samples\":82095,\"sample_rate\":16000,\"live\":{\"enabled\":true,\"running\":true,\"paused\":false,\"state\":\"live_streaming\",\"state_updated_at\":1776575625.482516,\"session_id\":\"live_78a2f6729ddc\",\"uptime_seconds\":32.7,\"native_live_connected\":false,\"native_live_error\":\"Live connect failed: 1008 None. models/gemini-2.5-flash-live-preview is not found for API version v1beta, or is not supported for bidiGenerateContent. Call\",\"energy_threshold\":450.0,\"interaction_mode\":\"capture\",\"retrieve_mode_armed\":false,\"segments_detected\":12,\"user_turns\":2,\"assistant_turns\":6,\"memory_jobs\":2,\"native_events_seen\":0,\"audio_frames\":6812,\"last_audio_level\":51.04383087158203,\"last_error\":null}}"
+    },
+    {
+      "name": "segments_detected",
+      "passed": true,
+      "required": true,
+      "detail": "{\"enabled\": true, \"running\": true, \"paused\": false, \"state\": \"assistant_responding\", \"state_updated_at\": 1776575628.1730976, \"session_id\": \"live_78a2f6729ddc\", \"uptime_seconds\": 34.7, \"native_live_connected\": false, \"native_live_error\": \"Live connect failed: 1008 None. models/gemini-2.5-flash-live-preview is not found for API version v1beta, or is not supported for bidiGenerateContent. Call\", \"energy_threshold\": 450.0, \"interaction_mode\": \"capture\", \"retrieve_mode_armed\": false, \"segments_detected\": 12, \"user_turns\": 2, \"assistant_turns\": 6, \"memory_jobs\": 2, \"native_events_seen\": 0, \"audio_frames\": 6874, \"last_audio_level\": 186.68032836914062, \"last_error\": null}"
+    },
+    {
+      "name": "live_stop",
+      "passed": true,
+      "required": true,
+      "detail": "{\"success\":true,\"status\":\"idle\",\"mode\":\"gemini_live\"}"
+    },
+    {
+      "name": "live_stopped",
+      "passed": true,
+      "required": true,
+      "detail": "{\"enabled\": true, \"running\": false, \"paused\": false, \"state\": \"assistant_responding\", \"state_updated_at\": 1776575637.1222541, \"session_id\": null, \"uptime_seconds\": 0.0, \"native_live_connected\": false, \"native_live_error\": \"Live connect failed: 1008 None. models/gemini-2.5-flash-live-preview is not found for API version v1beta, or is not supported for bidiGenerateContent. Call\", \"energy_threshold\": 450.0, \"interaction_mode\": \"capture\", \"retrieve_mode_armed\": false, \"segments_detected\": 12, \"user_turns\": 3, \"assistant_turns\": 6, \"memory_jobs\": 2, \"native_events_seen\": 0, \"audio_frames\": 6874, \"last_audio_level\": 186.68032836914062, \"last_error\": null}"
+    },
+    {
+      "name": "conversation_exists",
+      "passed": true,
+      "required": true,
+      "detail": "{\"conversations\": [{\"id\": \"conv_2dc7a6a500f3\", \"turns\": [{\"speaker_label\": \"ASSISTANT\", \"speaker_name\": \"Cortex\", \"text\": \"Hello! How can I help you today? I have received the execution constraints, domain instructions, and the prefetched evidence regarding the 'Predictive Crime Detection System Using CCTV' project and the 'Mahindra & Mahindra Financial Analysis Dashboard'. Please provide a specific query or task based on this information. I cannot directly transcribe audio with the tools I currently have. My available tools are for memory retrieval, query decomposition, pattern analysis, and importance scoring.\", \"timestamp\": 1776575526.942123, \"confidence\": 1.0, \"speaker_confidence\": 1.0, "
+    },
+    {
+      "name": "conversation_turns",
+      "passed": true,
+      "required": true,
+      "detail": "{\"turn_count\": 3}"
+    }
+  ]
+}

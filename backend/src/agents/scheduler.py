@@ -26,6 +26,8 @@ class ScheduledTask:
     agent_id: str
     interval_seconds: int
     last_run: float = 0.0
+    last_reason: str = ""
+    last_event: str = ""
     is_running: bool = False
     run_count: int = 0
     error_count: int = 0
@@ -41,7 +43,7 @@ class BackgroundScheduler:
 
     def __init__(self):
         self._tasks: dict[str, ScheduledTask] = {}
-        self._factories: dict[str, Callable[[], Any]] = {}
+        self._factories: dict[str, Callable[..., Any]] = {}
         self._running = False
         self._tick_interval = 5.0
         self._event_handlers: dict[str, list[str]] = {}
@@ -49,7 +51,7 @@ class BackgroundScheduler:
     def register(
         self,
         agent_id: str,
-        factory: Callable[[], Any],
+        factory: Callable[..., Any],
         interval_seconds: int = 60,
         events: list[str] | None = None,
     ) -> None:
@@ -87,7 +89,7 @@ class BackgroundScheduler:
         for agent_id in agent_ids:
             task = self._tasks.get(agent_id)
             if task and task.enabled and not task.is_running:
-                asyncio.create_task(self._run_task(agent_id))
+                asyncio.create_task(self._run_task(agent_id, reason="event", event_name=event_name, payload=payload))
                 triggered.append(agent_id)
         return triggered
 
@@ -102,10 +104,16 @@ class BackgroundScheduler:
     def status(self) -> dict[str, Any]:
         return {
             "running": self._running,
+            "event_handlers": {
+                event: list(agent_ids)
+                for event, agent_ids in self._event_handlers.items()
+            },
             "tasks": {
                 tid: {
                     "interval_seconds": t.interval_seconds,
                     "last_run": t.last_run,
+                    "last_reason": t.last_reason,
+                    "last_event": t.last_event,
                     "is_running": t.is_running,
                     "run_count": t.run_count,
                     "error_count": t.error_count,
@@ -123,22 +131,34 @@ class BackgroundScheduler:
                     continue
                 elapsed = now - task.last_run
                 if elapsed >= task.interval_seconds:
-                    asyncio.create_task(self._run_task(agent_id))
+                    asyncio.create_task(self._run_task(agent_id, reason="interval"))
             await asyncio.sleep(self._tick_interval)
 
-    async def _run_task(self, agent_id: str) -> None:
+    async def _run_task(
+        self,
+        agent_id: str,
+        *,
+        reason: str,
+        event_name: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> None:
         task = self._tasks.get(agent_id)
         if not task:
             return
 
         task.is_running = True
         task.last_run = time.time()
+        task.last_reason = reason
+        task.last_event = event_name
         task.run_count += 1
 
         try:
             factory = self._factories.get(agent_id)
             if factory:
-                result = factory()
+                try:
+                    result = factory(payload=payload, reason=reason, event_name=event_name)
+                except TypeError:
+                    result = factory()
                 if asyncio.iscoroutine(result):
                     await result
         except Exception as e:

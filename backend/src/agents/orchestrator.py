@@ -12,6 +12,7 @@ Implements:
 """
 
 import asyncio
+import copy
 import hashlib
 import json
 import time
@@ -23,11 +24,12 @@ from src.models import (
     AgentResponse, MemoryQuery, OrchestratorResponse, QueryIntent,
     RetrievalQuality, RetrievalResult, RoutingStrategy,
     PipelineTrace, PipelineStep, QueryTransformTrace,
-    CRAGEvaluation, SelfRAGCritique, FLARETrace
+    CRAGEvaluation, SelfRAGCritique, FLARETrace, AnswerPlan
 )
 from src.llm import LocalLLM
 from src.retrieval.query_engine import QueryAnalyzer, QueryTransformer
 from src.retrieval.hybrid_retriever import HybridRetriever
+from src.retrieval.wiki_planner import WikiRetrievalPlanner
 from src.agents.specialized import (
     SPECIALIZED_AGENT_ORDER,
     build_specialized_agents,
@@ -125,12 +127,20 @@ class AgentOrchestrator:
         self.max_multi_agent_dispatch = 5
         self._response_cache: Dict[str, Dict[str, Any]] = {}
         self._cache_max_entries = 256
+        try:
+            self.wiki_planner: Optional[WikiRetrievalPlanner] = WikiRetrievalPlanner()
+        except Exception:
+            self.wiki_planner = None
 
         # Context compression for evidence (Gap 2.3: LLMLingua-style)
         self.compressor = ContextCompressor(target_ratio=0.5, min_sentences=2)
 
         # Initialize specialized agents
-        self.agents = build_specialized_agents(llm, retriever)
+        self.agents = build_specialized_agents(
+            llm,
+            retriever,
+            runtime_task_manager=self.runtime_task_manager,
+        )
 
         # Domain-specialist keyword signals (used to select secondary agents)
         self.domain_signal_map: Dict[str, List[str]] = {
@@ -138,11 +148,11 @@ class AgentOrchestrator:
             "journaling": ["journal", "diary", "reflection", "write", "entry", "day log"],
             "wellbeing": ["stress", "sleep", "wellbeing", "well-being", "burnout", "energy", "health"],
             "cognitive": ["thinking", "bias", "focus", "attention", "mental model", "cognitive"],
-            "decisions": ["decision", "decide", "choice", "tradeoff", "option", "outcome"],
+            "decision_log": ["decision", "decide", "choice", "tradeoff", "option", "outcome"],
             "emotional": ["emotion", "emotional", "mood", "feeling", "anxiety", "recovery", "trigger"],
             "behavioral": ["habit", "routine", "pattern", "discipline", "consistency", "adherence"],
             "social": ["team", "friend", "family", "relationship", "communication", "conflict", "social"],
-            "goals": ["goal", "vision", "target", "milestone", "objective", "roadmap"],
+            "goal": ["goal", "vision", "target", "milestone", "objective", "roadmap"],
             "meta_learning": ["meta", "learn how", "improve learning", "strategy", "feedback loop", "iteration"],
         }
 
@@ -156,6 +166,11 @@ class AgentOrchestrator:
             QueryIntent.PROCEDURAL: "planning",
             QueryIntent.EXPLORATORY: "planning",
         }
+
+    def _sync_agent_runtime_task_manager(self) -> None:
+        for agent in self.agents.values():
+            if hasattr(agent, "runtime_task_manager"):
+                setattr(agent, "runtime_task_manager", self.runtime_task_manager)
 
     def _new_runtime_loop_state(self, raw_query: str, session_context: str, trace_id: str) -> RuntimeLoopState:
         envelope = RuntimeRequestEnvelope(
@@ -508,6 +523,151 @@ class AgentOrchestrator:
         session_hash = hashlib.md5(ctx.encode("utf-8")).hexdigest()[:8] if ctx else "no_ctx"
         return f"{query_norm}|{session_hash}"
 
+    @staticmethod
+    def _dedupe_preserve(items: List[str]) -> List[str]:
+        seen: set[str] = set()
+        ordered: List[str] = []
+        for item in items:
+            value = str(item or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            ordered.append(value)
+        return ordered
+
+    @staticmethod
+    def _clamp01(value: float) -> float:
+        return max(0.0, min(1.0, float(value)))
+
+    def _build_answer_plan(
+        self,
+        query: MemoryQuery,
+        response: OrchestratorResponse,
+        trace: PipelineTrace,
+        *,
+        stream_mode: bool,
+    ) -> Dict[str, Any]:
+        selected_evidence_ids: List[str] = []
+        source_wiki_pages: List[str] = []
+        source_claim_ids: List[str] = []
+        source_event_ids: List[str] = []
+
+        for result in list(response.evidence or [])[:20]:
+            memory = result.memory
+            memory_id = str(getattr(memory, "id", "") or "").strip()
+            if memory_id:
+                selected_evidence_ids.append(memory_id)
+
+            source = str(getattr(memory, "source", "") or "").strip().lower()
+            metadata = dict(getattr(memory, "metadata", {}) or {})
+
+            if source == "pageindex":
+                pi_doc_id = str(metadata.get("pi_doc_id", "") or "").strip()
+                page = str(metadata.get("page", "") or "").strip()
+                if pi_doc_id:
+                    source_wiki_pages.append(f"pageindex:{pi_doc_id}:{page}" if page else f"pageindex:{pi_doc_id}")
+
+            if source == "wiki" or memory_id.startswith("wiki-"):
+                source_wiki_pages.append(memory_id)
+
+            claim_id = str(metadata.get("claim_id", "") or "").strip()
+            if claim_id:
+                source_claim_ids.append(claim_id)
+
+            claim_ids = metadata.get("claim_ids", [])
+            if isinstance(claim_ids, list):
+                source_claim_ids.extend(str(item) for item in claim_ids if item)
+
+            event_id = str(metadata.get("event_id", "") or "").strip()
+            if event_id:
+                source_event_ids.append(event_id)
+            elif memory_id and not memory_id.startswith("wiki-"):
+                source_event_ids.append(memory_id)
+
+        query_metadata = dict(getattr(query, "metadata", {}) or {})
+        source_wiki_pages.extend(
+            [str(item) for item in list(query_metadata.get("source_wiki_pages", []) or []) if item]
+        )
+        source_claim_ids.extend(
+            [str(item) for item in list(query_metadata.get("source_claim_ids", []) or []) if item]
+        )
+
+        avg_score = 0.0
+        if response.evidence:
+            avg_score = sum(item.score for item in response.evidence) / max(len(response.evidence), 1)
+        crag_score = trace.crag_evaluation.quality_score if trace.crag_evaluation else 0.0
+        self_rag_score = 0.0
+        if trace.self_rag_critique:
+            self_rag_score = (trace.self_rag_critique.avg_score / 10.0)
+        flare_delta = trace.flare_trace.confidence_delta if trace.flare_trace else 0.0
+
+        confidence_composition = {
+            "retrieval_relevance": self._clamp01(avg_score),
+            "crag_quality": self._clamp01(crag_score),
+            "self_rag_quality": self._clamp01(self_rag_score),
+            "flare_delta": self._clamp01(max(0.0, flare_delta)),
+            "final_confidence": self._clamp01(response.confidence),
+        }
+
+        arbitration_notes: List[str] = []
+        coordinator_plan = dict(trace.coordinator_plan or {})
+        potential_conflicts = list(coordinator_plan.get("potential_conflicts", []) or [])
+        if potential_conflicts:
+            arbitration_notes.extend(str(note) for note in potential_conflicts[:4])
+        if trace.crag_evaluation and trace.crag_evaluation.verdict != "CORRECT":
+            arbitration_notes.append(
+                f"CRAG verdict={trace.crag_evaluation.verdict.lower()} quality={trace.crag_evaluation.quality_score:.2f}"
+            )
+        if trace.self_rag_critique and trace.self_rag_critique.verdict not in {"", "ACCEPT"}:
+            arbitration_notes.append(
+                f"Self-RAG verdict={trace.self_rag_critique.verdict.lower()}"
+            )
+
+        generation_policy = "stream_staged_quality" if stream_mode else "full_quality"
+        if query.routing == RoutingStrategy.NO_RETRIEVAL:
+            generation_policy = "direct_generation"
+
+        plan = AnswerPlan(
+            selected_evidence_ids=self._dedupe_preserve(selected_evidence_ids),
+            confidence=self._clamp01(response.confidence),
+            confidence_composition=confidence_composition,
+            arbitration_notes=self._dedupe_preserve(arbitration_notes),
+            generation_policy=generation_policy,
+            citation_required=bool(response.evidence),
+            source_wiki_pages=self._dedupe_preserve(source_wiki_pages),
+            source_claim_ids=self._dedupe_preserve(source_claim_ids),
+            source_event_ids=self._dedupe_preserve(source_event_ids),
+            quality_loops={
+                "crag": bool(trace.crag_evaluation is not None),
+                "self_rag": bool(trace.self_rag_critique is not None),
+                "flare": bool(trace.flare_trace and trace.flare_trace.triggered),
+                "mode": "stream" if stream_mode else "non_stream",
+            },
+        )
+        return plan.to_dict()
+
+    def _attach_retrieval_frontier(self, query: MemoryQuery, trace: PipelineTrace) -> None:
+        if self.wiki_planner is None:
+            return
+
+        try:
+            frontier = self.wiki_planner.build_frontier(query, max_frontier=24)
+        except Exception:
+            return
+
+        metadata = dict(getattr(query, "metadata", {}) or {})
+        metadata["retrieval_frontier"] = frontier
+        metadata["source_wiki_pages"] = list(frontier.get("selected_wiki_pages", []) or [])
+        metadata["source_claim_ids"] = list(frontier.get("selected_claim_ids", []) or [])
+        query.metadata = metadata
+
+        trace.query_analysis["retrieval_frontier"] = {
+            "frontier_size": len(list(frontier.get("frontier", []) or [])),
+            "wiki_pages": len(list(frontier.get("selected_wiki_pages", []) or [])),
+            "claims": len(list(frontier.get("selected_claim_ids", []) or [])),
+            "graph_entities": len(list(frontier.get("selected_graph_entities", []) or [])),
+        }
+
     def _cache_get(self, raw_query: str, session_context: str = "") -> Optional[Dict[str, Any]]:
         """Get a cached payload by normalized query+context key (legacy compatibility API)."""
         return self._response_cache.get(self._make_cache_key(raw_query, session_context))
@@ -695,6 +855,7 @@ class AgentOrchestrator:
         ))
 
         trace.routing_decision = query.routing.value
+        self._attach_retrieval_frontier(query, trace)
 
         # 2b. Function calling check (Stage 13) — try tool use before agent execution
         tool_response = None
@@ -941,6 +1102,9 @@ class AgentOrchestrator:
             "model": "DeepSeek-R1-7B (Fine-Tuned)",
             "quantization": "4-bit",
         }
+        answer_plan = self._build_answer_plan(query, response, trace, stream_mode=False)
+        trace.answer_plan = answer_plan
+        response.answer_plan = answer_plan
         trace.cache_status = {"hit": False, "level": None}
         self._finalize_runtime_loop(trace, runtime_loop)
         response.pipeline_trace = trace
@@ -1044,6 +1208,7 @@ class AgentOrchestrator:
         await pipeline_events.emit_step_complete(trace_id, "Query Transformation", "query_transform", transform_ms, {"total_variants": trace.query_transform.total_variants})
 
         trace.routing_decision = query.routing.value
+        self._attach_retrieval_frontier(query, trace)
 
         # 3. Retrieve evidence (no LLM generation)
         runtime_loop.register_iteration()
@@ -1181,6 +1346,9 @@ class AgentOrchestrator:
         trace.total_duration_ms = response.processing_time_ms
         trace.final_confidence = response.confidence
         trace.evidence_count = len(response.evidence)
+        answer_plan = self._build_answer_plan(query, response, trace, stream_mode=True)
+        trace.answer_plan = answer_plan
+        response.answer_plan = answer_plan
         trace.cache_status = {"hit": False, "level": None}
         self._finalize_runtime_loop(trace, runtime_loop)
         response.pipeline_trace = trace
@@ -1289,6 +1457,7 @@ Assistant:""",
 
     async def _handle_single_step(self, query: MemoryQuery) -> OrchestratorResponse:
         """Handle moderate queries with a single agent."""
+        self._sync_agent_runtime_task_manager()
         selected_agents = self._select_agents(query)
         agent_name = selected_agents[0] if selected_agents else self.intent_to_agent.get(query.intent, "planning")
         query_metadata = dict(getattr(query, "metadata", {}) or {})
@@ -1301,7 +1470,8 @@ Assistant:""",
 
         print(f"  🔀 Routing: SINGLE_STEP → {agent_name} agent")
 
-        agent_response = await agent.execute(query)
+        query_for_agent = copy.deepcopy(query)
+        agent_response = await agent.execute(query_for_agent)
 
         thinking = (
             f"Intent: {query.intent.value} (complexity: {query.complexity:.2f})\n"
@@ -1321,6 +1491,7 @@ Assistant:""",
 
     async def _handle_multi_step(self, query: MemoryQuery, trace: Optional[PipelineTrace] = None) -> OrchestratorResponse:
         """Handle complex queries with multiple agents + Chain-of-Retrieval."""
+        self._sync_agent_runtime_task_manager()
         primary_agent_name = self.intent_to_agent.get(query.intent, "planning")
         agent_names = self._select_agents(query, force_multi_step=True)
         if not agent_names:
@@ -1428,7 +1599,12 @@ Assistant:""",
                     }
                 )
 
-            task = asyncio.create_task(agent.execute(query), name=f"subagent:{name}")
+            query_for_agent = copy.deepcopy(query)
+            query_for_agent.metadata = dict(getattr(query_for_agent, "metadata", {}) or {})
+            query_for_agent.metadata["runtime_parent_task_id"] = subagent_task_id or ""
+            query_for_agent.metadata["runtime_subagent"] = name
+
+            task = asyncio.create_task(agent.execute(query_for_agent), name=f"subagent:{name}")
             if self.runtime_task_manager is not None and subagent_task_id is not None:
                 self.runtime_task_manager.attach_asyncio_task(subagent_task_id, task)
             running_entries.append({"agent": name, "task_id": subagent_task_id, "task": task})
@@ -2030,13 +2206,27 @@ Improved answer (focus on {weak}):"""
             elif tool_name == "delete_memory":
                 memory_id = str(arguments.get("memory_id", "")).strip()
                 if memory_id:
-                    self.retriever.metadata.delete_memory(memory_id)
-                    self.retriever.vectors.delete(memory_id)
+                    deleted = self.retriever.metadata.delete_memory(memory_id)
+                    if deleted:
+                        self.retriever.vectors.delete(memory_id)
+                        try:
+                            self.retriever.graph.remove_memory_references(memory_id)
+                        except Exception:
+                            pass
+                        self.retriever.invalidate_caches()
                     return OrchestratorResponse(
-                        answer=f"Deleted memory {memory_id}.",
+                        answer=(
+                            f"Deleted memory {memory_id}."
+                            if deleted else
+                            f"Memory {memory_id} was not found."
+                        ),
                         agents_used=["function_calling"],
-                        confidence=0.7,
-                        reasoning_trace=f"Function call: delete_memory('{memory_id}') → deleted",
+                        confidence=0.7 if deleted else 0.5,
+                        reasoning_trace=(
+                            f"Function call: delete_memory('{memory_id}') → deleted"
+                            if deleted else
+                            f"Function call: delete_memory('{memory_id}') → not_found"
+                        ),
                     )
 
             # Tool not handled or didn't produce results → fall back to normal pipeline

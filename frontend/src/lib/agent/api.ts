@@ -229,3 +229,19 @@ export async function searchClaims(
     body: JSON.stringify({ query, min_confidence: minConfidence }),
   });
 }
+
+export async function rebuildWikiFromMemories(
+  limit = 300,
+  maxClaimsPerMemory = 10,
+): Promise<{
+  status: string;
+  scanned: number;
+  processed: number;
+  pages_created: number;
+  claims_linked: number;
+}> {
+  return agentFetch("/wiki/rebuild", {
+    method: "POST",
+    body: JSON.stringify({ limit, max_claims_per_memory: maxClaimsPerMemory }),
+  });
+}

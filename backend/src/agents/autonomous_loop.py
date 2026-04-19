@@ -10,6 +10,7 @@ The LLM IS the planner — it decides which tools to call.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -25,6 +26,7 @@ from src.agents.session_persistence import SessionPersistence, CompactionResult
 from src.agents.extension_runner import ExtensionRunner, Extension
 from src.runtime.event_bus import RuntimeEventBus, runtime_events
 from src.runtime.retry import RetryMatrix
+from src.runtime.task_manager import RuntimeTaskManager
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +176,8 @@ class CortexAgentLoop:
         config: AgentConfig,
         llm_fn: Callable[..., Any] | None = None,
         event_bus: RuntimeEventBus | None = None,
+        runtime_task_manager: RuntimeTaskManager | None = None,
+        parent_task_id: str | None = None,
     ):
         self.config = config
         self._llm_fn = llm_fn
@@ -193,6 +197,9 @@ class CortexAgentLoop:
         self._abort_requested = False
         self._trace_id = ""
         self._system_prompt = config.system_prompt
+        self._runtime_task_manager = runtime_task_manager
+        self._parent_task_id = parent_task_id
+        self._active_task_id: str | None = None
 
         # Session
         self.session = SessionPersistence.create(
@@ -250,26 +257,51 @@ class CortexAgentLoop:
         if self.session:
             self.session.append_message(role="user", content=text)
 
+        runtime_task_id = self._start_runtime_task(text)
+        self._active_task_id = runtime_task_id
+
         # STEP 7: Run the core agent loop
-        self._emit(CortexEventType.AGENT_START, {"agent_id": self.config.agent_id})
-        self._is_running = True
-        result = await self._run_agent_loop(messages)
-        self._is_running = False
+        try:
+            self._emit(CortexEventType.AGENT_START, {"agent_id": self.config.agent_id})
+            self._is_running = True
+            result = await self._run_agent_loop(messages)
 
-        # STEP 8: Post-processing
-        self._emit(CortexEventType.AGENT_END, {
-            "agent_id": self.config.agent_id,
-            "turns": self._turn_count,
-        })
-        await self._extension_runner.emit_agent_end(result.get("all_messages", []))
+            # STEP 8: Post-processing
+            final_answer = str(result.get("text", "") or "")
+            self._emit(CortexEventType.AGENT_END, {
+                "agent_id": self.config.agent_id,
+                "turns": self._turn_count,
+                "answer": final_answer,
+                "session_id": self.session.session_id if self.session else "",
+            })
+            await self._extension_runner.emit_agent_end(result.get("all_messages", []))
 
-        # STEP 9: Retry check
-        await self._handle_retry_if_needed(result)
+            # STEP 9: Retry check
+            await self._handle_retry_if_needed(result)
 
-        # STEP 10: Process follow-up queue
-        await self._process_follow_ups()
+            # STEP 10: Process follow-up queue
+            await self._process_follow_ups()
 
-        return result
+            if runtime_task_id:
+                if self._abort_requested:
+                    self._runtime_task_manager.cancel_task(runtime_task_id, reason="agent aborted", propagate=True)
+                elif result.get("error"):
+                    self._runtime_task_manager.mark_task_failed(runtime_task_id, note=str(result.get("error", ""))[:240])
+                else:
+                    self._runtime_task_manager.mark_task_completed(runtime_task_id, note="agent prompt completed")
+
+            return result
+        except asyncio.CancelledError:
+            if runtime_task_id:
+                self._runtime_task_manager.cancel_task(runtime_task_id, reason="agent task cancelled", propagate=True)
+            raise
+        except Exception as e:
+            if runtime_task_id:
+                self._runtime_task_manager.mark_task_failed(runtime_task_id, note=str(e)[:240])
+            raise
+        finally:
+            self._is_running = False
+            self._active_task_id = None
 
     async def steer(self, text: str) -> None:
         self._steering.queue_steer(text)
@@ -282,6 +314,8 @@ class CortexAgentLoop:
     def abort(self) -> None:
         self._abort_requested = True
         self._is_streaming = False
+        if self._runtime_task_manager and self._active_task_id:
+            self._runtime_task_manager.cancel_task(self._active_task_id, reason="abort requested", propagate=True)
 
     def subscribe(self, listener: Callable[[CortexEvent], Any]) -> Callable[[], None]:
         self._listeners.append(listener)
@@ -312,6 +346,11 @@ class CortexAgentLoop:
         self._turn_count = 0
         all_messages = list(initial_messages)
         last_response: dict[str, Any] = {}
+        total_tool_calls_executed = 0
+        no_progress_rounds = 0
+        duplicate_rounds = 0
+        previous_round_signatures: list[str] = []
+        last_tool_result_by_signature: dict[str, str] = {}
 
         while self._turn_count < self.config.max_turns and not self._abort_requested:
             self._turn_count += 1
@@ -366,8 +405,79 @@ class CortexAgentLoop:
                 }
                 break
 
+            current_round_signatures = [self._tool_call_signature(tc) for tc in tool_calls]
+            if current_round_signatures and current_round_signatures == previous_round_signatures and no_progress_rounds >= 1:
+                final_text = await self._force_final_answer_from_context(
+                    all_messages,
+                    reason="duplicate_tool_round_no_progress",
+                )
+                last_response = {
+                    "text": final_text,
+                    "turns": self._turn_count,
+                    "all_messages": all_messages,
+                    "stop_reason": "duplicate_tool_round_no_progress",
+                    "no_progress_rounds": no_progress_rounds,
+                }
+                break
+
+            remaining_tool_budget = max(self.config.max_tool_chain_depth - total_tool_calls_executed, 0)
+            if remaining_tool_budget <= 0:
+                final_text = await self._force_final_answer_from_context(
+                    all_messages,
+                    reason="max_tool_chain_depth_reached",
+                )
+                last_response = {
+                    "text": final_text,
+                    "turns": self._turn_count,
+                    "all_messages": all_messages,
+                    "stop_reason": "max_tool_chain_depth_reached",
+                }
+                break
+
+            if len(tool_calls) > remaining_tool_budget:
+                tool_calls = tool_calls[:remaining_tool_budget]
+
             # Execute tool calls
             tool_results = await self._execute_tools(tool_calls)
+            total_tool_calls_executed += len(tool_calls)
+
+            round_signatures = current_round_signatures
+            round_has_progress = False
+            for tc, tr in zip(tool_calls, tool_results):
+                if tr.is_error:
+                    continue
+                signature = self._tool_call_signature(tc)
+                normalized_content = self._normalize_tool_result_for_progress(tr.content)
+                if not normalized_content:
+                    continue
+                previous_content = last_tool_result_by_signature.get(signature, "")
+                if normalized_content != previous_content:
+                    round_has_progress = True
+                last_tool_result_by_signature[signature] = normalized_content
+
+            if round_signatures and round_signatures == previous_round_signatures:
+                duplicate_rounds += 1
+            else:
+                duplicate_rounds = 0
+            previous_round_signatures = round_signatures
+
+            if round_has_progress:
+                no_progress_rounds = 0
+            else:
+                no_progress_rounds += 1
+
+            if no_progress_rounds >= 3 or duplicate_rounds >= 2:
+                reason = "tool_round_stagnation"
+                final_text = await self._force_final_answer_from_context(all_messages, reason=reason)
+                last_response = {
+                    "text": final_text,
+                    "turns": self._turn_count,
+                    "all_messages": all_messages,
+                    "tool_results": [r.model_dump() for r in tool_results],
+                    "stop_reason": reason,
+                    "no_progress_rounds": no_progress_rounds,
+                }
+                break
 
             # Add to conversation
             all_messages.append({"role": "assistant", "content": assistant_text, "tool_calls": tool_calls})
@@ -394,6 +504,51 @@ class CortexAgentLoop:
             }
 
         return last_response
+
+    @staticmethod
+    def _tool_call_signature(tool_call: dict[str, Any]) -> str:
+        tool_name = str(tool_call.get("name", tool_call.get("function", {}).get("name", "")) or "")
+        raw_params = tool_call.get("arguments", tool_call.get("function", {}).get("arguments", {}))
+        if isinstance(raw_params, str):
+            try:
+                raw_params = json.loads(raw_params)
+            except Exception:
+                raw_params = {"raw": raw_params}
+        if not isinstance(raw_params, dict):
+            raw_params = {"raw": str(raw_params)}
+        try:
+            stable_args = json.dumps(raw_params, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            stable_args = str(raw_params)
+        return f"{tool_name}|{stable_args}"
+
+    @staticmethod
+    def _normalize_tool_result_for_progress(content: str) -> str:
+        normalized = " ".join(str(content or "").split())
+        if not normalized:
+            return ""
+        lowered = normalized.lower()
+        empty_markers = {"[]", "{}", "null", "none", "[empty result]", "\"\""}
+        if lowered in empty_markers:
+            return ""
+        return lowered[:2000]
+
+    async def _force_final_answer_from_context(self, messages: list[dict[str, Any]], reason: str) -> str:
+        guard_instruction = {
+            "role": "user",
+            "content": (
+                "Tool-call guard triggered ("
+                + reason
+                + "). Stop calling tools. Provide your best final answer using only the evidence already in this conversation. "
+                "If evidence is incomplete, explicitly say what is uncertain."
+            ),
+        }
+        context = self._build_context(messages + [guard_instruction], available_tools=[])
+        response = await self._call_llm(context, available_tools=[])
+        text = str(response.get("text", "") or "").strip()
+        if text:
+            return text
+        return "I gathered available evidence but could not converge on additional new information. Please refine the query for a more specific answer."
 
     async def _execute_tools(self, tool_calls: list[dict]) -> list[ToolResult]:
         """Execute tools with lifecycle hooks. Pi-mono: _execute_tools pattern."""
@@ -442,6 +597,33 @@ class CortexAgentLoop:
             except json.JSONDecodeError:
                 raw_params = {"raw": raw_params}
 
+        tool_task_id: str | None = None
+        if self._runtime_task_manager and self._active_task_id:
+            tool_task_id = f"{self._active_task_id}:tool:{tool_name}:{uuid.uuid4().hex[:8]}"
+            try:
+                self._runtime_task_manager.create_task(
+                    task_id=tool_task_id,
+                    parent_task_id=self._active_task_id,
+                    metadata={
+                        "agent_id": self.config.agent_id,
+                        "tool_name": tool_name,
+                        "trace_id": self._trace_id,
+                        "tool_call_id": tool_call_id,
+                    },
+                )
+            except ValueError:
+                tool_task_id = None
+            if tool_task_id:
+                self._runtime_task_manager.mark_task_running(tool_task_id, note="tool execution started")
+
+        def _finish_tool_task(is_error: bool, note: str) -> None:
+            if not tool_task_id:
+                return
+            if is_error:
+                self._runtime_task_manager.mark_task_failed(tool_task_id, note=note[:240])
+            else:
+                self._runtime_task_manager.mark_task_completed(tool_task_id, note=note[:240])
+
         self._emit(CortexEventType.TOOL_EXECUTION_START, {
             "toolCallId": tool_call_id,
             "toolName": tool_name,
@@ -460,6 +642,7 @@ class CortexAgentLoop:
                 "result": result.content,
                 "isError": True,
             })
+            _finish_tool_task(True, result.content)
             return result
 
         # Before hook — can BLOCK
@@ -475,9 +658,17 @@ class CortexAgentLoop:
                 "result": result.content,
                 "isError": True,
             })
+            _finish_tool_task(True, result.content)
             return result
 
         actual_params = gate.params or raw_params
+        if isinstance(actual_params, dict):
+            metadata = dict(actual_params.get("metadata") or {})
+            metadata.setdefault("trace_id", self._trace_id)
+            metadata.setdefault("session_id", self.session.session_id if self.session else "")
+            metadata.setdefault("agent_id", self.config.agent_id)
+            metadata.setdefault("parent_task_id", self._active_task_id or "")
+            actual_params["metadata"] = metadata
 
         # Execute with timeout
         try:
@@ -515,11 +706,44 @@ class CortexAgentLoop:
             "result": result.content[:500],
             "isError": result.is_error,
         })
+        _finish_tool_task(result.is_error, "tool execution completed")
         return result
+
+    # ── Runtime Task Tracking ──────────────────────────────────────────────
+
+    def _start_runtime_task(self, text: str) -> str | None:
+        if self._runtime_task_manager is None:
+            return None
+
+        task_id = f"loop-{self.config.agent_id}-{uuid.uuid4().hex[:12]}"
+        metadata = {
+            "agent_id": self.config.agent_id,
+            "trace_id": self._trace_id,
+            "query_preview": str(text)[:240],
+            "mode": "autonomous_loop",
+        }
+
+        try:
+            self._runtime_task_manager.create_task(
+                task_id=task_id,
+                parent_task_id=self._parent_task_id,
+                metadata=metadata,
+            )
+            self._runtime_task_manager.mark_task_running(task_id, note="agent prompt started")
+            current = asyncio.current_task()
+            if current is not None:
+                self._runtime_task_manager.attach_asyncio_task(task_id, current)
+            return task_id
+        except Exception:
+            return None
 
     # ── LLM Integration ─────────────────────────────────────────────────────
 
-    def _build_context(self, messages: list[dict]) -> list[dict]:
+    def _build_context(
+        self,
+        messages: list[dict],
+        available_tools: Optional[list[ToolDefinition]] = None,
+    ) -> list[dict]:
         """Build context for LLM call, incorporating session history if available."""
         context: list[dict] = []
         if self._system_prompt:
@@ -533,7 +757,8 @@ class CortexAgentLoop:
             if msg.get("role") != "system":
                 context.append(msg)
 
-        tool_descriptions = self._build_tool_descriptions()
+        tools = list(self._tools.values()) if available_tools is None else list(available_tools)
+        tool_descriptions = self._build_tool_descriptions(tools)
         if tool_descriptions and context:
             sys_msg = context[0] if context[0].get("role") == "system" else None
             if sys_msg:
@@ -541,11 +766,11 @@ class CortexAgentLoop:
 
         return context
 
-    def _build_tool_descriptions(self) -> str:
-        if not self._tools:
+    def _build_tool_descriptions(self, tools: list[ToolDefinition]) -> str:
+        if not tools:
             return ""
         lines = ["## Available Tools\n"]
-        for tool in self._tools.values():
+        for tool in tools:
             lines.append(f"### {tool.name}")
             lines.append(f"{tool.description}")
             if tool.prompt_snippet:
@@ -553,10 +778,15 @@ class CortexAgentLoop:
             lines.append("")
         return "\n".join(lines)
 
-    async def _call_llm(self, context: list[dict]) -> dict[str, Any]:
+    async def _call_llm(
+        self,
+        context: list[dict],
+        available_tools: Optional[list[ToolDefinition]] = None,
+    ) -> dict[str, Any]:
         """Call the LLM. Override _llm_fn for custom providers."""
         if self._llm_fn:
-            return await self._llm_fn(context, list(self._tools.values()))
+            tools = list(self._tools.values()) if available_tools is None else list(available_tools)
+            return await self._llm_fn(context, tools)
         return {"text": "[No LLM provider configured]", "tool_calls": []}
 
     # ── Compaction ──────────────────────────────────────────────────────────
@@ -591,7 +821,7 @@ class CortexAgentLoop:
             summary = f"Session summary ({len(messages)} messages compacted):\n{summary_text}"
 
         result = self.session.append_compaction(summary)
-        await self._extension_runner.emit_session_before_compact([])
+        await self._extension_runner.emit_session_compact(summary)
 
         self._emit(CortexEventType.COMPACTION_END, {
             "reason": reason,
@@ -683,10 +913,16 @@ class CortexAgentLoop:
             except Exception:
                 pass
 
+        payload = {
+            **(data or {}),
+            "agent_id": self.config.agent_id,
+            "event_id": event.event_id,
+        }
+
         self._event_bus.emit(
             plane="EVENT_BUS",
             event_type=event_type.value,
-            payload=data or {},
+            payload=payload,
             trace_id=self._trace_id,
             session_id=self.session.session_id if self.session else "",
         )

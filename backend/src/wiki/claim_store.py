@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -66,6 +67,18 @@ class ClaimStore:
         self._claims: dict[str, Claim] = {}
         self._topic_index: dict[str, list[str]] = {}
         self._lock = Lock()
+        self._negation_pattern = re.compile(
+            r"\b(?:not|no|never|none|cannot|can't|dont|don't|didn't|isn't|wasn't|won't|without)\b",
+            re.IGNORECASE,
+        )
+        self._token_pattern = re.compile(r"[a-z0-9']+")
+        self._stop_tokens = {
+            "i", "me", "my", "mine", "you", "your", "yours", "we", "our", "ours",
+            "they", "their", "theirs", "he", "she", "it", "a", "an", "the", "in",
+            "on", "at", "to", "for", "of", "and", "or", "but", "is", "are", "was",
+            "were", "be", "been", "being", "do", "does", "did", "have", "has", "had",
+            "this", "that", "these", "those", "with", "as", "from", "by", "am",
+        }
         self._load()
 
     @classmethod
@@ -104,6 +117,18 @@ class ClaimStore:
                 created_at=now,
                 updated_at=now,
             )
+
+            contradiction = self._find_contradiction_candidate(claim, topic)
+            if contradiction:
+                if contradiction.id not in new_claim.contradiction_ids:
+                    new_claim.contradiction_ids.append(contradiction.id)
+                if new_claim.id not in contradiction.contradiction_ids:
+                    contradiction.contradiction_ids.append(new_claim.id)
+                new_claim.confidence = max(0.1, float(new_claim.confidence) - 0.1)
+                contradiction.confidence = max(0.1, float(contradiction.confidence) - 0.1)
+                contradiction.updated_at = now
+                self._persist_claim(contradiction)
+
             self._claims[claim_id] = new_claim
             if topic:
                 self._topic_index.setdefault(topic, []).append(claim_id)
@@ -143,7 +168,8 @@ class ClaimStore:
         with self._lock:
             claim = self._claims.get(claim_id)
             if claim:
-                claim.contradiction_ids.append(contradicting_claim_id)
+                if contradicting_claim_id not in claim.contradiction_ids:
+                    claim.contradiction_ids.append(contradicting_claim_id)
                 claim.confidence = max(0.1, claim.confidence - 0.1)
                 claim.updated_at = datetime.now(timezone.utc).isoformat()
                 self._persist_claim(claim)
@@ -166,10 +192,47 @@ class ClaimStore:
             }
 
     def _find_similar(self, text: str) -> Claim | None:
-        text_lower = text.lower().strip()
+        text_lower = self._normalize_for_match(text)
         for claim in self._claims.values():
-            if claim.text.lower().strip() == text_lower:
+            if self._normalize_for_match(claim.text) == text_lower:
                 return claim
+        return None
+
+    def _normalize_for_match(self, text: str) -> str:
+        normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        return normalized.rstrip(".!?")
+
+    def _has_negation(self, text: str) -> bool:
+        return bool(self._negation_pattern.search(str(text or "")))
+
+    def _signature(self, text: str) -> str:
+        tokens = []
+        text_lower = str(text or "").lower()
+        for token in self._token_pattern.findall(text_lower):
+            if token in self._stop_tokens:
+                continue
+            if self._negation_pattern.fullmatch(token):
+                continue
+            tokens.append(token)
+        return " ".join(tokens)
+
+    def _find_contradiction_candidate(self, text: str, topic: str) -> Claim | None:
+        incoming_signature = self._signature(text)
+        if not incoming_signature:
+            return None
+
+        incoming_negated = self._has_negation(text)
+        for claim in self._claims.values():
+            if not claim.is_active:
+                continue
+            if topic and claim.topic and claim.topic != topic:
+                continue
+            if self._signature(claim.text) != incoming_signature:
+                continue
+            if self._has_negation(claim.text) == incoming_negated:
+                continue
+            return claim
+
         return None
 
     def _persist_claim(self, claim: Claim) -> None:

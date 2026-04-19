@@ -27,11 +27,9 @@ import os
 import re
 import sys
 import time
-import json
 import argparse
 import requests
-from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 API_BASE = "http://localhost:8000"
@@ -159,17 +157,66 @@ def add_source_context(chunk_text: str, filename: str, section_header: str) -> s
     return f"{context}\n{chunk_text}"
 
 
+def get_system_stats(timeout: int = 5) -> Optional[Dict[str, object]]:
+    """Fetch normalized RAG counters from API.
+
+    Prefers /api/rag/stats (authoritative). Falls back to /api/health
+    for backward compatibility.
+    """
+    # Preferred endpoint: /api/rag/stats
+    try:
+        resp = requests.get(f"{API_BASE}/api/rag/stats", timeout=timeout)
+        if resp.status_code == 200:
+            data = resp.json() or {}
+            mem = data.get("memories", {}) or {}
+            vec = data.get("vectors", {}) or {}
+            graph = data.get("graph", {}) or {}
+            return {
+                "source": "rag/stats",
+                "memories": int(mem.get("memories", 0) or 0),
+                "vectors": int(vec.get("total_vectors", 0) or 0),
+                "graph_nodes": int(graph.get("nodes", 0) or 0),
+                "graph_edges": int(graph.get("edges", 0) or 0),
+                "backend": str(mem.get("backend", "unknown") or "unknown"),
+            }
+    except Exception:
+        pass
+
+    # Fallback endpoint: /api/health
+    try:
+        resp = requests.get(f"{API_BASE}/api/health", timeout=timeout)
+        if resp.status_code == 200:
+            data = resp.json() or {}
+            return {
+                "source": "health",
+                "memories": int(data.get("memories_count", 0) or 0),
+                "vectors": int(data.get("vectors_count", 0) or 0),
+                "graph_nodes": int(data.get("graph_nodes", 0) or 0),
+                "graph_edges": int(data.get("graph_edges", 0) or 0),
+                "backend": str(data.get("memories_backend", "unknown") or "unknown"),
+            }
+    except Exception:
+        pass
+
+    return None
+
+
 def check_backend_health() -> bool:
     """Check if the backend is running and healthy."""
     try:
         resp = requests.get(f"{API_BASE}/api/health", timeout=5)
         if resp.status_code == 200:
-            data = resp.json()
             print(f"  ✅ Backend is healthy")
-            print(f"     RAG initialized: {data.get('rag_initialized', 'unknown')}")
-            print(f"     Memories: {data.get('memories_count', 'unknown')}")
-            print(f"     Vectors: {data.get('vectors_count', 'unknown')}")
-            print(f"     Graph nodes: {data.get('graph_nodes', 'unknown')}")
+
+            stats = get_system_stats(timeout=5)
+            if stats:
+                print(f"     Stats source: {stats['source']}")
+                print(f"     Memories: {stats['memories']} (backend={stats['backend']})")
+                print(f"     Vectors: {stats['vectors']}")
+                print(f"     Graph nodes: {stats['graph_nodes']}")
+                print(f"     Graph edges: {stats['graph_edges']}")
+            else:
+                print("     ⚠ Could not fetch RAG counters")
             return True
         else:
             print(f"  ❌ Backend returned status {resp.status_code}")
@@ -278,6 +325,16 @@ def main():
     # Actual ingestion
     print(f"\n🚀 Starting ingestion ({len(all_chunks)} chunks, {args.delay}s delay)...")
     print("=" * 70)
+
+    baseline_stats = get_system_stats(timeout=8)
+    if baseline_stats:
+        print(
+            "  📌 Baseline: "
+            f"memories={baseline_stats['memories']}, "
+            f"vectors={baseline_stats['vectors']}, "
+            f"nodes={baseline_stats['graph_nodes']}, "
+            f"edges={baseline_stats['graph_edges']}"
+        )
     
     success = 0
     failed = 0
@@ -290,10 +347,11 @@ def main():
             print(f"  [{i}/{len(all_chunks)}] Ingesting from {fname}...", end="", flush=True)
             
             result = ingest_chunk(content=text, source=source)
-            
-            memory_id = result.get("id", "unknown")
-            memory_type = result.get("memory_type", "unknown")
-            topics = result.get("topics", [])
+            memory_payload = result.get("memory", result)
+
+            memory_id = memory_payload.get("id", "unknown")
+            memory_type = memory_payload.get("memory_type", "unknown")
+            topics = memory_payload.get("topics", [])
             
             print(f" ✅ [{memory_type}] topics={topics[:3]}")
             success += 1
@@ -334,16 +392,31 @@ def main():
     
     # Verify final state
     print(f"\n🔍 Verifying final state...")
-    try:
-        resp = requests.get(f"{API_BASE}/api/health", timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            print(f"  📦 Total memories: {data.get('memories_count', '?')}")
-            print(f"  🔢 Total vectors: {data.get('vectors_count', '?')}")
-            print(f"  🕸  Graph nodes: {data.get('graph_nodes', '?')}")
-            print(f"  🔗 Graph edges: {data.get('graph_edges', '?')}")
-    except:
-        print("  ⚠️  Could not verify final state")
+    final_stats = get_system_stats(timeout=8)
+    if final_stats:
+        print(f"  📦 Total memories: {final_stats['memories']} (backend={final_stats['backend']})")
+        print(f"  🔢 Total vectors: {final_stats['vectors']}")
+        print(f"  🕸  Graph nodes: {final_stats['graph_nodes']}")
+        print(f"  🔗 Graph edges: {final_stats['graph_edges']}")
+
+        if baseline_stats:
+            delta_memories = final_stats["memories"] - baseline_stats["memories"]
+            delta_vectors = final_stats["vectors"] - baseline_stats["vectors"]
+            delta_nodes = final_stats["graph_nodes"] - baseline_stats["graph_nodes"]
+            delta_edges = final_stats["graph_edges"] - baseline_stats["graph_edges"]
+
+            print("  Δ Change during this run:")
+            print(f"     Memories: {delta_memories:+d}")
+            print(f"     Vectors: {delta_vectors:+d}")
+            print(f"     Graph nodes: {delta_nodes:+d}")
+            print(f"     Graph edges: {delta_edges:+d}")
+
+            if success > 0 and delta_vectors <= 0:
+                print("  ⚠️  No new vectors added. This can happen when chunks deduplicate against existing memories.")
+            if success > 0 and delta_nodes <= 0 and delta_edges <= 0:
+                print("  ⚠️  No new graph structure added. This can happen when entities already exist or chunks deduplicate.")
+    else:
+        print("  ⚠️  Could not verify final state from /api/rag/stats or /api/health")
     
     print(f"\n✅ Done! Your personal data is now part of Cortex Lab's memory.")
     print(f"   Chat with your AI to ask questions about yourself, your projects, and visions.")

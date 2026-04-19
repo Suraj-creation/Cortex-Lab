@@ -14,6 +14,7 @@ from src.agents.autonomous_loop import (
 from src.agents.cortex_tools import (
     retrieve_memory_tool, search_wiki_tool, search_claims_tool,
     query_graph_tool, search_by_time_tool, classify_query_tier_tool,
+    query_personal_data_tool, get_personal_data_stats_tool,
     analyze_query_intent_tool, spawn_agent_tool, collect_agent_results_tool,
     dissolve_team_tool, arbitrate_conflict_tool, compress_evidence_tool,
     generate_answer_plan_tool, build_event_timeline_tool,
@@ -33,6 +34,7 @@ from src.agents.cortex_prompts import (
     EMOTIONAL_AGENT_PROMPT, BEHAVIORAL_AGENT_PROMPT, SOCIAL_AGENT_PROMPT,
     GOAL_AGENT_PROMPT, META_LEARNING_AGENT_PROMPT, WIKI_AGENT_PROMPT,
     PRESENCE_AGENT_PROMPT, SESSION_CRYSTALLIZER_PROMPT,
+    STRUCTURED_SUMMARY_FORGE_PROMPT,
 )
 
 
@@ -55,6 +57,7 @@ L1_CONFIG = AgentConfig(
     agent_id="l1_orchestrator",
     system_prompt=L1_ORCHESTRATOR_PROMPT,
     tools=[
+        query_personal_data_tool, get_personal_data_stats_tool,
         retrieve_memory_tool, search_wiki_tool, search_claims_tool,
         query_graph_tool, classify_query_tier_tool, analyze_query_intent_tool,
         spawn_agent_tool, collect_agent_results_tool, dissolve_team_tool,
@@ -62,8 +65,8 @@ L1_CONFIG = AgentConfig(
     ],
     extensions=[],
     session_config=SessionConfig(persist=True),
-    max_turns=50,
-    max_tool_chain_depth=10,
+    max_turns=18,
+    max_tool_chain_depth=6,
 )
 
 
@@ -212,7 +215,8 @@ WIKI_AGENT_CONFIG = AgentConfig(
     system_prompt=WIKI_AGENT_PROMPT,
     tools=[
         extract_claims_tool, upsert_claim_tool, patch_wiki_page_tool,
-        create_wiki_page_tool, lint_wiki_page_tool, compact_wiki_section_tool,
+        create_wiki_page_tool, search_wiki_tool, search_claims_tool,
+        lint_wiki_page_tool, compact_wiki_section_tool,
     ],
     session_config=SessionConfig(persist=True, compact_threshold=0.7, max_age_hours=168),
     scheduling=ScheduleConfig(on_ingest=True, daily="02:00"),
@@ -243,6 +247,21 @@ SESSION_CRYSTALLIZER_CONFIG = AgentConfig(
     max_turns=30,
 )
 
+STRUCTURED_SUMMARY_FORGE_CONFIG = AgentConfig(
+    agent_id="structured_summary_forge",
+    system_prompt=STRUCTURED_SUMMARY_FORGE_PROMPT,
+    tools=[
+        retrieve_memory_tool,
+        analyze_pattern_tool,
+        build_event_timeline_tool,
+        patch_wiki_page_tool,
+        create_wiki_page_tool,
+    ],
+    session_config=SessionConfig(persist=True, compact_threshold=0.75),
+    scheduling=ScheduleConfig(interval_min=72 * 60),
+    max_turns=40,
+)
+
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
@@ -259,14 +278,17 @@ ALL_AGENT_CONFIGS: dict[str, AgentConfig] = {
     "wellbeing": WELLBEING_CONFIG,
     "cognitive": COGNITIVE_CONFIG,
     "decision_log": DECISION_LOG_CONFIG,
+    "decisions": DECISION_LOG_CONFIG,
     "emotional": EMOTIONAL_CONFIG,
     "behavioral": BEHAVIORAL_CONFIG,
     "social": SOCIAL_CONFIG,
     "goal": GOAL_CONFIG,
+    "goals": GOAL_CONFIG,
     "meta_learning": META_LEARNING_CONFIG,
     "wiki_agent": WIKI_AGENT_CONFIG,
     "presence": PRESENCE_CONFIG,
     "session_crystallizer": SESSION_CRYSTALLIZER_CONFIG,
+    "structured_summary_forge": STRUCTURED_SUMMARY_FORGE_CONFIG,
 }
 
 L2_AGENT_IDS = [
@@ -275,4 +297,9 @@ L2_AGENT_IDS = [
     "emotional", "behavioral", "social", "goal", "meta_learning",
 ]
 
-BACKGROUND_AGENT_IDS = ["wiki_agent", "presence", "session_crystallizer"]
+BACKGROUND_AGENT_IDS = [
+    "wiki_agent",
+    "presence",
+    "session_crystallizer",
+    "structured_summary_forge",
+]

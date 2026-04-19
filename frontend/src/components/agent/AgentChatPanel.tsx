@@ -68,7 +68,7 @@ export function AgentChatPanel() {
         activeSession = res.session_id;
         setSessionId(activeSession);
         createSession(activeSession, "l1_orchestrator");
-      } catch (err) {
+      } catch {
         setMessages((prev) =>
           prev.map((m) =>
             m.id === assistantMsg.id
@@ -206,7 +206,7 @@ export function AgentChatPanel() {
       </div>
 
       {/* Tool execution panel */}
-      {sessionId && session?.activeTools.length ? (
+      {sessionId && (session?.activeTools.length || session?.completedTools.length) ? (
         <div className="px-4 py-2 border-t border-zinc-800">
           <ToolExecutionPanel sessionId={sessionId} />
         </div>

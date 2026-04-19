@@ -193,8 +193,18 @@ class MemoryIngestionPipeline:
         # 10. Deduplication — skip if near-duplicate exists (>0.95 similarity)
         dedup_result = self._check_deduplication(embedding, memory)
         if dedup_result is not None:
-            print(f"  ♻️  Dedup: skipped ingestion (sim={dedup_result:.3f}), updated existing memory")
-            return None
+            dedup_memory_id, dedup_similarity = dedup_result
+            existing = self.metadata.get_memory(dedup_memory_id)
+            if existing is not None:
+                print(
+                    f"  ♻️  Dedup: reused existing memory {dedup_memory_id} "
+                    f"(sim={dedup_similarity:.3f})"
+                )
+                return existing
+            print(
+                "  ⚠ Dedup candidate missing in metadata; "
+                "continuing as new ingestion"
+            )
 
         # 11. Store everything
         self.vectors.add(memory.id, embedding, memory.timestamp)
@@ -202,6 +212,40 @@ class MemoryIngestionPipeline:
 
         # 12. Update knowledge graph with entities + typed causal edges
         self._update_graph(memory)
+
+        # 13. Deterministic wiki materialization (claim + page updates)
+        wiki_summary = None
+        try:
+            from src.wiki.materializer import materialize_memory_into_wiki
+
+            wiki_summary = materialize_memory_into_wiki(memory.to_dict())
+            self.metadata.update_memory_metadata(
+                memory.id,
+                {"wiki_summary": wiki_summary},
+                merge=True,
+            )
+        except Exception as e:
+            print(f"  ⚠ Wiki materialization failed for {memory.id}: {e}")
+
+        # 14. Unified scheduler event trigger for all ingestion paths
+        try:
+            from src.agents.scheduler import background_scheduler
+
+            await background_scheduler.trigger_event(
+                "memory_ingested",
+                {
+                    "memory_id": memory.id,
+                    "source": source,
+                    "session_id": session_id,
+                    "preview": content[:240],
+                    "content": content[:2000],
+                    "topics": list(memory.topics or []),
+                    "propositions": list(memory.propositions or []),
+                    "wiki_summary": wiki_summary or {},
+                },
+            )
+        except Exception as e:
+            print(f"  ⚠ memory_ingested trigger failed for {memory.id}: {e}")
 
         elapsed_ms = (time.time() - t0) * 1000
         print(f"  📝 Memory ingested: [{memory.memory_type.value}] {content[:60]}... ({elapsed_ms:.0f}ms)")
@@ -564,9 +608,10 @@ class MemoryIngestionPipeline:
             parts.append(f"Involves: {', '.join(memory.entities[:3])}.")
         return " ".join(parts) if parts else ""
 
-    def _check_deduplication(self, embedding: np.ndarray, memory: 'CausalMemoryObject') -> Optional[float]:
+    def _check_deduplication(self, embedding: np.ndarray, memory: 'CausalMemoryObject') -> Optional[Tuple[str, float]]:
         """Check if a near-duplicate memory exists (cosine sim > 0.95).
-        If so, update the existing memory's timestamp and return the similarity score.
+        If so, update the existing memory's timestamp and return
+        (existing_memory_id, similarity_score).
         Returns None if no duplicate found (memory should be stored)."""
         if self.vectors.count() == 0:
             return None
@@ -578,11 +623,21 @@ class MemoryIngestionPipeline:
                 try:
                     existing = self.metadata.get_memory(mem_id)
                     if existing:
-                        # Update last_seen timestamp on the existing memory
-                        self.metadata.update_memory_timestamp(mem_id, datetime.now())
+                        # Update recency + dedup trace on the existing memory.
+                        refreshed_at = datetime.now()
+                        updated = self.metadata.update_memory_timestamp(mem_id, refreshed_at)
+                        if updated:
+                            self.metadata.update_memory_metadata(
+                                mem_id,
+                                {
+                                    "last_dedup_at": refreshed_at.isoformat(),
+                                    "last_dedup_similarity": round(float(sim_score), 4),
+                                },
+                                merge=True,
+                            )
                 except Exception:
                     pass
-                return sim_score
+                return mem_id, sim_score
 
         return None
 

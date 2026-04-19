@@ -22,7 +22,7 @@ import { TextInput } from '../components/ui/TextInput';
 import { NeuralPulse } from '../components/ui/NeuralPulse';
 import { AppIcon } from '../components/ui/AppIcon';
 import type {
-  AmbientState, AmbientConfig, VoiceProviders,
+  AmbientState, AmbientLiveStatus, AmbientConfig, VoiceProviders,
   ConversationTurn, ConversationRecord,
 } from '../../shared/core/types';
 import type { TTSStatus } from '../../shared/core/api';
@@ -39,6 +39,7 @@ function fmtDuration(s: number): string {
 
 interface AmbientVoiceScreenProps {
   ambientState: AmbientState | null;
+  ambientLiveStatus: AmbientLiveStatus | null;
   ambientConfig: AmbientConfig | null;
   ambientEnrollment: { enrolled: boolean; speaker_id_available?: boolean } | null;
   ambientProviders: VoiceProviders | null;
@@ -52,6 +53,7 @@ interface AmbientVoiceScreenProps {
   ttsBusy: boolean;
   ttsLastBytes: number | null;
   onAmbientAction: (a: 'start' | 'stop' | 'pause' | 'resume') => void;
+  onAmbientLiveAction: (a: 'start' | 'stop') => void;
   onSetProvider: (kind: 'stt' | 'tts', provider: 'traditional' | 'local' | 'gemini') => void;
   onStartEnrollment: () => void;
   onToggleAutoIngest: () => void;
@@ -112,10 +114,10 @@ const hero = StyleSheet.create({
 });
 
 export function AmbientVoiceScreen({
-  ambientState, ambientConfig, ambientEnrollment, ambientProviders,
+  ambientState, ambientLiveStatus, ambientConfig, ambientEnrollment, ambientProviders,
   ambientTurns, ambientConversations, ambientTTSStatus,
   ambientBusy, loadingView, ttsDraft, setTtsDraft, ttsBusy, ttsLastBytes,
-  onAmbientAction, onSetProvider, onStartEnrollment, onToggleAutoIngest, onRunTTS,
+  onAmbientAction, onAmbientLiveAction, onSetProvider, onStartEnrollment, onToggleAutoIngest, onRunTTS,
 }: AmbientVoiceScreenProps) {
   const isListening = ambientState?.status === 'listening' || ambientState?.status === 'speech_detected' || ambientState?.status === 'transcribing';
 
@@ -180,6 +182,41 @@ export function AmbientVoiceScreen({
           <Button label="Resume" size="sm" variant="outline"   onPress={() => onAmbientAction('resume')} disabled={ambientBusy || ambientState?.status !== 'paused'} />
           <Button label="Stop"   size="sm" variant="error"     onPress={() => onAmbientAction('stop')}   disabled={ambientBusy || (ambientState?.status === 'idle' && !isListening)} />
         </View>
+
+        {/* Gemini Live mode */}
+        <Card variant="outlined" style={s.card}>
+          <View style={s.liveHeader}>
+            <Text style={s.cardTitle}>Gemini Live Mode</Text>
+            <Badge
+              label={ambientLiveStatus?.running ? 'Live Running' : 'Live Stopped'}
+              variant={ambientLiveStatus?.running ? 'success' : 'ghost'}
+              dot={Boolean(ambientLiveStatus?.running)}
+            />
+          </View>
+          <View style={s.statusBadgesWrap}>
+            <Badge label={`State: ${ambientLiveStatus?.state || 'idle_listening'}`} variant="info" small />
+            <Badge label={`Mode: ${ambientLiveStatus?.interaction_mode || 'capture'}`} variant="secondary" small />
+            <Badge label={`Turns: ${ambientLiveStatus?.user_turns || 0}/${ambientLiveStatus?.assistant_turns || 0}`} variant="tertiary" small />
+          </View>
+          {ambientLiveStatus?.native_live_error ? (
+            <Text style={s.liveError} numberOfLines={3}>{ambientLiveStatus.native_live_error}</Text>
+          ) : null}
+          <View style={s.btnRow}>
+            <Button
+              label="Start Live"
+              size="sm"
+              onPress={() => onAmbientLiveAction('start')}
+              disabled={ambientBusy || Boolean(ambientLiveStatus?.running)}
+            />
+            <Button
+              label="Stop Live"
+              size="sm"
+              variant="error"
+              onPress={() => onAmbientLiveAction('stop')}
+              disabled={ambientBusy || !ambientLiveStatus?.running}
+            />
+          </View>
+        </Card>
 
         {/* STT Provider */}
         <Card variant="outlined" style={s.card}>
@@ -378,6 +415,9 @@ const s = StyleSheet.create({
 
   card: { marginHorizontal: SPACING.lg, marginBottom: SPACING.md, gap: SPACING.sm },
   cardTitle: { fontSize: FONT_SIZE.base, fontWeight: FONT_WEIGHT.bold, color: NEURAL.onSurface },
+  liveHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: SPACING.sm },
+  statusBadgesWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING.xs },
+  liveError: { fontSize: FONT_SIZE.xs, color: NEURAL.error, lineHeight: FONT_SIZE.xs * 1.4 },
 
   segmentRow: { flexDirection: 'row', gap: SPACING.sm },
   segmentBtn: {

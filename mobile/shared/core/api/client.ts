@@ -1,13 +1,23 @@
 import {
+  AgentConfigInfo,
+  AgentQueryResponse,
+  AgentSessionInfo,
   AmbientConfig,
+  AmbientLiveStatus,
   AmbientState,
   ChatSettings,
   ConversationRecord,
   ConversationTurn,
+  CortexEvent,
   DEFAULT_SETTINGS,
   EvidenceCard,
   GraphData,
   InferenceMode,
+  RuntimeExecutorStatus,
+  RuntimePermissionRequest,
+  RuntimeTaskEvent,
+  RuntimeTaskListResponse,
+  RuntimeTaskSnapshot,
   LLMProviderType,
   LivePipelineEvent,
   MemoryObject,
@@ -17,7 +27,11 @@ import {
   QueryAnalysis,
   RAGStats,
   RuntimeSelection,
+  TierClassification,
   TracesResponse,
+  WikiCompactionSummary,
+  WikiLintSummary,
+  WikiPageInfo,
   VoiceQueryResult,
   VoiceProviders,
   VoiceProviderType,
@@ -129,6 +143,51 @@ export interface LiveTranscriptResponse {
   turns: ConversationTurn[];
 }
 
+export interface AgentStreamRequest {
+  query: string;
+  sessionId?: string | null;
+  tierOverride?: string;
+}
+
+export interface AgentStreamResult {
+  sessionId: string | null;
+  answer: string;
+}
+
+export interface AgentStreamHandlers {
+  onEvent?: (event: CortexEvent) => void;
+  onDone?: (result: AgentStreamResult) => void;
+  onError?: (error: Error) => void;
+}
+
+export interface AgentEventStreamHandlers {
+  onEvent: (event: CortexEvent) => void;
+  onError?: (error: Error) => void;
+}
+
+export interface RuntimePermissionsResponse {
+  count: number;
+  pending: RuntimePermissionRequest[];
+  expired_count?: number;
+}
+
+export interface RuntimeResolvePermissionResponse {
+  resolved: RuntimePermissionRequest;
+}
+
+export interface RuntimeTaskResponse {
+  task: RuntimeTaskSnapshot;
+}
+
+export interface RuntimeCancelTaskResponse {
+  cancelled_task_ids: string[];
+}
+
+export interface RuntimeTaskStreamHandlers {
+  onEvent: (event: RuntimeTaskEvent) => void;
+  onError?: (error: Error) => void;
+}
+
 function normalizeBaseUrl(rawBaseUrl: string): string {
   return rawBaseUrl.endsWith("/") ? rawBaseUrl.slice(0, -1) : rawBaseUrl;
 }
@@ -171,6 +230,48 @@ async function parseError(res: Response): Promise<Error> {
     .then((data) => (typeof data?.detail === "string" ? data.detail : undefined))
     .catch(() => undefined);
   return new Error(detail || `Request failed with status ${res.status}`);
+}
+
+async function consumeSSE(
+  res: Response,
+  onData: (payload: unknown) => void,
+): Promise<void> {
+  if (!res.ok || !res.body) {
+    throw await parseError(res);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      return;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line.startsWith("data: ")) {
+        continue;
+      }
+
+      const jsonPayload = line.slice(6).trim();
+      if (!jsonPayload) {
+        continue;
+      }
+
+      try {
+        onData(JSON.parse(jsonPayload));
+      } catch {
+        // Skip malformed payloads.
+      }
+    }
+  }
 }
 
 export function createApiClient(config: ApiConfig) {
@@ -385,6 +486,105 @@ export function createApiClient(config: ApiConfig) {
     return res.json();
   }
 
+  async function getRuntimeSafetyPermissions(): Promise<RuntimePermissionsResponse> {
+    const res = await fetch(`${baseUrl}/runtime/safety/permissions`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function getRuntimeSafetyExecutorStatus(): Promise<RuntimeExecutorStatus> {
+    const res = await fetch(`${baseUrl}/runtime/safety/executor`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function resolveRuntimeSafetyPermission(
+    permissionId: string,
+    approve: boolean,
+    actor: string = "mobile-operator",
+    note: string = "",
+  ): Promise<RuntimeResolvePermissionResponse> {
+    const res = await fetch(
+      `${baseUrl}/runtime/safety/permissions/${encodeURIComponent(permissionId)}/resolve`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approve, actor, note }),
+      },
+    );
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function getRuntimeTasks(): Promise<RuntimeTaskListResponse> {
+    const res = await fetch(`${baseUrl}/runtime/tasks`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function getRuntimeTask(taskId: string): Promise<RuntimeTaskResponse> {
+    const res = await fetch(`${baseUrl}/runtime/tasks/${encodeURIComponent(taskId)}`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function cancelRuntimeTask(
+    taskId: string,
+    reason: string = "Cancelled from mobile runtime center",
+    propagate: boolean = true,
+  ): Promise<RuntimeCancelTaskResponse> {
+    const res = await fetch(`${baseUrl}/runtime/tasks/${encodeURIComponent(taskId)}/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason, propagate }),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  function subscribeRuntimeTaskEvents(
+    handlers: RuntimeTaskStreamHandlers,
+  ): AbortController {
+    const controller = new AbortController();
+
+    (async () => {
+      try {
+        const res = await fetch(`${baseUrl}/runtime/tasks/events`, {
+          signal: controller.signal,
+          headers: { Accept: "text/event-stream" },
+        });
+
+        await consumeSSE(res, (payload) => {
+          handlers.onEvent(payload as RuntimeTaskEvent);
+        });
+      } catch (error) {
+        const abortLike =
+          typeof error === "object" &&
+          error !== null &&
+          "name" in error &&
+          (error as { name?: string }).name === "AbortError";
+        if (abortLike) {
+          return;
+        }
+        handlers.onError?.(error instanceof Error ? error : new Error(String(error)));
+      }
+    })();
+
+    return controller;
+  }
+
   async function getModelpackManifest(): Promise<ModelpackManifest> {
     const res = await fetch(`${baseUrl}/modelpacks/manifest`);
     if (!res.ok) {
@@ -547,37 +747,18 @@ export function createApiClient(config: ApiConfig) {
           headers: { Accept: "text/event-stream" },
         });
 
-        if (!res.ok || !res.body) {
-          throw await parseError(res);
-        }
-
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) {
-            return;
-          }
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) {
-              continue;
-            }
-            try {
-              const payload = JSON.parse(line.slice(6)) as LivePipelineEvent;
-              onEvent(payload);
-            } catch {
-              // Skip malformed payloads.
-            }
-          }
-        }
+        await consumeSSE(res, (payload) => {
+          onEvent(payload as LivePipelineEvent);
+        });
       } catch (error) {
+        const abortLike =
+          typeof error === "object" &&
+          error !== null &&
+          "name" in error &&
+          (error as { name?: string }).name === "AbortError";
+        if (abortLike) {
+          return;
+        }
         onError?.(error instanceof Error ? error : new Error(String(error)));
       }
     })();
@@ -599,6 +780,62 @@ export function createApiClient(config: ApiConfig) {
       throw await parseError(res);
     }
     return res.json();
+  }
+
+  async function startAmbientLive(): Promise<{
+    success: boolean;
+    status: string;
+    mode?: string;
+    live?: AmbientLiveStatus;
+    error?: string;
+  }> {
+    const res = await fetch(`${baseUrl}/ambient/live/start`, { method: "POST" });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function stopAmbientLive(): Promise<{ success: boolean; status: string; mode?: string }> {
+    const res = await fetch(`${baseUrl}/ambient/live/stop`, { method: "POST" });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function getAmbientLiveStatus(): Promise<AmbientLiveStatus> {
+    const res = await fetch(`${baseUrl}/ambient/live/status`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function injectAmbientLiveAudio(
+    audioBase64: string,
+    sampleRateHz: number = 16000,
+  ): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/ambient/live/inject-audio`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ audio_base64: audioBase64, sample_rate: sampleRateHz }),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function setSpeakerAlias(speakerLabel: string, name: string): Promise<void> {
+    const res = await fetch(`${baseUrl}/ambient/speaker-alias`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ speaker_label: speakerLabel, name }),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
   }
 
   async function getAmbientConfig(): Promise<AmbientConfig> {
@@ -755,6 +992,343 @@ export function createApiClient(config: ApiConfig) {
     return res.json();
   }
 
+  async function createAgentSession(
+    agentId: string = "l1_orchestrator",
+    title?: string,
+  ): Promise<{ session_id: string; agent_id: string; status: string }> {
+    const res = await fetch(`${baseUrl}/agent/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agent_id: agentId, title }),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function listAgentSessions(): Promise<{ sessions: AgentSessionInfo[]; count: number }> {
+    const res = await fetch(`${baseUrl}/agent/sessions`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function getAgentSession(sessionId: string): Promise<AgentSessionInfo> {
+    const res = await fetch(`${baseUrl}/agent/sessions/${encodeURIComponent(sessionId)}`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function closeAgentSession(
+    sessionId: string,
+  ): Promise<{ session_id: string; status: string }> {
+    const res = await fetch(`${baseUrl}/agent/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function agentQuery(
+    query: string,
+    sessionId?: string | null,
+    tierOverride?: string,
+  ): Promise<AgentQueryResponse> {
+    const res = await fetch(`${baseUrl}/agent/query`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query,
+        session_id: sessionId || null,
+        tier_override: tierOverride,
+      }),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function streamAgentQuery(
+    request: AgentStreamRequest,
+    handlers: AgentStreamHandlers,
+  ): Promise<AgentStreamResult> {
+    const res = await fetch(`${baseUrl}/agent/query/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query: request.query,
+        session_id: request.sessionId || null,
+        tier_override: request.tierOverride,
+      }),
+    });
+
+    let sessionId: string | null = request.sessionId || null;
+    let answer = "";
+
+    try {
+      await consumeSSE(res, (payload) => {
+        const event = payload as CortexEvent;
+        if (event.session_id && !sessionId) {
+          sessionId = event.session_id;
+        }
+        if (
+          event.type === "agent_end" &&
+          typeof event.data?.answer === "string"
+        ) {
+          answer = String(event.data.answer);
+        }
+        handlers.onEvent?.(event);
+      });
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      handlers.onError?.(err);
+      throw err;
+    }
+
+    const result = { sessionId, answer };
+    handlers.onDone?.(result);
+    return result;
+  }
+
+  function subscribeAgentEvents(handlers: AgentEventStreamHandlers): AbortController {
+    const controller = new AbortController();
+
+    (async () => {
+      try {
+        const res = await fetch(`${baseUrl}/agent/events`, {
+          signal: controller.signal,
+          headers: { Accept: "text/event-stream" },
+        });
+
+        await consumeSSE(res, (payload) => {
+          handlers.onEvent(payload as CortexEvent);
+        });
+      } catch (error) {
+        const abortLike =
+          typeof error === "object" &&
+          error !== null &&
+          "name" in error &&
+          (error as { name?: string }).name === "AbortError";
+        if (abortLike) {
+          return;
+        }
+        handlers.onError?.(error instanceof Error ? error : new Error(String(error)));
+      }
+    })();
+
+    return controller;
+  }
+
+  async function classifyQueryTier(query: string): Promise<TierClassification> {
+    const res = await fetch(`${baseUrl}/agent/classify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query }),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function steerAgent(
+    sessionId: string,
+    text: string,
+  ): Promise<{ status: string; queue: { steering: string[]; followUp: string[] } }> {
+    const res = await fetch(`${baseUrl}/agent/sessions/${encodeURIComponent(sessionId)}/steer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function followUpAgent(
+    sessionId: string,
+    text: string,
+  ): Promise<{ status: string; queue: { steering: string[]; followUp: string[] } }> {
+    const res = await fetch(`${baseUrl}/agent/sessions/${encodeURIComponent(sessionId)}/follow-up`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function abortAgent(
+    sessionId: string,
+  ): Promise<{ status: string; session_id: string }> {
+    const res = await fetch(`${baseUrl}/agent/sessions/${encodeURIComponent(sessionId)}/abort`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function listAgentConfigs(): Promise<{ agents: AgentConfigInfo[]; count: number }> {
+    const res = await fetch(`${baseUrl}/agent/configs`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function listWikiPages(): Promise<{
+    pages: WikiPageInfo[];
+    stats: { total_pages: number; total_topics: number; total_linked_claims: number };
+    error?: string;
+  }> {
+    const res = await fetch(`${baseUrl}/wiki/pages`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function getWikiPage(pageId: string): Promise<WikiPageInfo> {
+    const res = await fetch(`${baseUrl}/wiki/pages/${encodeURIComponent(pageId)}`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function searchWiki(
+    query: string,
+    includeClaims: boolean = true,
+  ): Promise<{ results: WikiPageInfo[] }> {
+    const res = await fetch(`${baseUrl}/wiki/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, include_claims: includeClaims }),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function getClaimStats(): Promise<{ total: number; active: number; topics: number }> {
+    const res = await fetch(`${baseUrl}/wiki/claims`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function searchClaims(
+    query: string,
+    minConfidence: number = 0.5,
+  ): Promise<{
+    claims: Array<{
+      id: string;
+      text: string;
+      confidence: number;
+      source_ids: string[];
+      topic: string;
+    }>;
+  }> {
+    const res = await fetch(`${baseUrl}/wiki/claims/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, min_confidence: minConfidence }),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function rebuildWikiFromMemories(
+    limit: number = 300,
+    maxClaimsPerMemory: number = 10,
+  ): Promise<{
+    status: string;
+    scanned: number;
+    processed: number;
+    pages_created: number;
+    claims_linked: number;
+  }> {
+    const res = await fetch(`${baseUrl}/wiki/rebuild`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        limit,
+        max_claims_per_memory: maxClaimsPerMemory,
+      }),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function getWikiLintLatest(): Promise<WikiLintSummary> {
+    const res = await fetch(`${baseUrl}/wiki/lint/latest`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function runWikiLint(body?: {
+    page_id?: string;
+    stale_days?: number;
+    min_confidence?: number;
+    limit?: number;
+  }): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/wiki/lint/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function getWikiCompactionLatest(): Promise<WikiCompactionSummary> {
+    const res = await fetch(`${baseUrl}/wiki/compaction/latest`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function runWikiCompaction(body?: {
+    page_id?: string;
+    section?: string;
+    max_tokens?: number;
+    section_limit?: number;
+    limit?: number;
+  }): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/wiki/compaction/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
   async function deleteDocument(docId: string): Promise<{ status: string; doc_id: string }> {
     const res = await fetch(`${baseUrl}/documents/${docId}`, { method: "DELETE" });
     if (!res.ok) {
@@ -818,6 +1392,13 @@ export function createApiClient(config: ApiConfig) {
     getRuntimeProviders,
     setRuntimeProviders,
     getRuntimeHealth,
+    getRuntimeSafetyPermissions,
+    getRuntimeSafetyExecutorStatus,
+    resolveRuntimeSafetyPermission,
+    getRuntimeTasks,
+    getRuntimeTask,
+    cancelRuntimeTask,
+    subscribeRuntimeTaskEvents,
     getModelpackManifest,
     verifyModelpack,
     getMemories,
@@ -839,11 +1420,16 @@ export function createApiClient(config: ApiConfig) {
     getObservabilityMetrics,
     getAmbientStatus,
     ambientAction,
+    startAmbientLive,
+    stopAmbientLive,
+    getAmbientLiveStatus,
+    injectAmbientLiveAudio,
     getAmbientConfig,
     updateAmbientConfig,
     getVoiceProviders,
     setSTTProvider,
     setTTSProvider,
+    setSpeakerAlias,
     getConversations,
     getConversation,
     getLiveTranscript,
@@ -852,8 +1438,32 @@ export function createApiClient(config: ApiConfig) {
     getTTSStatus,
     synthesizeSpeech,
     voiceQuery,
+    createAgentSession,
+    listAgentSessions,
+    getAgentSession,
+    closeAgentSession,
+    agentQuery,
+    streamAgentQuery,
+    subscribeAgentEvents,
+    classifyQueryTier,
+    steerAgent,
+    followUpAgent,
+    abortAgent,
+    listAgentConfigs,
+    listWikiPages,
+    getWikiPage,
+    searchWiki,
+    getClaimStats,
+    searchClaims,
+    rebuildWikiFromMemories,
+    getWikiLintLatest,
+    runWikiLint,
+    getWikiCompactionLatest,
+    runWikiCompaction,
   };
 }
+
+export type ApiClient = ReturnType<typeof createApiClient>;
 
 export function getDefaultApiBaseUrl(): string {
   const envBase =

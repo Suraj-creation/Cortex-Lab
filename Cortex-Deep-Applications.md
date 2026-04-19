@@ -23,6 +23,7 @@
 12. [Agent Communication Architecture for Long-Horizon Tasks](#12-agent-communication-architecture-for-long-horizon-tasks)
 13. [Device Control + Ambient Sensing Architecture](#13-device-control--ambient-sensing-architecture)
 14. [Implementation Priorities and Sequence](#14-implementation-priorities-and-sequence)
+15. [Web Frontend Observability and Long-Running Work UX](#15-web-frontend-observability-and-long-running-work-ux)
 
 ---
 
@@ -868,6 +869,77 @@ Focus: the two applications that provide the highest immediate value and build t
 1. **Decision Oracle** — requires Decision Log Agent data from 6+ months of Phase 1
 2. **Personal Knowledge Amplifier** — requires mature wiki + Knowledge Graph
 3. **Full Device Control** — ambient capture modes, full Android device command integration
+
+## 15. Web Frontend Observability and Long-Running Work UX
+
+### 15.1 Why This Is Core, Not Optional
+
+This system is intentionally long-running and background-heavy. Queries in T3/T4, Session Forge pipelines, wiki governance jobs, and Chronicle saves can take time. If users cannot see what is happening, trust collapses. Observability in the web app is therefore a product requirement, not a developer dashboard feature.
+
+### 15.2 Canonical Runtime Naming and APIs (Current Backend)
+
+Use these names and routes as authoritative in frontend contracts:
+
+- Agent IDs: `l0_master`, `l1_orchestrator`, `decision_log`, `goal`, `wiki_agent`, `presence`, `session_crystallizer`, `structured_summary_forge`
+- Runtime task APIs: `/api/runtime/tasks`, `/api/runtime/tasks/events`, `/api/runtime/tasks/{task_id}`
+- Runtime and scheduler health: `/api/runtime/health`, `/api/agent/scheduler/status`
+- Agent event stream: `/api/agent/events`
+- Deep app APIs: `/api/deep/session-forge/*`, `/api/chronicle/passive/*`, `/api/wiki/lint/*`, `/api/wiki/compaction/*`
+
+### 15.3 Required Web App Surfaces
+
+1. Runtime Operations Center
+  - real-time cards for active agents, active tasks, queue depth, blocked work, waiting approvals
+  - provider and scheduler health indicators
+2. Live Agent and Task Graph
+  - graph showing which agents spawned which tasks
+  - parent-child chain and current state coloring
+3. Long-Running Work Queue
+  - columns for queued, running, blocked, waiting approval, completed, failed, cancelled
+  - filtering by session_id, trace_id, agent_id
+4. Background Continuity Strip
+  - persistent status bar showing work continues after navigation/refresh
+  - one-click jump back to task detail
+5. Trace and Event Timeline Drawer
+  - per-task event replay from creation to completion
+  - inline errors, retries, cancellation reason, and quality-loop events
+
+### 15.4 Required Event Model for Deep Observability
+
+Unify UI event handling around one normalized event schema:
+
+- `event_id`
+- `event_type`
+- `timestamp`
+- `trace_id`
+- `session_id`
+- `agent_id`
+- `task_id`
+- `parent_task_id`
+- `state`
+- `note`
+- `payload`
+
+This enables one timeline renderer for both `/api/runtime/tasks/events` and `/api/agent/events`.
+
+### 15.5 Frontend TODO Backlog (Execution Order)
+
+1. Build SSE client with reconnect/backoff and stale-stream detection.
+2. Build global runtime store to merge task and agent streams.
+3. Build Runtime Operations Center and queue counters.
+4. Build task board with lifecycle columns and state badges.
+5. Build graph visualization for agent-task lineage.
+6. Build task detail with trace timeline and artifact links.
+7. Add persisted resume state to restore active work after reload.
+8. Add polling fallback when SSE is unavailable.
+9. Add user-facing notifications for blocked, failed, and approval-waiting states.
+
+### 15.6 UX Success Metrics
+
+- Users should see first live status within 500 ms.
+- No silent waiting longer than 2 seconds without visible progress signal.
+- Reconnect after network drop should recover live status in under 3 seconds.
+- At least 95% of long-running tasks should show full lifecycle in the timeline.
 
 ---
 

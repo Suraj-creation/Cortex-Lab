@@ -9,6 +9,7 @@ import {
   EvidenceCard,
   ModelpackManifest,
   AmbientState,
+  AmbientLiveStatus,
   AmbientConfig,
   ConversationRecord,
   VoiceQueryResult,
@@ -609,9 +610,27 @@ export async function startAmbient(): Promise<{ success: boolean; error?: string
   return res.json();
 }
 
+export async function startAmbientLive(): Promise<{
+  success: boolean;
+  status: string;
+  mode?: string;
+  live?: AmbientLiveStatus;
+  error?: string;
+}> {
+  const res = await fetch(`${API_BASE}/ambient/live/start`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to start ambient live mode: ${res.status}`);
+  return res.json();
+}
+
 export async function stopAmbient(): Promise<{ success: boolean; status: string }> {
   const res = await fetch(`${API_BASE}/ambient/stop`, { method: "POST" });
   if (!res.ok) throw new Error(`Failed to stop ambient: ${res.status}`);
+  return res.json();
+}
+
+export async function stopAmbientLive(): Promise<{ success: boolean; status: string; mode?: string }> {
+  const res = await fetch(`${API_BASE}/ambient/live/stop`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to stop ambient live mode: ${res.status}`);
   return res.json();
 }
 
@@ -630,6 +649,12 @@ export async function resumeAmbient(): Promise<{ success: boolean; status: strin
 export async function getAmbientStatus(): Promise<AmbientState> {
   const res = await fetch(`${API_BASE}/ambient/status`);
   if (!res.ok) throw new Error(`Failed to fetch ambient status: ${res.status}`);
+  return res.json();
+}
+
+export async function getAmbientLiveStatus(): Promise<AmbientLiveStatus> {
+  const res = await fetch(`${API_BASE}/ambient/live/status`);
+  if (!res.ok) throw new Error(`Failed to fetch ambient live status: ${res.status}`);
   return res.json();
 }
 

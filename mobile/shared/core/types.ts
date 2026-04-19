@@ -322,6 +322,35 @@ export type AmbientStatusType =
 
 export type VoiceProviderType = "traditional" | "gemini" | "local";
 
+export type AmbientLiveSessionState =
+  | "idle_listening"
+  | "user_detected"
+  | "live_streaming"
+  | "assistant_responding"
+  | "background_processing"
+  | "degraded";
+
+export interface AmbientLiveStatus {
+  enabled: boolean;
+  running: boolean;
+  paused?: boolean;
+  state: AmbientLiveSessionState;
+  session_id?: string | null;
+  uptime_seconds?: number;
+  native_live_connected?: boolean;
+  native_live_error?: string | null;
+  energy_threshold?: number;
+  interaction_mode?: "capture" | "retrieve";
+  retrieve_mode_armed?: boolean;
+  segments_detected?: number;
+  user_turns?: number;
+  assistant_turns?: number;
+  memory_jobs?: number;
+  audio_frames?: number;
+  last_audio_level?: number;
+  last_error?: string | null;
+}
+
 export interface VoiceProviders {
   stt_provider: VoiceProviderType;
   tts_provider: VoiceProviderType;
@@ -335,6 +364,8 @@ export interface VoiceProviders {
   supported_stt_providers?: VoiceProviderType[];
   supported_tts_providers?: VoiceProviderType[];
   gemini_tts_voices: string[];
+  live_mode?: "classic" | "gemini_live";
+  live_status?: AmbientLiveStatus;
 }
 
 export interface AmbientState {
@@ -349,6 +380,14 @@ export interface AmbientState {
   stt_provider: VoiceProviderType;
   tts_provider: VoiceProviderType;
   gemini_available: boolean;
+  operating_mode?: "classic" | "gemini_live";
+  no_local_model_policy_enforced?: boolean;
+  local_models_initialized?: {
+    vad: boolean;
+    traditional_stt: boolean;
+    traditional_tts: boolean;
+  };
+  live?: AmbientLiveStatus;
   vad?: {
     threshold: number;
     speech_active: boolean;
@@ -396,6 +435,10 @@ export interface AmbientConfig {
   whisper_language: string | null;
   record_raw_audio: boolean;
   gemini_tts_voice: string;
+  live_mode?: "classic" | "gemini_live";
+  energy_gate_threshold?: number;
+  energy_min_speech_ms?: number;
+  energy_silence_ms?: number;
 }
 
 export interface ConversationTurn {
@@ -404,6 +447,9 @@ export interface ConversationTurn {
   text: string;
   timestamp: number;
   confidence: number;
+  speaker_confidence?: number;
+  live_turn_id?: string;
+  retention_trace?: Record<string, unknown>;
 }
 
 export interface ConversationRecord {
@@ -457,4 +503,194 @@ export interface TraceAnalytics {
 export interface TracesResponse {
   traces: PipelineTrace[];
   analytics: TraceAnalytics;
+}
+
+export type RuntimePermissionStatus = "pending" | "approved" | "denied" | "expired";
+
+export type RuntimeTaskState =
+  | "queued"
+  | "running"
+  | "waiting_approval"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface RuntimeTaskSnapshot {
+  task_id: string;
+  parent_task_id: string | null;
+  state: RuntimeTaskState;
+  permission_scope: string[] | null;
+  child_task_ids: string[];
+  created_at: string;
+  updated_at: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface RuntimeTaskListResponse {
+  count: number;
+  tasks: RuntimeTaskSnapshot[];
+}
+
+export type RuntimeTaskEventType =
+  | "task_created"
+  | "task_transition"
+  | "task_attached";
+
+export interface RuntimeTaskEvent {
+  event_id: string;
+  sequence: number;
+  event_type: RuntimeTaskEventType;
+  timestamp: string;
+  task: RuntimeTaskSnapshot;
+  previous_state?: RuntimeTaskState | null;
+  state: RuntimeTaskState;
+  note?: string;
+}
+
+export interface RuntimePermissionRequest {
+  permission_id: string;
+  request_id: string;
+  tool_name: string;
+  command_text: string;
+  reason: string;
+  status: RuntimePermissionStatus;
+  created_at: string;
+  expires_at: string;
+  decided_at: string | null;
+  decided_by: string;
+  decision_note: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface RuntimeExecutorStatus {
+  enabled: boolean;
+  running: boolean;
+  poll_interval_seconds?: number;
+  execution_timeout_seconds?: number;
+  max_attempts?: number;
+  summary: {
+    approved_total: number;
+    pending_total: number;
+    running: number;
+    waiting_retry: number;
+    completed: number;
+    failed: number;
+    unsupported: number;
+    idle: number;
+  };
+}
+
+export type CortexEventType =
+  | "agent_start"
+  | "agent_end"
+  | "turn_start"
+  | "turn_end"
+  | "message_start"
+  | "message_update"
+  | "message_end"
+  | "tool_execution_start"
+  | "tool_execution_update"
+  | "tool_execution_end"
+  | "queue_update"
+  | "compaction_start"
+  | "compaction_end"
+  | "auto_retry_start"
+  | "auto_retry_end"
+  | "tier_selected"
+  | "retrieval_channel_complete"
+  | "evidence_ready"
+  | "quality_loop"
+  | "wiki_update"
+  | "belief_shift"
+  | "gap_signal"
+  | "presence_initiative"
+  | "keepalive";
+
+export interface CortexEvent {
+  event_id?: string;
+  type: CortexEventType;
+  data: Record<string, unknown>;
+  timestamp: string;
+  session_id: string;
+  agent_id: string;
+  trace_id: string;
+}
+
+export interface TierClassification {
+  tier: "T0" | "T1" | "T2" | "T3" | "T4";
+  complexity: number;
+  intent: string;
+  entities: string[];
+  topics: string[];
+  sub_queries: string[];
+  confidence: number;
+  cache_key: string;
+  recommended_agents: string[];
+  estimated_latency_ms: number;
+}
+
+export interface AgentSessionInfo {
+  session_id: string;
+  agent_id: string;
+  is_running: boolean;
+  is_streaming: boolean;
+  message_count: number;
+  turn_count: number;
+  steering: {
+    steering: string[];
+    followUp: string[];
+  };
+}
+
+export interface AgentQueryResponse {
+  answer: string;
+  tier: TierClassification;
+  turns: number;
+  session_id: string | null;
+  tool_results: Array<{
+    tool_call_id: string;
+    content: string;
+    is_error: boolean;
+  }>;
+}
+
+export interface AgentConfigInfo {
+  agent_id: string;
+  tool_count: number;
+  max_turns: number;
+  scheduling: {
+    always_on: boolean;
+    continuous: boolean;
+    on_ingest: boolean;
+    interval_min: number;
+  } | null;
+}
+
+export interface WikiPageInfo {
+  id: string;
+  title: string;
+  content: string;
+  topics: string[];
+  claim_ids: string[];
+  created_at: string;
+  updated_at: string;
+  version: number;
+}
+
+export interface WikiLintSummary {
+  checked_at: string | null;
+  pages_checked: number;
+  dirty_pages: number;
+  issue_total: number;
+  avg_hygiene_score: number;
+  reports: Array<Record<string, unknown>>;
+}
+
+export interface WikiCompactionSummary {
+  checked_at: string | null;
+  pages_checked: number;
+  sections_checked: number;
+  sections_compacted: number;
+  page_runs: Array<Record<string, unknown>>;
 }

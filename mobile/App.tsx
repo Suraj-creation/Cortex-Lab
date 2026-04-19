@@ -23,6 +23,7 @@ import {
 } from './shared/core/api';
 import type {
   AmbientConfig,
+  AmbientLiveStatus,
   ChatMessage,
   ChatSettings,
   ConversationRecord,
@@ -63,6 +64,8 @@ import { MemoryScreen } from './src/screens/MemoryScreen';
 import { DashboardScreen } from './src/screens/DashboardScreen';
 import { GraphScreen } from './src/screens/GraphScreen';
 import { ObservabilityScreen } from './src/screens/ObservabilityScreen';
+import { AgentScreen } from './src/screens/AgentScreen';
+import { WikiScreen } from './src/screens/WikiScreen';
 import { AmbientVoiceScreen } from './src/screens/AmbientVoiceScreen';
 import { DocumentsScreen } from './src/screens/DocumentsScreen';
 import { OnboardingScreen } from './src/screens/OnboardingScreen';
@@ -80,6 +83,8 @@ const NAV_ITEMS = [
   { key: 'graph'         as NavKey, label: 'Graph',   iconName: 'graph-outline' as const },
   { key: 'dashboard'     as NavKey, label: 'RAG',     iconName: 'view-dashboard-outline' as const },
   { key: 'observability' as NavKey, label: 'Observe', iconName: 'chart-timeline-variant' as const },
+  { key: 'agent'         as NavKey, label: 'Agent',   iconName: 'robot-outline' as const },
+  { key: 'wiki'          as NavKey, label: 'Wiki',    iconName: 'book-open-page-variant-outline' as const },
   { key: 'ambient'       as NavKey, label: 'Voice',   iconName: 'microphone-outline' as const },
   { key: 'documents'     as NavKey, label: 'Docs',    iconName: 'file-document-outline' as const },
 ];
@@ -160,6 +165,7 @@ function AppContent() {
 
   // ── Ambient ───────────────────────────────────────────────────────────────────
   const [ambientState, setAmbientState] = useState<AmbientState | null>(null);
+  const [ambientLiveStatus, setAmbientLiveStatus] = useState<AmbientLiveStatus | null>(null);
   const [ambientConfig, setAmbientConfig] = useState<AmbientConfig | null>(null);
   const [ambientEnrollment, setAmbientEnrollment] = useState<{ enrolled: boolean; speaker_id_available?: boolean } | null>(null);
   const [ambientProviders, setAmbientProviders] = useState<VoiceProviders | null>(null);
@@ -483,11 +489,16 @@ function AppContent() {
   const loadAmbient = useCallback(async (silent = false) => {
     if (!silent) setLoadingView(true);
     try {
-      const [statusR, configR, providersR, enrollmentR, transcriptR, conversationsR, ttsR] = await Promise.allSettled([
-        api.getAmbientStatus(), api.getAmbientConfig(), api.getVoiceProviders(),
+      const [statusR, liveStatusR, configR, providersR, enrollmentR, transcriptR, conversationsR, ttsR] = await Promise.allSettled([
+        api.getAmbientStatus(), api.getAmbientLiveStatus(), api.getAmbientConfig(), api.getVoiceProviders(),
         api.getEnrollmentStatus(), api.getLiveTranscript(), api.getConversations(20, 0), api.getTTSStatus(),
       ]);
       if (statusR.status === 'fulfilled') setAmbientState(statusR.value); else throw statusR.reason;
+      if (liveStatusR.status === 'fulfilled') {
+        setAmbientLiveStatus(liveStatusR.value);
+      } else if (statusR.status === 'fulfilled') {
+        setAmbientLiveStatus(statusR.value.live || null);
+      }
       setAmbientConfig(configR.status === 'fulfilled' ? configR.value : null);
       setAmbientProviders(providersR.status === 'fulfilled' ? providersR.value : null);
       setAmbientEnrollment(enrollmentR.status === 'fulfilled' ? enrollmentR.value : null);
@@ -503,6 +514,23 @@ function AppContent() {
     try { await api.ambientAction(action); await loadAmbient(true); }
     catch (e) { setGlobalError(e instanceof Error ? e.message : String(e)); }
     finally { setAmbientBusy(false); }
+  }, [api, loadAmbient]);
+
+  const runAmbientLiveAction = useCallback(async (action: 'start' | 'stop') => {
+    setAmbientBusy(true);
+    try {
+      if (action === 'start') {
+        await api.startAmbientLive();
+      } else {
+        await api.stopAmbientLive();
+      }
+      await loadAmbient(true);
+      setGlobalError('');
+    } catch (e) {
+      setGlobalError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAmbientBusy(false);
+    }
   }, [api, loadAmbient]);
 
   const setAmbientProvider = useCallback(async (kind: 'stt' | 'tts', provider: 'traditional' | 'local' | 'gemini') => {
@@ -744,11 +772,15 @@ function AppContent() {
               pipelineEvents={pipelineEvents}
               loadingView={loadingView}
               apiBaseUrl={apiBase}
+              api={api}
             />
           )}
+          {activeView === 'agent' && <AgentScreen api={api} />}
+          {activeView === 'wiki' && <WikiScreen api={api} />}
           {activeView === 'ambient' && (
             <AmbientVoiceScreen
               ambientState={ambientState}
+              ambientLiveStatus={ambientLiveStatus}
               ambientConfig={ambientConfig}
               ambientEnrollment={ambientEnrollment}
               ambientProviders={ambientProviders}
@@ -762,6 +794,7 @@ function AppContent() {
               ttsBusy={ttsBusy}
               ttsLastBytes={ttsLastBytes}
               onAmbientAction={runAmbientAction}
+              onAmbientLiveAction={runAmbientLiveAction}
               onSetProvider={setAmbientProvider}
               onStartEnrollment={startAmbientEnrollment}
               onToggleAutoIngest={toggleAmbientAutoIngest}

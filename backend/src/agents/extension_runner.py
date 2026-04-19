@@ -190,3 +190,7 @@ class ExtensionRunner:
             if result is not None:
                 last_summary = result
         return last_summary
+
+    async def emit_session_compact(self, summary: str) -> None:
+        for ext in self._extensions:
+            await ext.on_session_compact(summary)

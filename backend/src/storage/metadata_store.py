@@ -31,6 +31,7 @@ class MetadataStore:
         self.conn = None
         self._use_duckdb = False
         self._fallback: Dict[str, Dict] = {}  # memory_id -> dict
+        self._fallback_path = self._derive_fallback_path(db_path)
 
         if HAS_DUCKDB:
             try:
@@ -43,6 +44,9 @@ class MetadataStore:
                 self._use_duckdb = False
         else:
             print("  ⚠ DuckDB not installed, using in-memory fallback")
+
+        if not self._use_duckdb:
+            self._load_fallback_from_disk()
 
     def _init_tables(self):
         self.conn.execute("""
@@ -189,6 +193,7 @@ class MetadataStore:
             self._sync_junction_tables(memory.id, memory.topics, memory.entities)
         else:
             self._fallback[memory.id] = memory.to_dict()
+            self._save_fallback_to_disk()
 
     def get_memory(self, memory_id: str) -> Optional[CausalMemoryObject]:
         """Retrieve a memory by ID."""
@@ -265,6 +270,35 @@ class MetadataStore:
 
         existing["metadata"] = updated
         self._fallback[memory_id] = existing
+        self._save_fallback_to_disk()
+        return True
+
+    def update_memory_timestamp(self, memory_id: str, timestamp: Optional[datetime] = None) -> bool:
+        """Update a memory timestamp (used by dedup refresh paths)."""
+        if not memory_id:
+            return False
+
+        ts = timestamp or datetime.now()
+        if self._use_duckdb:
+            row = self.conn.execute(
+                "SELECT id FROM memories WHERE id = ?",
+                [memory_id],
+            ).fetchone()
+            if not row:
+                return False
+
+            self.conn.execute(
+                "UPDATE memories SET timestamp = ? WHERE id = ?",
+                [ts, memory_id],
+            )
+            return True
+
+        existing = self._fallback.get(memory_id)
+        if not existing:
+            return False
+        existing["timestamp"] = ts.isoformat()
+        self._fallback[memory_id] = existing
+        self._save_fallback_to_disk()
         return True
 
     def search_by_time(self, start: Optional[datetime] = None,
@@ -373,41 +407,144 @@ class MetadataStore:
             return self.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
         return len(self._fallback)
 
-    def get_memory_texts(self, limit: int = 5000) -> List[Tuple[str, str]]:
+    def get_memory_texts(self, limit: Optional[int] = None, offset: int = 0) -> List[Tuple[str, str]]:
         """Return (id, content) pairs for BM25 indexing (§4.6).
         Much lighter than get_all_memories() — avoids loading full objects."""
         if self._use_duckdb:
-            rows = self.conn.execute(
-                "SELECT id, content FROM memories LIMIT ?", [limit]
-            ).fetchall()
+            if limit is None:
+                rows = self.conn.execute(
+                    "SELECT id, content FROM memories ORDER BY timestamp DESC"
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT id, content FROM memories ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+                    [limit, max(offset, 0)],
+                ).fetchall()
             return [(r[0], r[1]) for r in rows]
-        return [(mid, d.get("content", "")) for mid, d in list(self._fallback.items())[:limit]]
 
-    def get_memory_propositions(self, limit: int = 2000) -> List[Tuple[str, List[str]]]:
+        items = list(self._fallback.items())
+        start = max(offset, 0)
+        if limit is None:
+            window = items[start:]
+        else:
+            window = items[start:start + max(limit, 0)]
+        return [(mid, d.get("content", "")) for mid, d in window]
+
+    def get_memory_propositions(self, limit: Optional[int] = None, offset: int = 0) -> List[Tuple[str, List[str]]]:
         """Return (id, propositions) pairs for proposition indexing (§4.6).
         Avoids loading full memory objects for proposition index rebuild."""
         if self._use_duckdb:
-            rows = self.conn.execute(
-                "SELECT id, propositions FROM memories WHERE propositions != '[]' LIMIT ?", [limit]
-            ).fetchall()
+            if limit is None:
+                rows = self.conn.execute(
+                    "SELECT id, propositions FROM memories WHERE propositions != '[]' ORDER BY timestamp DESC"
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT id, propositions FROM memories WHERE propositions != '[]' "
+                    "ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+                    [limit, max(offset, 0)],
+                ).fetchall()
             result = []
             for r in rows:
                 props = json.loads(r[1]) if isinstance(r[1], str) else (r[1] or [])
                 if props:
                     result.append((r[0], props))
             return result
+
         result = []
-        for mid, d in list(self._fallback.items())[:limit]:
+        items = list(self._fallback.items())
+        start = max(offset, 0)
+        if limit is None:
+            window = items[start:]
+        else:
+            window = items[start:start + max(limit, 0)]
+
+        for mid, d in window:
             props = d.get("propositions", [])
             if props:
                 result.append((mid, props))
         return result
 
-    def delete_memory(self, memory_id: str):
+    def delete_memory(self, memory_id: str) -> bool:
+        """Delete a memory and cascade cleanup of lightweight references."""
+        if not memory_id:
+            return False
+
         if self._use_duckdb:
-            self.conn.execute("DELETE FROM memories WHERE id = ?", [memory_id])
-        else:
-            self._fallback.pop(memory_id, None)
+            row = self.conn.execute(
+                "SELECT id FROM memories WHERE id = ?",
+                [memory_id],
+            ).fetchone()
+            if not row:
+                return False
+
+            try:
+                self.conn.execute("BEGIN TRANSACTION")
+                self.conn.execute("DELETE FROM memories WHERE id = ?", [memory_id])
+                self.conn.execute("DELETE FROM memory_topics WHERE memory_id = ?", [memory_id])
+                self.conn.execute("DELETE FROM memory_entities WHERE memory_id = ?", [memory_id])
+
+                # Preserve conversation turns while clearing dangling memory links.
+                self.conn.execute(
+                    "UPDATE conversations SET memory_id = '' WHERE memory_id = ?",
+                    [memory_id],
+                )
+
+                self._cleanup_entity_memory_references(memory_id)
+                self._cleanup_edge_memory_references(memory_id)
+
+                self.conn.execute("COMMIT")
+                return True
+            except Exception:
+                try:
+                    self.conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                return False
+
+        existed = memory_id in self._fallback
+        self._fallback.pop(memory_id, None)
+        self._save_fallback_to_disk()
+        return existed
+
+    def _cleanup_entity_memory_references(self, memory_id: str):
+        """Remove deleted memory IDs from entity records and prune empty entities."""
+        rows = self.conn.execute("SELECT id, memory_ids FROM entities").fetchall()
+        for entity_id, raw_memory_ids in rows:
+            memory_ids = self._parse_json_list(raw_memory_ids)
+            if memory_id not in memory_ids:
+                continue
+
+            updated = [mid for mid in memory_ids if mid != memory_id]
+            if updated:
+                self.conn.execute(
+                    "UPDATE entities SET memory_ids = ? WHERE id = ?",
+                    [json.dumps(updated), entity_id],
+                )
+            else:
+                self.conn.execute("DELETE FROM entities WHERE id = ?", [entity_id])
+
+    def _cleanup_edge_memory_references(self, memory_id: str):
+        """Remove deleted memory IDs from graph edges and prune empty edges."""
+        rows = self.conn.execute(
+            "SELECT source_id, target_id, relation, memory_ids FROM graph_edges"
+        ).fetchall()
+        for source_id, target_id, relation, raw_memory_ids in rows:
+            memory_ids = self._parse_json_list(raw_memory_ids)
+            if memory_id not in memory_ids:
+                continue
+
+            updated = [mid for mid in memory_ids if mid != memory_id]
+            if updated:
+                self.conn.execute(
+                    "UPDATE graph_edges SET memory_ids = ? WHERE source_id = ? AND target_id = ? AND relation = ?",
+                    [json.dumps(updated), source_id, target_id, relation],
+                )
+            else:
+                self.conn.execute(
+                    "DELETE FROM graph_edges WHERE source_id = ? AND target_id = ? AND relation = ?",
+                    [source_id, target_id, relation],
+                )
 
     # ─── Conversation Storage ────────────────────────────────────────────
 
@@ -574,7 +711,51 @@ class MetadataStore:
                 return {"total_feedback": 0, "average_rating": 0, "low_rated_count": 0}
         return {"total_feedback": 0, "average_rating": 0, "low_rated_count": 0}
 
+    def flush(self):
+        """Flush metadata state to local disk."""
+        if self._use_duckdb and self.conn:
+            try:
+                self.conn.execute("CHECKPOINT")
+            except Exception:
+                pass
+            return
+        self._save_fallback_to_disk()
+
     # ─── Internal ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _derive_fallback_path(db_path: str) -> str:
+        base_dir = os.path.dirname(db_path) if os.path.dirname(db_path) else "."
+        base_name = os.path.splitext(os.path.basename(db_path))[0] or "cortex"
+        return os.path.join(base_dir, f"{base_name}.fallback_memories.json")
+
+    def _load_fallback_from_disk(self):
+        if not self._fallback_path or not os.path.exists(self._fallback_path):
+            return
+        try:
+            with open(self._fallback_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                self._fallback = {
+                    str(mid): value
+                    for mid, value in loaded.items()
+                    if isinstance(value, dict)
+                }
+                print(f"  ✓ Metadata fallback loaded: {len(self._fallback)} memories")
+        except Exception as e:
+            print(f"  ⚠ Failed to load metadata fallback: {e}")
+
+    def _save_fallback_to_disk(self):
+        if self._use_duckdb:
+            return
+        try:
+            os.makedirs(os.path.dirname(self._fallback_path) if os.path.dirname(self._fallback_path) else ".", exist_ok=True)
+            tmp_path = f"{self._fallback_path}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(self._fallback, f, ensure_ascii=False)
+            os.replace(tmp_path, self._fallback_path)
+        except Exception as e:
+            print(f"  ⚠ Failed to save metadata fallback: {e}")
 
     def _row_to_memory(self, row) -> CausalMemoryObject:
         """Convert a DuckDB row tuple to CausalMemoryObject."""
@@ -600,6 +781,20 @@ class MetadataStore:
             source=row[18] or "chat",
             metadata=json.loads(row[19]) if isinstance(row[19], str) else (row[19] or {}),
         )
+
+    @staticmethod
+    def _parse_json_list(value: Any) -> List[str]:
+        """Parse JSON/list-ish DB fields into a normalized list of strings."""
+        if isinstance(value, list):
+            return [str(v) for v in value if v]
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return [str(v) for v in parsed if v]
+            except Exception:
+                return [value] if value else []
+        return []
 
     def _sync_junction_tables(self, memory_id: str, topics: List[str], entities: List[str]):
         """Sync junction tables for a memory (§4.1).
@@ -641,5 +836,6 @@ class MetadataStore:
             print(f"  ⚠ Junction table migration skipped: {e}")
 
     def close(self):
+        self.flush()
         if self.conn:
             self.conn.close()

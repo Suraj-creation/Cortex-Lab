@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -20,6 +22,140 @@ from pydantic import BaseModel, Field
 from src.agents.tool_types import PermissionModel, ToolDefinition, ToolResult
 
 logger = logging.getLogger(__name__)
+
+
+_PERSONAL_DATA_SOURCES = (
+    "memories",
+    "conversations",
+    "wiki",
+    "claims",
+    "graph",
+    "ambient",
+    "session_forge",
+    "chronicle",
+)
+
+
+def _get_metadata_store():
+    from src.engine import rag_engine
+
+    store = getattr(rag_engine, "metadata_store", None)
+    if store is None:
+        raise RuntimeError("Metadata store is not initialized")
+    return store
+
+
+def _get_knowledge_graph():
+    from src.engine import rag_engine
+
+    graph = getattr(rag_engine, "knowledge_graph", None)
+    if graph is None:
+        raise RuntimeError("Knowledge graph is not initialized")
+    return graph
+
+
+def _to_memory_dict(memory: Any) -> dict[str, Any]:
+    if hasattr(memory, "to_dict"):
+        raw = memory.to_dict()
+        if isinstance(raw, dict):
+            return raw
+    if isinstance(memory, dict):
+        return dict(memory)
+    return {"content": str(memory)}
+
+
+def _parse_iso_datetime(value: str) -> datetime:
+    normalized = str(value).replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _clip_text(value: Any, limit: int = 420) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."
+
+
+def _safe_json_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return list(parsed)
+        except Exception:
+            return []
+    return []
+
+
+def _safe_json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                return dict(parsed)
+        except Exception:
+            return {}
+    return {}
+
+
+def _query_contains(query: str, *parts: Any) -> bool:
+    normalized = str(query or "").strip().lower()
+    if not normalized:
+        return True
+    blob = " ".join(str(part or "") for part in parts).lower()
+    return normalized in blob
+
+
+def _normalize_sources(requested: list[str] | None) -> list[str]:
+    if not requested:
+        return list(_PERSONAL_DATA_SOURCES)
+
+    normalized: list[str] = []
+    for item in requested:
+        key = str(item or "").strip().lower()
+        if key in _PERSONAL_DATA_SOURCES and key not in normalized:
+            normalized.append(key)
+
+    return normalized or list(_PERSONAL_DATA_SOURCES)
+
+
+def _duckdb_table_exists(conn: Any, table_name: str) -> bool:
+    try:
+        rows = conn.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = ? LIMIT 1",
+            [table_name],
+        ).fetchall()
+        return bool(rows)
+    except Exception:
+        pass
+
+    try:
+        conn.execute(f"SELECT 1 FROM {table_name} LIMIT 1").fetchall()
+        return True
+    except Exception:
+        return False
+
+
+def _open_sqlite_ambient_connection() -> Any:
+    try:
+        import sqlite3
+        from src.engine import rag_engine
+
+        db_path = os.path.join(str(getattr(rag_engine, "data_dir", "data")), "cortex.sqlite3")
+        if not os.path.exists(db_path):
+            return None
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+    except Exception:
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -34,20 +170,52 @@ class RetrieveMemoryParams(BaseModel):
     time_end: str | None = Field(None, description="ISO datetime range end")
 
 async def _retrieve_memory(call_id: str, params: dict[str, Any]) -> ToolResult:
-    from src.retrieval.hybrid_retriever import HybridRetriever
+    from src.engine import rag_engine
+    from src.retrieval.query_engine import QueryAnalyzer
+
     try:
-        retriever = HybridRetriever.get_instance()
-        results = await retriever.retrieve(
-            query=params["query"],
+        retriever = getattr(rag_engine, "hybrid_retriever", None)
+        if retriever is None:
+            return ToolResult(tool_call_id=call_id, content="Retriever not initialized", is_error=True)
+
+        analyzer = QueryAnalyzer()
+        query = analyzer.analyze(params["query"])
+
+        if params.get("time_start"):
+            query.time_start = _parse_iso_datetime(params["time_start"])
+        if params.get("time_end"):
+            query.time_end = _parse_iso_datetime(params["time_end"])
+
+        raw_results = await retriever.retrieve(
+            query=query,
             top_k=params.get("top_k", 10),
         )
+
+        memory_type = str(params.get("memory_type") or "").strip().lower()
+
         formatted = [
             {
                 "content": r.memory.content if hasattr(r, 'memory') else str(r),
                 "score": r.score if hasattr(r, 'score') else 0.0,
                 "channel": r.channel if hasattr(r, 'channel') else "unknown",
+                "memory_type": (
+                    r.memory.memory_type.value
+                    if hasattr(r, 'memory') and hasattr(r.memory, 'memory_type')
+                    else "unknown"
+                ),
+                "timestamp": (
+                    r.memory.timestamp.isoformat()
+                    if hasattr(r, 'memory') and hasattr(r.memory, 'timestamp')
+                    else ""
+                ),
             }
-            for r in results
+            for r in raw_results
+            if not memory_type
+            or (
+                hasattr(r, 'memory')
+                and hasattr(r.memory, 'memory_type')
+                and str(r.memory.memory_type.value).lower() == memory_type
+            )
         ]
         return ToolResult(
             tool_call_id=call_id,
@@ -122,10 +290,26 @@ class QueryGraphParams(BaseModel):
 
 async def _query_graph(call_id: str, params: dict[str, Any]) -> ToolResult:
     try:
-        from src.storage.graph_store import GraphStore
-        store = GraphStore.get_instance()
-        subgraph = store.neighbors(params["entity"], hops=params.get("hops", 2))
-        return ToolResult(tool_call_id=call_id, content=json.dumps(subgraph, default=str))
+        graph = _get_knowledge_graph()
+        metadata = _get_metadata_store()
+
+        requested_entity = str(params["entity"])
+        entity_id = graph.find_entity_by_name(requested_entity) or requested_entity
+        neighbors = graph.get_neighbors(entity_id, max_hops=params.get("hops", 2))
+
+        edges = metadata.get_edges(entity_id=entity_id)
+        relationship_type = params.get("relationship_type")
+        if relationship_type:
+            rel = str(relationship_type).strip().lower()
+            edges = [e for e in edges if str(e.get("relation", "")).lower() == rel]
+
+        payload = {
+            "entity": requested_entity,
+            "entity_id": entity_id,
+            "neighbors": neighbors,
+            "edges": edges,
+        }
+        return ToolResult(tool_call_id=call_id, content=json.dumps(payload, default=str))
     except Exception as e:
         return ToolResult(tool_call_id=call_id, content=f"Graph query error: {e}", is_error=True)
 
@@ -145,9 +329,11 @@ class SearchByTimeParams(BaseModel):
 
 async def _search_by_time(call_id: str, params: dict[str, Any]) -> ToolResult:
     try:
-        from src.storage.duckdb_store import DuckDBStore
-        store = DuckDBStore.get_instance()
-        results = store.query_time_range(params["start_date"], params["end_date"], limit=params.get("top_k", 20))
+        store = _get_metadata_store()
+        start = _parse_iso_datetime(params["start_date"])
+        end = _parse_iso_datetime(params["end_date"])
+        rows = store.search_by_time(start=start, end=end, limit=params.get("top_k", 20))
+        results = [_to_memory_dict(row) for row in rows]
         return ToolResult(tool_call_id=call_id, content=json.dumps(results, default=str))
     except Exception as e:
         return ToolResult(tool_call_id=call_id, content=f"Time search error: {e}", is_error=True)
@@ -158,6 +344,744 @@ search_by_time_tool = ToolDefinition(
     description="Find memories from a specific time period using temporal indexing",
     parameters_schema=SearchByTimeParams,
     execute=_search_by_time,
+)
+
+
+class QueryPersonalDataParams(BaseModel):
+    query: str = Field("", description="Search query across all persisted personal data")
+    sources: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional source filters. Supported: "
+            "memories|conversations|wiki|claims|graph|ambient|session_forge|chronicle"
+        ),
+    )
+    session_id: str = Field("", description="Optional session_id focus for conversation/session-forge sources")
+    limit_per_source: int = Field(8, ge=1, le=25, description="Maximum items returned per source")
+    min_confidence: float = Field(0.35, ge=0.0, le=1.0, description="Confidence floor for claim retrieval")
+
+
+async def _query_personal_data(call_id: str, params: dict[str, Any]) -> ToolResult:
+    from src.engine import rag_engine
+
+    query = str(params.get("query", "") or "").strip()
+    session_id = str(params.get("session_id", "") or "").strip()
+    limit = max(1, min(int(params.get("limit_per_source", 8) or 8), 25))
+    min_confidence = float(params.get("min_confidence", 0.35) or 0.35)
+    sources = _normalize_sources(params.get("sources"))
+
+    payload: dict[str, Any] = {
+        "query": query,
+        "session_id": session_id,
+        "sources": sources,
+        "counts": {},
+        "results": {source: [] for source in sources},
+        "top_hits": [],
+        "errors": {},
+    }
+
+    if "memories" in sources:
+        try:
+            if query:
+                memory_rows = list(rag_engine.search_memories(query, top_k=limit) or [])
+            else:
+                memory_rows = list(rag_engine.get_memories(limit=limit) or [])
+
+            memory_items = []
+            for row in memory_rows[:limit]:
+                data = _to_memory_dict(row)
+                memory_items.append(
+                    {
+                        "id": data.get("id", ""),
+                        "content": _clip_text(data.get("content", ""), 480),
+                        "score": float(data.get("score", 0.0) or 0.0),
+                        "timestamp": data.get("timestamp", ""),
+                        "memory_type": data.get("memory_type", ""),
+                        "source": data.get("source", ""),
+                        "topics": list(data.get("topics", []) or [])[:6],
+                        "entities": list(data.get("entities", []) or [])[:6],
+                        "session_id": data.get("session_id", ""),
+                    }
+                )
+
+            payload["results"]["memories"] = memory_items
+        except Exception as e:
+            payload["errors"]["memories"] = str(e)
+
+    metadata_store = None
+    if any(source in sources for source in ("conversations", "graph", "ambient")):
+        try:
+            metadata_store = _get_metadata_store()
+        except Exception as e:
+            payload["errors"]["metadata"] = str(e)
+
+    if "conversations" in sources:
+        try:
+            turns: list[dict[str, Any]] = []
+            if metadata_store is None:
+                turns = []
+            elif session_id:
+                turns = list(metadata_store.get_conversation(session_id) or [])
+            elif getattr(metadata_store, "conn", None) is not None and bool(getattr(metadata_store, "_use_duckdb", False)):
+                conn = metadata_store.conn
+                if query:
+                    rows = conn.execute(
+                        """
+                        SELECT session_id, role, content, thinking, timestamp
+                        FROM conversations
+                        WHERE lower(content) LIKE ?
+                        ORDER BY timestamp DESC
+                        LIMIT ?
+                        """,
+                        [f"%{query.lower()}%", limit],
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT session_id, role, content, thinking, timestamp
+                        FROM conversations
+                        ORDER BY timestamp DESC
+                        LIMIT ?
+                        """,
+                        [limit],
+                    ).fetchall()
+
+                turns = [
+                    {
+                        "session_id": str(row[0] or ""),
+                        "role": str(row[1] or ""),
+                        "content": str(row[2] or ""),
+                        "thinking": str(row[3] or ""),
+                        "timestamp": str(row[4] or ""),
+                    }
+                    for row in rows
+                ]
+
+            conversation_items: list[dict[str, Any]] = []
+            for turn in turns:
+                if not _query_contains(query, turn.get("content", ""), turn.get("thinking", "")):
+                    continue
+                conversation_items.append(
+                    {
+                        "session_id": str(turn.get("session_id", session_id)),
+                        "role": str(turn.get("role", "")),
+                        "content": _clip_text(turn.get("content", ""), 320),
+                        "thinking": _clip_text(turn.get("thinking", ""), 220),
+                        "timestamp": str(turn.get("timestamp", "")),
+                    }
+                )
+                if len(conversation_items) >= limit:
+                    break
+
+            payload["results"]["conversations"] = conversation_items
+        except Exception as e:
+            payload["errors"]["conversations"] = str(e)
+
+    if "wiki" in sources:
+        try:
+            from src.wiki.wiki_store import WikiStore
+
+            wiki_store = WikiStore.get_instance()
+            wiki_rows = (
+                wiki_store.search(query, include_claims=True, limit=limit)
+                if query
+                else wiki_store.list_pages(limit=limit)
+            )
+            payload["results"]["wiki"] = [
+                {
+                    "id": row.get("id", ""),
+                    "title": row.get("title", ""),
+                    "topics": list(row.get("topics", []) or [])[:6],
+                    "claim_count": len(list(row.get("claim_ids", []) or [])),
+                    "updated_at": row.get("updated_at", ""),
+                    "content_preview": _clip_text(row.get("content", ""), 420),
+                    "search_score": float(row.get("search_score", 0.0) or 0.0),
+                }
+                for row in wiki_rows[:limit]
+            ]
+        except Exception as e:
+            payload["errors"]["wiki"] = str(e)
+
+    if "claims" in sources:
+        try:
+            from src.wiki.claim_store import ClaimStore
+
+            claim_store = ClaimStore.get_instance()
+            claim_rows = claim_store.search(
+                query,
+                min_confidence=min_confidence,
+                limit=limit,
+            )
+            payload["results"]["claims"] = [
+                {
+                    "id": row.get("id", ""),
+                    "text": _clip_text(row.get("text", ""), 320),
+                    "confidence": float(row.get("confidence", 0.0) or 0.0),
+                    "topic": row.get("topic", ""),
+                    "source_ids": list(row.get("source_ids", []) or [])[:8],
+                    "updated_at": row.get("updated_at", ""),
+                    "is_active": bool(row.get("is_active", True)),
+                }
+                for row in claim_rows[:limit]
+            ]
+        except Exception as e:
+            payload["errors"]["claims"] = str(e)
+
+    if "graph" in sources:
+        try:
+            graph = _get_knowledge_graph()
+            matched_entities: list[dict[str, Any]] = []
+            matched_edges: list[dict[str, Any]] = []
+            focus_entity_id = graph.find_entity_by_name(query) if query else None
+
+            if metadata_store is not None:
+                entities = list(metadata_store.get_entities(limit=max(limit * 4, limit)) or [])
+                for entity in entities:
+                    if query and not _query_contains(
+                        query,
+                        entity.get("canonical_name", ""),
+                        " ".join(entity.get("aliases", []) or []),
+                        entity.get("entity_type", ""),
+                    ):
+                        continue
+                    matched_entities.append(
+                        {
+                            "id": entity.get("id", ""),
+                            "canonical_name": entity.get("canonical_name", ""),
+                            "entity_type": entity.get("entity_type", ""),
+                            "aliases": list(entity.get("aliases", []) or [])[:6],
+                            "memory_ref_count": len(list(entity.get("memory_ids", []) or [])),
+                            "last_seen": entity.get("last_seen", ""),
+                        }
+                    )
+                    if len(matched_entities) >= limit:
+                        break
+
+                if focus_entity_id and not any(str(item.get("id", "")) == str(focus_entity_id) for item in matched_entities):
+                    focus_rows = [e for e in entities if str(e.get("id", "")) == str(focus_entity_id)]
+                    if focus_rows:
+                        entity = focus_rows[0]
+                        matched_entities.insert(
+                            0,
+                            {
+                                "id": entity.get("id", ""),
+                                "canonical_name": entity.get("canonical_name", ""),
+                                "entity_type": entity.get("entity_type", ""),
+                                "aliases": list(entity.get("aliases", []) or [])[:6],
+                                "memory_ref_count": len(list(entity.get("memory_ids", []) or [])),
+                                "last_seen": entity.get("last_seen", ""),
+                            },
+                        )
+                        matched_entities = matched_entities[:limit]
+
+                edge_seen: set[tuple[str, str, str]] = set()
+                edge_entity_ids = [focus_entity_id] if focus_entity_id else []
+                edge_entity_ids.extend(item.get("id", "") for item in matched_entities[:3])
+                for entity_id in edge_entity_ids:
+                    if not entity_id:
+                        continue
+                    for edge in list(metadata_store.get_edges(entity_id=str(entity_id)) or []):
+                        signature = (
+                            str(edge.get("source_id", "")),
+                            str(edge.get("target_id", "")),
+                            str(edge.get("relation", "")),
+                        )
+                        if signature in edge_seen:
+                            continue
+                        edge_seen.add(signature)
+                        matched_edges.append(
+                            {
+                                "source_id": signature[0],
+                                "target_id": signature[1],
+                                "relation": signature[2],
+                                "weight": float(edge.get("weight", 0.0) or 0.0),
+                                "memory_ref_count": len(list(edge.get("memory_ids", []) or [])),
+                            }
+                        )
+                        if len(matched_edges) >= limit:
+                            break
+                    if len(matched_edges) >= limit:
+                        break
+
+            payload["results"]["graph"] = {
+                "focus_entity_id": focus_entity_id or "",
+                "matched_entities": matched_entities[:limit],
+                "edges": matched_edges[:limit],
+            }
+        except Exception as e:
+            payload["errors"]["graph"] = str(e)
+
+    if "ambient" in sources:
+        try:
+            ambient_items: list[dict[str, Any]] = []
+            db_used = "none"
+
+            if metadata_store is not None and getattr(metadata_store, "conn", None) is not None and bool(getattr(metadata_store, "_use_duckdb", False)):
+                conn = metadata_store.conn
+                if _duckdb_table_exists(conn, "ambient_conversations"):
+                    db_used = "duckdb"
+                    if query:
+                        conv_rows = conn.execute(
+                            """
+                            SELECT id, started_at, ended_at, duration_seconds,
+                                   participants, turn_count, topic_labels,
+                                   importance_score, raw_transcript
+                            FROM ambient_conversations
+                            WHERE lower(raw_transcript) LIKE ?
+                            ORDER BY ended_at DESC
+                            LIMIT ?
+                            """,
+                            [f"%{query.lower()}%", limit],
+                        ).fetchall()
+                    else:
+                        conv_rows = conn.execute(
+                            """
+                            SELECT id, started_at, ended_at, duration_seconds,
+                                   participants, turn_count, topic_labels,
+                                   importance_score, raw_transcript
+                            FROM ambient_conversations
+                            ORDER BY ended_at DESC
+                            LIMIT ?
+                            """,
+                            [limit],
+                        ).fetchall()
+
+                    for row in conv_rows:
+                        participants = _safe_json_list(row[4]) if isinstance(row[4], str) else list(row[4] or [])
+                        topics = _safe_json_list(row[6]) if isinstance(row[6], str) else list(row[6] or [])
+                        ambient_items.append(
+                            {
+                                "record_type": "conversation",
+                                "id": str(row[0] or ""),
+                                "started_at": str(row[1] or ""),
+                                "ended_at": str(row[2] or ""),
+                                "duration_seconds": float(row[3] or 0.0),
+                                "participants": participants[:6],
+                                "turn_count": int(row[5] or 0),
+                                "topic_labels": topics[:6],
+                                "importance_score": float(row[7] or 0.0),
+                                "transcript_preview": _clip_text(row[8] or "", 360),
+                            }
+                        )
+
+                if len(ambient_items) < limit and _duckdb_table_exists(conn, "ambient_conversation_turns"):
+                    if query:
+                        turn_rows = conn.execute(
+                            """
+                            SELECT conversation_id, turn_index, speaker, speaker_name, text, timestamp_s
+                            FROM ambient_conversation_turns
+                            WHERE lower(text) LIKE ?
+                            ORDER BY conversation_id DESC, turn_index DESC
+                            LIMIT ?
+                            """,
+                            [f"%{query.lower()}%", max(limit - len(ambient_items), 1)],
+                        ).fetchall()
+                    else:
+                        turn_rows = conn.execute(
+                            """
+                            SELECT conversation_id, turn_index, speaker, speaker_name, text, timestamp_s
+                            FROM ambient_conversation_turns
+                            ORDER BY conversation_id DESC, turn_index DESC
+                            LIMIT ?
+                            """,
+                            [max(limit - len(ambient_items), 1)],
+                        ).fetchall()
+
+                    for row in turn_rows:
+                        ambient_items.append(
+                            {
+                                "record_type": "turn",
+                                "conversation_id": str(row[0] or ""),
+                                "turn_index": int(row[1] or 0),
+                                "speaker": str(row[2] or ""),
+                                "speaker_name": str(row[3] or ""),
+                                "text": _clip_text(row[4] or "", 280),
+                                "timestamp_s": float(row[5] or 0.0),
+                            }
+                        )
+                        if len(ambient_items) >= limit:
+                            break
+
+            if not ambient_items:
+                sqlite_conn = _open_sqlite_ambient_connection()
+                if sqlite_conn is not None:
+                    try:
+                        exists = sqlite_conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table' AND name='ambient_conversations'"
+                        ).fetchone()
+                        if exists:
+                            db_used = "sqlite"
+                            if query:
+                                conv_rows = sqlite_conn.execute(
+                                    """
+                                    SELECT id, started_at, ended_at, duration_seconds,
+                                           participants, turn_count, topic_labels,
+                                           importance_score, raw_transcript
+                                    FROM ambient_conversations
+                                    WHERE lower(raw_transcript) LIKE ?
+                                    ORDER BY ended_at DESC
+                                    LIMIT ?
+                                    """,
+                                    (f"%{query.lower()}%", limit),
+                                ).fetchall()
+                            else:
+                                conv_rows = sqlite_conn.execute(
+                                    """
+                                    SELECT id, started_at, ended_at, duration_seconds,
+                                           participants, turn_count, topic_labels,
+                                           importance_score, raw_transcript
+                                    FROM ambient_conversations
+                                    ORDER BY ended_at DESC
+                                    LIMIT ?
+                                    """,
+                                    (limit,),
+                                ).fetchall()
+
+                            for row in conv_rows:
+                                participants = _safe_json_list(row[4])
+                                topics = _safe_json_list(row[6])
+                                ambient_items.append(
+                                    {
+                                        "record_type": "conversation",
+                                        "id": str(row[0] or ""),
+                                        "started_at": str(row[1] or ""),
+                                        "ended_at": str(row[2] or ""),
+                                        "duration_seconds": float(row[3] or 0.0),
+                                        "participants": participants[:6],
+                                        "turn_count": int(row[5] or 0),
+                                        "topic_labels": topics[:6],
+                                        "importance_score": float(row[7] or 0.0),
+                                        "transcript_preview": _clip_text(row[8] or "", 360),
+                                    }
+                                )
+
+                            if len(ambient_items) < limit:
+                                turn_exists = sqlite_conn.execute(
+                                    "SELECT name FROM sqlite_master WHERE type='table' AND name='ambient_conversation_turns'"
+                                ).fetchone()
+                                if turn_exists:
+                                    if query:
+                                        turn_rows = sqlite_conn.execute(
+                                            """
+                                            SELECT conversation_id, turn_index, speaker, speaker_name, text, timestamp_s
+                                            FROM ambient_conversation_turns
+                                            WHERE lower(text) LIKE ?
+                                            ORDER BY conversation_id DESC, turn_index DESC
+                                            LIMIT ?
+                                            """,
+                                            (f"%{query.lower()}%", max(limit - len(ambient_items), 1)),
+                                        ).fetchall()
+                                    else:
+                                        turn_rows = sqlite_conn.execute(
+                                            """
+                                            SELECT conversation_id, turn_index, speaker, speaker_name, text, timestamp_s
+                                            FROM ambient_conversation_turns
+                                            ORDER BY conversation_id DESC, turn_index DESC
+                                            LIMIT ?
+                                            """,
+                                            (max(limit - len(ambient_items), 1),),
+                                        ).fetchall()
+
+                                    for row in turn_rows:
+                                        ambient_items.append(
+                                            {
+                                                "record_type": "turn",
+                                                "conversation_id": str(row[0] or ""),
+                                                "turn_index": int(row[1] or 0),
+                                                "speaker": str(row[2] or ""),
+                                                "speaker_name": str(row[3] or ""),
+                                                "text": _clip_text(row[4] or "", 280),
+                                                "timestamp_s": float(row[5] or 0.0),
+                                            }
+                                        )
+                                        if len(ambient_items) >= limit:
+                                            break
+                    finally:
+                        sqlite_conn.close()
+
+            payload["results"]["ambient"] = ambient_items[:limit]
+            payload["results"]["ambient_db"] = db_used
+        except Exception as e:
+            payload["errors"]["ambient"] = str(e)
+
+    if "session_forge" in sources:
+        try:
+            from src.applications import session_memory_forge_service
+
+            artifact_types = [
+                "thought_objects",
+                "decision_records",
+                "open_loops",
+                "gap_signals",
+                "belief_evolution",
+                "structured_summaries",
+            ]
+
+            forge_items: list[dict[str, Any]] = []
+            for artifact_type in artifact_types:
+                rows = session_memory_forge_service.list_artifacts(
+                    artifact_type,
+                    limit=max(limit * 3, limit),
+                    session_id=session_id,
+                )
+                for row in rows:
+                    if query and not _query_contains(query, json.dumps(row, default=str)):
+                        continue
+                    forge_items.append(
+                        {
+                            "artifact_type": artifact_type,
+                            "source_session": row.get("source_session", ""),
+                            "timestamp": row.get("timestamp", row.get("created_at", "")),
+                            "preview": _clip_text(
+                                row.get("core_claim", "")
+                                or row.get("decision_text", "")
+                                or row.get("question", "")
+                                or row.get("narrative_summary", "")
+                                or json.dumps(row, default=str),
+                                320,
+                            ),
+                            "payload": row,
+                        }
+                    )
+                    if len(forge_items) >= limit:
+                        break
+                if len(forge_items) >= limit:
+                    break
+
+            payload["results"]["session_forge"] = forge_items[:limit]
+        except Exception as e:
+            payload["errors"]["session_forge"] = str(e)
+
+    if "chronicle" in sources:
+        try:
+            from src.applications import life_chronicle_service
+
+            moments = life_chronicle_service.list_moments(limit=max(limit * 4, limit), tag="")
+            chronicle_items: list[dict[str, Any]] = []
+            for moment in moments:
+                if query and not _query_contains(
+                    query,
+                    moment.get("title", ""),
+                    moment.get("narrative", ""),
+                    moment.get("retrieval_hint", ""),
+                    " ".join(moment.get("tags", []) or []),
+                    " ".join(moment.get("people_present", []) or []),
+                ):
+                    continue
+
+                chronicle_items.append(
+                    {
+                        "memory_id": moment.get("memory_id", ""),
+                        "title": moment.get("title", ""),
+                        "timestamp": moment.get("timestamp", ""),
+                        "life_domain": moment.get("life_domain", ""),
+                        "importance_score": float(moment.get("importance_score", 0.0) or 0.0),
+                        "tags": list(moment.get("tags", []) or [])[:8],
+                        "people_present": list(moment.get("people_present", []) or [])[:8],
+                        "narrative_preview": _clip_text(moment.get("narrative", ""), 360),
+                        "retrieval_hint": _clip_text(moment.get("retrieval_hint", ""), 140),
+                    }
+                )
+                if len(chronicle_items) >= limit:
+                    break
+
+            payload["results"]["chronicle"] = chronicle_items
+        except Exception as e:
+            payload["errors"]["chronicle"] = str(e)
+
+    for source in sources:
+        value = payload["results"].get(source)
+        if isinstance(value, list):
+            payload["counts"][source] = len(value)
+        elif isinstance(value, dict):
+            payload["counts"][source] = (
+                len(list(value.get("matched_entities", []) or []))
+                + len(list(value.get("edges", []) or []))
+            )
+        else:
+            payload["counts"][source] = 0
+
+    for source in sources:
+        source_result = payload["results"].get(source)
+        if isinstance(source_result, list):
+            for item in source_result[:2]:
+                preview = (
+                    item.get("content")
+                    or item.get("text")
+                    or item.get("title")
+                    or item.get("preview")
+                    or item.get("transcript_preview")
+                    or item.get("narrative_preview")
+                    or ""
+                )
+                if preview:
+                    payload["top_hits"].append(
+                        {
+                            "source": source,
+                            "preview": _clip_text(preview, 180),
+                        }
+                    )
+        elif isinstance(source_result, dict):
+            for entity in list(source_result.get("matched_entities", []) or [])[:2]:
+                name = str(entity.get("canonical_name", "") or entity.get("id", "")).strip()
+                if name:
+                    payload["top_hits"].append(
+                        {
+                            "source": source,
+                            "preview": _clip_text(name, 180),
+                        }
+                    )
+
+    if not payload["top_hits"] and not payload["errors"]:
+        payload["top_hits"] = [{"source": "none", "preview": "No matching records found"}]
+
+    return ToolResult(tool_call_id=call_id, content=json.dumps(payload, default=str))
+
+
+query_personal_data_tool = ToolDefinition(
+    name="query_personal_data",
+    label="Query Personal Data",
+    description=(
+        "Search all persisted personal data planes (memories, conversations, wiki, claims, "
+        "graph, ambient archives, session forge artifacts, and chronicle moments)."
+    ),
+    parameters_schema=QueryPersonalDataParams,
+    execute=_query_personal_data,
+    prompt_snippet="Use this as the first retrieval step when the user asks about previously stored information.",
+)
+
+
+class GetPersonalDataStatsParams(BaseModel):
+    include_samples: bool = Field(False, description="Include small sample identifiers per data source")
+
+
+async def _get_personal_data_stats(call_id: str, params: dict[str, Any]) -> ToolResult:
+    from src.engine import rag_engine
+
+    include_samples = bool(params.get("include_samples", False))
+    payload: dict[str, Any] = {
+        "runtime_initialized": bool(getattr(rag_engine, "initialized", False)),
+        "sources": {},
+        "errors": {},
+    }
+
+    metadata_store = None
+    try:
+        metadata_store = _get_metadata_store()
+        payload["sources"]["memories"] = metadata_store.get_stats()
+
+        conn = getattr(metadata_store, "conn", None)
+        if conn is not None and bool(getattr(metadata_store, "_use_duckdb", False)):
+            ambient_stats = {
+                "backend": "duckdb",
+                "conversations": 0,
+                "turns": 0,
+            }
+            if _duckdb_table_exists(conn, "ambient_conversations"):
+                ambient_stats["conversations"] = int(
+                    conn.execute("SELECT COUNT(*) FROM ambient_conversations").fetchone()[0]
+                )
+            if _duckdb_table_exists(conn, "ambient_conversation_turns"):
+                ambient_stats["turns"] = int(
+                    conn.execute("SELECT COUNT(*) FROM ambient_conversation_turns").fetchone()[0]
+                )
+            payload["sources"]["ambient"] = ambient_stats
+    except Exception as e:
+        payload["errors"]["memories"] = str(e)
+
+    if "ambient" not in payload["sources"]:
+        sqlite_conn = _open_sqlite_ambient_connection()
+        if sqlite_conn is not None:
+            try:
+                ambient_stats = {
+                    "backend": "sqlite",
+                    "conversations": 0,
+                    "turns": 0,
+                }
+                exists = sqlite_conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='ambient_conversations'"
+                ).fetchone()
+                if exists:
+                    ambient_stats["conversations"] = int(
+                        sqlite_conn.execute("SELECT COUNT(*) FROM ambient_conversations").fetchone()[0]
+                    )
+                turn_exists = sqlite_conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='ambient_conversation_turns'"
+                ).fetchone()
+                if turn_exists:
+                    ambient_stats["turns"] = int(
+                        sqlite_conn.execute("SELECT COUNT(*) FROM ambient_conversation_turns").fetchone()[0]
+                    )
+                payload["sources"]["ambient"] = ambient_stats
+            except Exception as e:
+                payload["errors"]["ambient"] = str(e)
+            finally:
+                sqlite_conn.close()
+
+    try:
+        from src.wiki.wiki_store import WikiStore
+
+        wiki_store = WikiStore.get_instance()
+        wiki_stats = wiki_store.stats()
+        if include_samples:
+            wiki_stats["sample_pages"] = [
+                page.get("title", "")
+                for page in wiki_store.list_pages(limit=3)
+            ]
+        payload["sources"]["wiki"] = wiki_stats
+    except Exception as e:
+        payload["errors"]["wiki"] = str(e)
+
+    try:
+        from src.wiki.claim_store import ClaimStore
+
+        claim_store = ClaimStore.get_instance()
+        claim_stats = claim_store.stats()
+        if include_samples:
+            claim_stats["sample_claims"] = [
+                row.get("text", "")
+                for row in claim_store.search("", min_confidence=0.0, limit=3)
+            ]
+        payload["sources"]["claims"] = claim_stats
+    except Exception as e:
+        payload["errors"]["claims"] = str(e)
+
+    try:
+        graph = _get_knowledge_graph()
+        payload["sources"]["graph"] = graph.get_stats()
+    except Exception as e:
+        payload["errors"]["graph"] = str(e)
+
+    try:
+        from src.applications import session_memory_forge_service
+
+        forge_status = session_memory_forge_service.status()
+        if not include_samples:
+            forge_status.pop("updated_at", None)
+        payload["sources"]["session_forge"] = forge_status
+    except Exception as e:
+        payload["errors"]["session_forge"] = str(e)
+
+    try:
+        from src.applications import life_chronicle_service
+
+        chronicle_status = life_chronicle_service.status()
+        if not include_samples:
+            chronicle_status.pop("updated_at", None)
+        payload["sources"]["chronicle"] = chronicle_status
+    except Exception as e:
+        payload["errors"]["chronicle"] = str(e)
+
+    payload["error_count"] = len(payload["errors"])
+    return ToolResult(tool_call_id=call_id, content=json.dumps(payload, default=str))
+
+
+get_personal_data_stats_tool = ToolDefinition(
+    name="get_personal_data_stats",
+    label="Get Personal Data Stats",
+    description="Return availability and counts across all persisted personal data sources.",
+    parameters_schema=GetPersonalDataStatsParams,
+    execute=_get_personal_data_stats,
 )
 
 
@@ -173,7 +1097,7 @@ async def _classify_query_tier(call_id: str, params: dict[str, Any]) -> ToolResu
     from src.retrieval.query_engine import QueryAnalyzer
     try:
         analyzer = QueryAnalyzer()
-        analysis = await analyzer.analyze(params["query"])
+        analysis = analyzer.analyze(params["query"])
         tier = "T0"
         if analysis.complexity > 0.3:
             tier = "T1"
@@ -211,7 +1135,7 @@ async def _analyze_query_intent(call_id: str, params: dict[str, Any]) -> ToolRes
     from src.retrieval.query_engine import QueryAnalyzer
     try:
         analyzer = QueryAnalyzer()
-        analysis = await analyzer.analyze(params["query"])
+        analysis = analyzer.analyze(params["query"])
         return ToolResult(
             tool_call_id=call_id,
             content=json.dumps({
@@ -237,11 +1161,14 @@ class SpawnAgentParams(BaseModel):
     agent_id: str = Field(..., description="Agent config ID to spawn")
     query: str = Field(..., description="Query/instruction for the agent")
     context: str | None = Field(None, description="Additional context")
+    metadata: dict[str, Any] | None = Field(None, description="Optional runtime metadata (trace, parent task, session)")
 
 async def _spawn_agent(call_id: str, params: dict[str, Any]) -> ToolResult:
     try:
         from src.agents.agent_configs import ALL_AGENT_CONFIGS
         from src.agents.autonomous_loop import CortexAgentLoop
+        from src.agents.llm_adapter import make_cortex_loop_llm_fn
+        from src.engine import rag_engine
         agent_id = params["agent_id"]
         config = ALL_AGENT_CONFIGS.get(agent_id)
         if not config:
@@ -250,14 +1177,32 @@ async def _spawn_agent(call_id: str, params: dict[str, Any]) -> ToolResult:
                 content=f"Unknown agent: {agent_id}. Available: {list(ALL_AGENT_CONFIGS.keys())}",
                 is_error=True,
             )
-        loop = CortexAgentLoop(config=config)
-        result = await loop.prompt(params["query"])
+        llm_fn = make_cortex_loop_llm_fn(
+            rag_engine.llm,
+            preferred_provider=config.llm_provider,
+        )
+        metadata = dict(params.get("metadata") or {})
+        parent_task_id = str(metadata.get("parent_task_id", "")).strip() or None
+        loop = CortexAgentLoop(
+            config=config,
+            llm_fn=llm_fn,
+            runtime_task_manager=getattr(rag_engine, "runtime_task_manager", None),
+            parent_task_id=parent_task_id,
+        )
+
+        prompt = str(params["query"])
+        context = str(params.get("context") or "").strip()
+        if context:
+            prompt = f"{prompt}\n\nAdditional context:\n{context[:4000]}"
+
+        result = await loop.prompt(prompt)
         return ToolResult(
             tool_call_id=call_id,
             content=json.dumps({
                 "agent_id": agent_id,
                 "text": result.get("text", ""),
                 "turns": result.get("turns", 0),
+                "tool_results": result.get("tool_results", []),
             }, default=str),
         )
     except Exception as e:
@@ -358,19 +1303,65 @@ compress_evidence_tool = ToolDefinition(
 
 class GenerateAnswerPlanParams(BaseModel):
     query: str = Field(..., description="Original query")
-    evidence_summary: str = Field(..., description="Compressed evidence summary")
-    agent_results: list[str] | None = Field(None, description="Results from specialist agents")
+    evidence_summary: str = Field("", description="Compressed evidence summary")
+    agent_results: list[Any] | None = Field(None, description="Results from specialist agents")
+    evidence_ids: list[str] | None = Field(None, description="Selected evidence IDs")
+    confidence: float = Field(0.0, description="Current confidence score")
+    arbitration_notes: list[str] | None = Field(None, description="Conflict/arbitration notes")
+    generation_policy: str = Field("default", description="Generation policy label")
+    source_wiki_pages: list[str] | None = Field(None, description="Source wiki page IDs")
+    source_claim_ids: list[str] | None = Field(None, description="Source claim IDs")
+    source_event_ids: list[str] | None = Field(None, description="Source event IDs")
+    quality_loops: dict[str, Any] | None = Field(None, description="Quality loop status map")
 
 async def _generate_answer_plan(call_id: str, params: dict[str, Any]) -> ToolResult:
-    return ToolResult(
-        tool_call_id=call_id,
-        content=json.dumps({
-            "plan": "synthesize",
-            "query": params["query"],
-            "evidence_length": len(params.get("evidence_summary", "")),
-            "agent_count": len(params.get("agent_results", []) or []),
-        }),
+    from src.models import AnswerPlan
+
+    evidence_ids = [str(item) for item in list(params.get("evidence_ids", []) or []) if item]
+    wiki_pages = [str(item) for item in list(params.get("source_wiki_pages", []) or []) if item]
+    claim_ids = [str(item) for item in list(params.get("source_claim_ids", []) or []) if item]
+    event_ids = [str(item) for item in list(params.get("source_event_ids", []) or []) if item]
+
+    arbitration_notes = [
+        str(item)
+        for item in list(params.get("arbitration_notes", []) or [])
+        if str(item).strip()
+    ]
+
+    agent_results = list(params.get("agent_results", []) or [])
+    conflict_signals = 0
+    for item in agent_results:
+        text = str(item).lower()
+        if any(token in text for token in ("conflict", "contradict", "inconsistent", "tradeoff")):
+            conflict_signals += 1
+    if conflict_signals and not arbitration_notes:
+        arbitration_notes.append(f"Detected {conflict_signals} potential conflict signals in agent outputs.")
+
+    evidence_summary = str(params.get("evidence_summary", "") or "")
+    confidence = max(0.0, min(1.0, float(params.get("confidence", 0.0))))
+
+    plan = AnswerPlan(
+        selected_evidence_ids=evidence_ids,
+        confidence=confidence,
+        confidence_composition={
+            "provided_confidence": confidence,
+            "evidence_summary_density": min(len(evidence_summary) / 1200.0, 1.0),
+            "agent_coverage": min(len(agent_results) / 5.0, 1.0),
+        },
+        arbitration_notes=arbitration_notes,
+        generation_policy=str(params.get("generation_policy", "default") or "default"),
+        citation_required=bool(evidence_ids or evidence_summary),
+        source_wiki_pages=wiki_pages,
+        source_claim_ids=claim_ids,
+        source_event_ids=event_ids,
+        quality_loops=dict(params.get("quality_loops", {}) or {}),
     )
+
+    payload = plan.to_dict()
+    payload["query"] = params.get("query", "")
+    payload["agent_count"] = len(agent_results)
+    payload["evidence_summary_length"] = len(evidence_summary)
+    return ToolResult(tool_call_id=call_id, content=json.dumps(payload))
 
 generate_answer_plan_tool = ToolDefinition(
     name="generate_answer_plan",
@@ -392,10 +1383,21 @@ class BuildEventTimelineParams(BaseModel):
 
 async def _build_event_timeline(call_id: str, params: dict[str, Any]) -> ToolResult:
     try:
-        from src.storage.duckdb_store import DuckDBStore
-        store = DuckDBStore.get_instance()
-        events = store.query_by_topic(params["topic"], limit=50)
-        timeline = sorted(events, key=lambda e: e.get("timestamp", ""))
+        store = _get_metadata_store()
+        events = store.search_by_topic(params["topic"], limit=200)
+        timeline = []
+        for event in events:
+            data = _to_memory_dict(event)
+            timeline.append(
+                {
+                    "id": data.get("id", ""),
+                    "timestamp": data.get("timestamp", ""),
+                    "content": data.get("content", ""),
+                    "topics": data.get("topics", []),
+                    "entities": data.get("entities", []),
+                }
+            )
+        timeline.sort(key=lambda e: str(e.get("timestamp", "")))
         return ToolResult(tool_call_id=call_id, content=json.dumps(timeline, default=str))
     except Exception as e:
         return ToolResult(tool_call_id=call_id, content=f"Timeline build error: {e}", is_error=True)
@@ -443,10 +1445,18 @@ class TraceCausalChainParams(BaseModel):
 
 async def _trace_causal_chain(call_id: str, params: dict[str, Any]) -> ToolResult:
     try:
-        from src.storage.graph_store import GraphStore
-        store = GraphStore.get_instance()
-        chain = store.trace_causes(params["event"], max_depth=params.get("max_depth", 5))
-        return ToolResult(tool_call_id=call_id, content=json.dumps(chain, default=str))
+        graph = _get_knowledge_graph()
+        requested = str(params["event"])
+        entity_id = graph.find_entity_by_name(requested) or requested
+        chain = graph.get_causal_chain(entity_id, direction="backward")
+        if params.get("max_depth"):
+            chain = chain[: max(int(params.get("max_depth", 5)), 1)]
+        payload = {
+            "event": requested,
+            "entity_id": entity_id,
+            "causal_chain": chain,
+        }
+        return ToolResult(tool_call_id=call_id, content=json.dumps(payload, default=str))
     except Exception as e:
         return ToolResult(tool_call_id=call_id, content=f"Causal trace error: {e}", is_error=True)
 
@@ -465,9 +1475,21 @@ class DetectBeliefChangeParams(BaseModel):
 
 async def _detect_belief_change(call_id: str, params: dict[str, Any]) -> ToolResult:
     try:
-        from src.storage.duckdb_store import DuckDBStore
-        store = DuckDBStore.get_instance()
-        changes = store.detect_belief_changes(params["topic"], days=params.get("time_range_days", 90))
+        store = _get_metadata_store()
+        deltas = store.get_belief_deltas(topic=params["topic"], limit=200)
+        days = int(params.get("time_range_days", 90) or 90)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max(days, 1))
+
+        changes = []
+        for delta in deltas:
+            detected_at = str(delta.get("detected_at", ""))
+            try:
+                dt = _parse_iso_datetime(detected_at)
+            except Exception:
+                continue
+            if dt >= cutoff:
+                changes.append(delta)
+
         return ToolResult(tool_call_id=call_id, content=json.dumps(changes, default=str))
     except Exception as e:
         return ToolResult(tool_call_id=call_id, content=f"Belief detection error: {e}", is_error=True)
@@ -559,14 +1581,25 @@ class ExtractClaimsParams(BaseModel):
     source_id: str = Field(..., description="Source memory/document ID")
 
 async def _extract_claims(call_id: str, params: dict[str, Any]) -> ToolResult:
-    return ToolResult(
-        tool_call_id=call_id,
-        content=json.dumps({
-            "claims": [],
-            "source_id": params["source_id"],
-            "note": "LLM-powered claim extraction — model generates atomic facts",
-        }),
-    )
+    try:
+        from src.wiki.materializer import extract_claim_candidates
+
+        claims = extract_claim_candidates(
+            content=str(params.get("content", "")),
+            max_claims=12,
+        )
+        return ToolResult(
+            tool_call_id=call_id,
+            content=json.dumps(
+                {
+                    "claims": claims,
+                    "count": len(claims),
+                    "source_id": params["source_id"],
+                }
+            ),
+        )
+    except Exception as e:
+        return ToolResult(tool_call_id=call_id, content=f"Claim extraction error: {e}", is_error=True)
 
 extract_claims_tool = ToolDefinition(
     name="extract_claims",
@@ -591,6 +1624,7 @@ async def _upsert_claim(call_id: str, params: dict[str, Any]) -> ToolResult:
             claim=params["claim"],
             confidence=params.get("confidence", 0.8),
             source_ids=params.get("source_ids", []),
+            topic=params.get("topic", ""),
         )
         return ToolResult(tool_call_id=call_id, content=json.dumps({"claim_id": claim_id}))
     except ImportError:
@@ -669,12 +1703,21 @@ create_wiki_page_tool = ToolDefinition(
 
 class LintWikiPageParams(BaseModel):
     page_id: str = Field(..., description="Page ID to lint")
+    stale_days: int = Field(90, description="Mark pages stale after N days")
+    min_confidence: float = Field(0.45, description="Minimum claim confidence threshold")
 
 async def _lint_wiki_page(call_id: str, params: dict[str, Any]) -> ToolResult:
-    return ToolResult(
-        tool_call_id=call_id,
-        content=json.dumps({"page_id": params["page_id"], "issues": [], "status": "clean"}),
-    )
+    try:
+        from src.wiki.lint import WikiLinter
+
+        report = WikiLinter().lint_page(
+            page_id=params["page_id"],
+            stale_days=int(params.get("stale_days", 90)),
+            min_confidence=float(params.get("min_confidence", 0.45)),
+        )
+        return ToolResult(tool_call_id=call_id, content=json.dumps(report))
+    except Exception as e:
+        return ToolResult(tool_call_id=call_id, content=f"Wiki lint error: {e}", is_error=True)
 
 lint_wiki_page_tool = ToolDefinition(
     name="lint_wiki_page",
@@ -691,10 +1734,17 @@ class CompactWikiSectionParams(BaseModel):
     max_tokens: int = Field(500, description="Target size after compaction")
 
 async def _compact_wiki_section(call_id: str, params: dict[str, Any]) -> ToolResult:
-    return ToolResult(
-        tool_call_id=call_id,
-        content=json.dumps({"compacted": True, "page_id": params["page_id"], "section": params["section"]}),
-    )
+    try:
+        from src.wiki.compactor import WikiCompactor
+
+        result = WikiCompactor().compact_section(
+            page_id=params["page_id"],
+            section=params["section"],
+            max_tokens=int(params.get("max_tokens", 500)),
+        )
+        return ToolResult(tool_call_id=call_id, content=json.dumps(result))
+    except Exception as e:
+        return ToolResult(tool_call_id=call_id, content=f"Wiki compaction error: {e}", is_error=True)
 
 compact_wiki_section_tool = ToolDefinition(
     name="compact_wiki_section",
@@ -717,15 +1767,15 @@ class IngestMemoryParams(BaseModel):
 
 async def _ingest_memory(call_id: str, params: dict[str, Any]) -> ToolResult:
     try:
-        from src.ingestion import IngestionPipeline
-        pipeline = IngestionPipeline.get_instance()
-        memory_id = await pipeline.ingest(
+        from src.engine import rag_engine
+
+        result = await rag_engine.ingest_memory(
             content=params["content"],
-            memory_type=params.get("memory_type", "episodic"),
             source=params.get("source", "chat"),
-            metadata=params.get("metadata"),
+            session_id=str((params.get("metadata") or {}).get("session_id", "")),
         )
-        return ToolResult(tool_call_id=call_id, content=json.dumps({"memory_id": memory_id}))
+        memory_id = str((result or {}).get("id", ""))
+        return ToolResult(tool_call_id=call_id, content=json.dumps({"memory_id": memory_id, "memory": result}))
     except Exception as e:
         return ToolResult(tool_call_id=call_id, content=f"Ingestion error: {e}", is_error=True)
 
@@ -746,14 +1796,24 @@ class UpdateGraphEdgeParams(BaseModel):
 
 async def _update_graph_edge(call_id: str, params: dict[str, Any]) -> ToolResult:
     try:
-        from src.storage.graph_store import GraphStore
-        store = GraphStore.get_instance()
-        store.add_edge(
-            params["source_entity"],
-            params["target_entity"],
-            relationship=params["relationship"],
-            weight=params.get("weight", 1.0),
+        from src.models import GraphEdge
+
+        graph = _get_knowledge_graph()
+        metadata = _get_metadata_store()
+
+        edge = GraphEdge(
+            source_id=params["source_entity"],
+            target_id=params["target_entity"],
+            relation=params["relationship"],
+            weight=float(params.get("weight", 1.0)),
+            memory_ids=[],
         )
+        graph.add_edge(edge)
+        try:
+            metadata.store_edge(edge)
+        except Exception:
+            pass
+
         return ToolResult(tool_call_id=call_id, content=json.dumps({"updated": True}))
     except Exception as e:
         return ToolResult(tool_call_id=call_id, content=f"Graph edge error: {e}", is_error=True)

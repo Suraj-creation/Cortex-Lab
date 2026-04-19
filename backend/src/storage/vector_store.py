@@ -273,6 +273,84 @@ class VectorStore:
         """Return number of live (non-deleted) vectors."""
         return len(self.vectors)
 
+    def tombstone_stats(self) -> Dict[str, float]:
+        """Return tombstone/deletion pressure stats for maintenance decisions."""
+        live_count = len(self.vectors)
+        deleted_count = len(self._deleted_ids)
+        total_observed = live_count + deleted_count
+        deleted_ratio = (deleted_count / total_observed) if total_observed > 0 else 0.0
+        return {
+            "live_count": live_count,
+            "deleted_count": deleted_count,
+            "deleted_ratio": round(float(deleted_ratio), 4),
+            "total_observed": total_observed,
+        }
+
+    def compact_tombstones(
+        self,
+        force: bool = False,
+        min_deleted: int = 100,
+        min_deleted_ratio: float = 0.15,
+    ) -> Dict[str, float]:
+        """Compact tombstones by rebuilding live index mappings.
+
+        FAISS does not support efficient in-place deletion. This method removes
+        accumulated tombstones by rebuilding the searchable tier indexes from
+        live vectors only.
+        """
+        before = self.tombstone_stats()
+        deleted_count = int(before["deleted_count"])
+        deleted_ratio = float(before["deleted_ratio"])
+
+        if deleted_count == 0:
+            return {"compacted": False, "reason": "no_tombstones", **before}
+
+        if not force and deleted_count < max(int(min_deleted), 0) and deleted_ratio < float(min_deleted_ratio):
+            return {
+                "compacted": False,
+                "reason": "below_threshold",
+                **before,
+            }
+
+        live_items = list(self.vectors.items())
+
+        # Reset FAISS tier indexes and ID maps from live vectors only.
+        self.hot_ids = []
+        self.warm_ids = []
+        self.cold_ids = []
+
+        if self._use_faiss:
+            self.hot_index = None
+            self.warm_index = None
+            self.cold_index = None
+            self._init_indices()
+
+            if live_items and self.hot_index is not None:
+                ids = [mid for mid, _ in live_items]
+                vectors = np.array([vec for _, vec in live_items], dtype=np.float32)
+                vectors = _l2_normalize(vectors)
+                self.hot_index.add(vectors)
+                self.hot_ids = ids
+
+            # Re-populate warm/cold tiers based on timestamps.
+            try:
+                self.migrate_tiers()
+            except Exception:
+                pass
+
+        self._deleted_ids.clear()
+        after = self.tombstone_stats()
+        removed = deleted_count - int(after["deleted_count"])
+
+        return {
+            "compacted": True,
+            "deleted_compacted": max(removed, 0),
+            "live_count": after["live_count"],
+            "deleted_count": after["deleted_count"],
+            "deleted_ratio": after["deleted_ratio"],
+            "total_observed": after["total_observed"],
+        }
+
     def save(self):
         """Persist state to disk (all tiers + deleted IDs)."""
         state = {
@@ -396,6 +474,7 @@ class VectorStore:
             "hot_count": hot,
             "warm_count": warm,
             "cold_count": cold,
+            "deleted_tombstones": len(self._deleted_ids),
             "using_faiss": self._use_faiss,
             "dimension": self.dimension,
         }

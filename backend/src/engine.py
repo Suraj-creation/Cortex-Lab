@@ -55,11 +55,17 @@ class CortexRAGEngine:
     def __init__(self, data_dir: Optional[str] = None):
         # Resolve data path from env or backend-root default so startup is stable
         # regardless of the process working directory.
+        data_source = "argument"
         if data_dir is None:
             data_dir = os.environ.get("CORTEX_DATA_DIR")
+            data_source = "env:CORTEX_DATA_DIR"
         if not data_dir:
             data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
+            data_source = "default:backend/data"
 
+        self._data_dir_source = data_source
+        self._data_dir_raw = data_dir
+        self._data_dir_was_relative = not os.path.isabs(data_dir)
         self.data_dir = os.path.abspath(data_dir)
         os.makedirs(self.data_dir, exist_ok=True)
         self.initialized = False
@@ -106,6 +112,9 @@ class CortexRAGEngine:
         print("\n" + "=" * 60)
         print("  🧠 Initializing Cortex Lab RAG Engine v2.1")
         print("  📦 BGE-large-1024d + CrossEncoder + Fine-Tuned 7B + PageIndex")
+        print(f"  📁 Data root: {self.data_dir} ({self._data_dir_source})")
+        if self._data_dir_was_relative:
+            print(f"  🧭 Normalized relative data path '{self._data_dir_raw}' → '{self.data_dir}'")
         print("=" * 60)
 
         _has_cuda = torch is not None and torch.cuda.is_available()
@@ -223,10 +232,15 @@ class CortexRAGEngine:
         print("[11/11] PageIndex Document Store...")
         try:
             from config.pageindex_config import PAGEINDEX_CONFIG
-            if PAGEINDEX_CONFIG.get("enabled", False):
+            pageindex_enabled = bool(PAGEINDEX_CONFIG.get("enabled", False))
+            pageindex_api_key = str(PAGEINDEX_CONFIG.get("api_key", "") or "").strip()
+
+            if pageindex_enabled and not pageindex_api_key:
+                print("  ⚠ PageIndex enabled but PAGEINDEX_API_KEY is missing; channel disabled")
+            elif pageindex_enabled:
                 from src.storage.pageindex_store import PageIndexStore
                 self.pageindex_store = PageIndexStore(
-                    api_key=PAGEINDEX_CONFIG["api_key"],
+                    api_key=pageindex_api_key,
                     data_dir=f"{self.data_dir}/pageindex",
                     config=PAGEINDEX_CONFIG,
                 )
@@ -252,6 +266,23 @@ class CortexRAGEngine:
                 self.vector_store.migrate_tiers()
         except Exception as e:
             print(f"  ⚠ Tier migration skipped: {e}")
+
+        # Opportunistic startup compaction: removes accumulated tombstones
+        # before query load ramps up.
+        try:
+            if self.vector_store:
+                compaction = self.vector_store.compact_tombstones(
+                    force=False,
+                    min_deleted=200,
+                    min_deleted_ratio=0.20,
+                )
+                if compaction.get("compacted"):
+                    print(
+                        "  ♻ Vector tombstone compaction: "
+                        f"{compaction.get('deleted_compacted', 0)} tombstones removed"
+                    )
+        except Exception as e:
+            print(f"  ⚠ Startup tombstone compaction skipped: {e}")
 
         # RAPTOR tree indexing — cluster memories at thresholds
         try:
@@ -334,7 +365,19 @@ class CortexRAGEngine:
     def _reindex_missing_vectors(self):
         """Bulk-embed memories that are in DuckDB but not in the vector store."""
         import numpy as np
-        all_memory_texts = self.metadata_store.get_memory_texts(limit=5000)
+
+        all_memory_texts = []
+        batch_size = 2000
+        offset = 0
+        while True:
+            batch = self.metadata_store.get_memory_texts(limit=batch_size, offset=offset)
+            if not batch:
+                break
+            all_memory_texts.extend(batch)
+            if len(batch) < batch_size:
+                break
+            offset += len(batch)
+
         existing_ids = set(self.vector_store.vectors.keys())
 
         missing = [(mid, content) for mid, content in all_memory_texts
@@ -583,6 +626,7 @@ class CortexRAGEngine:
                 "processing_time_ms": round((time.time() - t0) * 1000, 1),
                 "cache_hit": False,
                 "pipeline_trace": None,
+                "answer_plan": {},
             }
 
         response = await self.orchestrator.process(user_message, session_context)
@@ -612,6 +656,7 @@ class CortexRAGEngine:
                 "complexity": round(response.query_analysis.complexity, 2) if response.query_analysis else 0,
                 "routing": response.query_analysis.routing.value if response.query_analysis else "unknown",
             },
+            "answer_plan": dict(response.answer_plan or {}),
             "processing_time_ms": round(response.processing_time_ms, 1),
             "cache_hit": False,
             "pipeline_trace": response.pipeline_trace.to_dict() if response.pipeline_trace else None,
@@ -690,6 +735,7 @@ class CortexRAGEngine:
                 "processing_time_ms": round((time.time() - t0) * 1000, 1),
                 "cache_hit": False,
                 "pipeline_trace": None,
+                "answer_plan": {},
             }
 
         response = await self.orchestrator.retrieve_only(user_message, session_context)
@@ -720,6 +766,7 @@ class CortexRAGEngine:
                 "complexity": round(response.query_analysis.complexity, 2) if response.query_analysis else 0,
                 "routing": response.query_analysis.routing.value if response.query_analysis else "unknown",
             },
+            "answer_plan": dict(response.answer_plan or {}),
             "processing_time_ms": round(response.processing_time_ms, 1),
             "cache_hit": False,
             "pipeline_trace": response.pipeline_trace.to_dict() if response.pipeline_trace else None,
@@ -743,10 +790,23 @@ class CortexRAGEngine:
             content=content, session_id=session_id, source=source
         )
 
+        if memory is None:
+            raise ValueError(
+                "Memory was not stored. Provide more specific content or try again."
+            )
+
         # Invalidate caches (new memory might change future answers)
         self.cache.invalidate_topic(memory.topics[0] if memory.topics else "")
         if self.hybrid_retriever:
             self.hybrid_retriever.invalidate_caches()
+
+        # Persist immediately so manual memories survive restarts.
+        if self.metadata_store:
+            self.metadata_store.flush()
+        if self.vector_store:
+            self.vector_store.save()
+        if self.knowledge_graph:
+            self.knowledge_graph.save()
 
         return memory.to_dict()
 
@@ -777,8 +837,41 @@ class CortexRAGEngine:
         """Delete a memory."""
         if not self.initialized:
             return False
-        self.metadata_store.delete_memory(memory_id)
-        self.vector_store.delete(memory_id)
+
+        if not memory_id:
+            return False
+
+        existing = self.metadata_store.get_memory(memory_id)
+        if not existing:
+            return False
+
+        deleted = self.metadata_store.delete_memory(memory_id)
+        if not deleted:
+            return False
+
+        if self.vector_store:
+            self.vector_store.delete(memory_id)
+
+        if self.knowledge_graph:
+            try:
+                self.knowledge_graph.remove_memory_references(memory_id)
+            except Exception:
+                pass
+
+        if self.hybrid_retriever:
+            self.hybrid_retriever.invalidate_caches()
+
+        if self.cache and existing.topics:
+            self.cache.invalidate_topic(existing.topics[0])
+
+        # Persist immediately so deletions survive restarts.
+        if self.metadata_store:
+            self.metadata_store.flush()
+        if self.vector_store:
+            self.vector_store.save()
+        if self.knowledge_graph:
+            self.knowledge_graph.save()
+
         return True
 
     # ─── Knowledge Graph ─────────────────────────────────────────────────

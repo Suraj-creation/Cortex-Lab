@@ -6,6 +6,7 @@ Maps to pi-mono's ToolDefinition interface (tool-definition-wrapper.ts).
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -94,6 +95,7 @@ class CortexEventType(str, Enum):
 class CortexEvent:
     """Universal event envelope for all agent communication."""
     type: CortexEventType
+    event_id: str = field(default_factory=lambda: f"cevt-{uuid.uuid4().hex[:12]}")
     data: dict[str, Any] = field(default_factory=dict)
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     session_id: str = ""
@@ -102,6 +104,7 @@ class CortexEvent:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "event_id": self.event_id,
             "type": self.type.value,
             "data": self.data,
             "timestamp": self.timestamp,

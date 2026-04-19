@@ -9,12 +9,19 @@ Only user-consented, non-sensitive documents go to PageIndex.
 
 import os
 
+_PAGEINDEX_API_KEY = os.environ.get("PAGEINDEX_API_KEY", "").strip()
+_PAGEINDEX_ENABLED_ENV = os.environ.get("PAGEINDEX_ENABLED", "").strip().lower()
+if _PAGEINDEX_ENABLED_ENV in {"1", "true", "yes", "on"}:
+    _PAGEINDEX_ENABLED = True
+elif _PAGEINDEX_ENABLED_ENV in {"0", "false", "no", "off"}:
+    _PAGEINDEX_ENABLED = False
+else:
+    _PAGEINDEX_ENABLED = bool(_PAGEINDEX_API_KEY)
+
 PAGEINDEX_CONFIG = {
     # ── API Configuration ─────────────────────────────────────────
-    "api_key": os.environ.get(
-        "PAGEINDEX_API_KEY", "8aa9ad8830aa438c926efc748b5489a9"
-    ),
-    "enabled": True,  # Master on/off switch
+    "api_key": _PAGEINDEX_API_KEY,
+    "enabled": _PAGEINDEX_ENABLED,  # Master on/off switch
 
     # ── Privacy Controls ──────────────────────────────────────────
     "allow_cloud_upload": True,

@@ -23,20 +23,20 @@ export function ToolExecutionPanel({ sessionId }: { sessionId: string }) {
       <div className="max-h-48 overflow-y-auto">
         {activeTools.map((tool) => (
           <div
-            key={tool.toolCallId}
+            key={`active-${tool.toolCallId}-${tool.occurrence}`}
             className="px-3 py-2 border-b border-zinc-800/50 flex items-center gap-2"
           >
             <div className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-            <span className="text-xs font-mono text-amber-400">{tool.toolName}</span>
+            <span className="text-xs font-mono text-amber-400">{tool.toolName || "tool"}</span>
             <span className="text-[10px] text-zinc-500 ml-auto">
               {((Date.now() - tool.startTime) / 1000).toFixed(1)}s
             </span>
           </div>
         ))}
 
-        {completedTools.slice(-10).reverse().map((tool) => (
+        {completedTools.slice(-10).reverse().map((tool, index) => (
           <div
-            key={tool.toolCallId}
+            key={`done-${tool.toolCallId}-${tool.occurrence || 1}-${index}`}
             className="px-3 py-2 border-b border-zinc-800/50 flex items-center gap-2"
           >
             <div
@@ -49,7 +49,7 @@ export function ToolExecutionPanel({ sessionId }: { sessionId: string }) {
                 tool.isError ? "text-red-400" : "text-green-400"
               }`}
             >
-              {tool.toolName}
+              {tool.toolName || "tool"}
             </span>
             {tool.result && (
               <span className="text-[10px] text-zinc-500 truncate max-w-[200px] ml-auto">

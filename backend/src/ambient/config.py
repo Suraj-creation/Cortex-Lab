@@ -28,7 +28,7 @@ class AmbientConfig:
     similarity_threshold: float = 0.70
 
     # STT provider: "traditional"/"local" (faster-whisper) or "gemini"
-    stt_provider: str = "traditional"
+    stt_provider: str = "gemini"
 
     # Whisper (traditional STT)
     whisper_model_size: str = "small"
@@ -36,7 +36,13 @@ class AmbientConfig:
     whisper_language: Optional[str] = None  # None = auto-detect
 
     # TTS provider: "traditional"/"local" (Piper) or "gemini"
-    tts_provider: str = "traditional"
+    tts_provider: str = "gemini"
+
+    # Live mode
+    live_mode: str = "gemini_live"  # "gemini_live" or "classic"
+    energy_gate_threshold: float = 700.0  # RMS threshold for speech gate in live mode
+    energy_min_speech_ms: int = 320
+    energy_silence_ms: int = 420
 
     # TTS
     tts_enabled: bool = True

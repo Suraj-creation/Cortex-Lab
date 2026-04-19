@@ -8,7 +8,7 @@ import { View, Text, TouchableOpacity, StyleSheet, ScrollView } from 'react-nati
 import { NEURAL, FONT_SIZE, FONT_WEIGHT, SPACING } from '../../theme/colors';
 import { AppIcon, type AppIconName } from './AppIcon';
 
-export type NavKey = 'chat' | 'memories' | 'graph' | 'dashboard' | 'observability' | 'ambient' | 'documents';
+export type NavKey = 'chat' | 'memories' | 'graph' | 'dashboard' | 'observability' | 'agent' | 'wiki' | 'ambient' | 'documents';
 
 interface NavItem {
   key: NavKey;

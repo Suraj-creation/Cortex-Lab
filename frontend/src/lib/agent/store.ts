@@ -13,16 +13,14 @@
 import { create } from "zustand";
 import type {
   CortexEvent,
-  CortexEventType,
   TierClassification,
-  AgentSessionInfo,
   ToolExecutionEvent,
-  AgentTurnInfo,
 } from "@/lib/types";
 
 interface ActiveToolExecution {
   toolCallId: string;
   toolName: string;
+  occurrence: number;
   startTime: number;
   args?: Record<string, unknown>;
 }
@@ -67,6 +65,100 @@ interface AgentStore {
   reset: () => void;
 }
 
+function stableSerialize(value: unknown): string {
+  if (value === null || value === undefined) return String(value);
+  if (typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerialize(item)).join(",")}]`;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>).sort(
+    ([a], [b]) => a.localeCompare(b),
+  );
+  return `{${entries
+    .map(([key, item]) => `${JSON.stringify(key)}:${stableSerialize(item)}`)
+    .join(",")}}`;
+}
+
+function getEventId(event: CortexEvent): string | null {
+  if (typeof event.event_id === "string" && event.event_id.trim()) {
+    return event.event_id;
+  }
+
+  if (!event.data || typeof event.data !== "object") {
+    return null;
+  }
+
+  const payload = event.data as Record<string, unknown>;
+  const fromData = payload.event_id;
+  if (typeof fromData === "string" && fromData.trim()) {
+    return fromData;
+  }
+
+  const messageId = payload.message_id;
+  if (typeof messageId === "string" && messageId.trim()) {
+    return messageId;
+  }
+
+  return null;
+}
+
+function eventFingerprint(event: CortexEvent): string {
+  const eventId = getEventId(event);
+  if (eventId) {
+    return `id:${eventId}`;
+  }
+
+  if (event.data && typeof event.data === "object") {
+    const payload = event.data as Record<string, unknown>;
+    const toolCallId = payload.toolCallId;
+    if (
+      (event.type === "tool_execution_start" || event.type === "tool_execution_end") &&
+      typeof toolCallId === "string" &&
+      toolCallId.trim()
+    ) {
+      const resultText =
+        event.type === "tool_execution_end"
+          ? String(payload.result ?? "")
+          : "";
+      const isErrorText =
+        event.type === "tool_execution_end"
+          ? String(Boolean(payload.isError))
+          : "";
+      return [
+        "tool",
+        event.type,
+        event.session_id || "",
+        event.trace_id || "",
+        toolCallId,
+        resultText,
+        isErrorText,
+      ].join("|");
+    }
+  }
+
+  return [
+    event.type,
+    event.session_id || "",
+    event.trace_id || "",
+    event.timestamp || "",
+    stableSerialize(event.data || {}),
+  ].join("|");
+}
+
+function isDuplicateEvent(history: CortexEvent[], incoming: CortexEvent): boolean {
+  const incomingKey = eventFingerprint(incoming);
+  const recent = history.slice(-80);
+  return recent.some((evt) => eventFingerprint(evt) === incomingKey);
+}
+
+function appendGlobalEvent(history: CortexEvent[], incoming: CortexEvent): CortexEvent[] {
+  if (isDuplicateEvent(history, incoming)) {
+    return history;
+  }
+  return [...history.slice(-200), incoming];
+}
+
 const defaultSessionState = (
   sessionId: string,
   agentId: string,
@@ -105,7 +197,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   removeSession: (sessionId) =>
     set((state) => {
-      const { [sessionId]: _, ...rest } = state.sessions;
+      const rest = { ...state.sessions };
+      delete rest[sessionId];
       return {
         sessions: rest,
         activeSessionId:
@@ -118,7 +211,17 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       const sid = event.session_id || state.activeSessionId;
       const session = sid ? state.sessions[sid] : null;
       if (!session) {
-        return { globalEvents: [...state.globalEvents.slice(-200), event] };
+        const nextGlobal = appendGlobalEvent(state.globalEvents, event);
+        return nextGlobal === state.globalEvents
+          ? state
+          : { globalEvents: nextGlobal };
+      }
+
+      const nextGlobalEvents = appendGlobalEvent(state.globalEvents, event);
+      if (isDuplicateEvent(session.events, event)) {
+        return nextGlobalEvents === state.globalEvents
+          ? state
+          : { globalEvents: nextGlobalEvents };
       }
 
       const updated = { ...session, events: [...session.events.slice(-500), event] };
@@ -147,32 +250,76 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           break;
 
         case "tool_execution_start":
-          updated.activeTools = [
-            ...updated.activeTools,
-            {
-              toolCallId: (event.data?.toolCallId as string) || "",
-              toolName: (event.data?.toolName as string) || "",
-              startTime: Date.now(),
-              args: event.data?.args as Record<string, unknown>,
-            },
-          ];
+          {
+            const tcId = (event.data?.toolCallId as string) || "";
+            if (!tcId) break;
+            if (updated.activeTools.some((t) => t.toolCallId === tcId)) break;
+
+            const previousOccurrences =
+              updated.activeTools.filter((t) => t.toolCallId === tcId).length +
+              updated.completedTools.filter((t) => t.toolCallId === tcId).length;
+
+            updated.activeTools = [
+              ...updated.activeTools,
+              {
+                toolCallId: tcId,
+                toolName: (event.data?.toolName as string) || "",
+                occurrence: previousOccurrences + 1,
+                startTime: Date.now(),
+                args: event.data?.args as Record<string, unknown>,
+              },
+            ];
+          }
           break;
 
         case "tool_execution_end": {
           const tcId = event.data?.toolCallId as string;
-          updated.activeTools = updated.activeTools.filter(
-            (t) => t.toolCallId !== tcId,
+          if (!tcId) break;
+
+          const activeCopy = [...updated.activeTools];
+          const activeIndex = activeCopy.findIndex((t) => t.toolCallId === tcId);
+
+          let toolName = "";
+          let occurrence = 1;
+
+          if (activeIndex >= 0) {
+            const [activeTool] = activeCopy.splice(activeIndex, 1);
+            toolName = activeTool.toolName || "";
+            occurrence = activeTool.occurrence;
+          } else {
+            const previous = [...updated.completedTools]
+              .reverse()
+              .find((t) => t.toolCallId === tcId);
+            if (previous) {
+              toolName = previous.toolName || "";
+              occurrence = (previous.occurrence || 1) + 1;
+            }
+          }
+
+          const resultText = (event.data?.result as string) || "";
+          const isError = Boolean(event.data?.isError as boolean);
+
+          const isDuplicateCompletion = updated.completedTools.some(
+            (tool) =>
+              tool.toolCallId === tcId &&
+              (tool.occurrence || 1) === occurrence &&
+              (tool.result || "") === resultText &&
+              Boolean(tool.isError) === isError,
           );
-          updated.completedTools = [
-            ...updated.completedTools,
-            {
-              toolCallId: tcId,
-              toolName: updated.activeTools.find((t) => t.toolCallId === tcId)
-                ?.toolName || "",
-              result: event.data?.result as string,
-              isError: event.data?.isError as boolean,
-            },
-          ];
+
+          updated.activeTools = activeCopy;
+          if (!isDuplicateCompletion) {
+            updated.completedTools = [
+              ...updated.completedTools,
+              {
+                toolCallId: tcId,
+                toolName,
+                occurrence,
+                result: resultText,
+                isError,
+              },
+            ];
+          }
           break;
         }
 
@@ -196,7 +343,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
       return {
         sessions: { ...state.sessions, [sid!]: updated },
-        globalEvents: [...state.globalEvents.slice(-200), event],
+        globalEvents: nextGlobalEvents,
       };
     }),
 

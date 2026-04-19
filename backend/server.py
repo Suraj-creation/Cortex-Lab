@@ -25,7 +25,7 @@ import re
 import asyncio
 import uuid
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List
 from contextlib import asynccontextmanager
 
@@ -67,6 +67,8 @@ from src.runtime.memory_personalization import (
     select_prompt_evidence,
 )
 from src.runtime.task_manager import RuntimeTaskManager
+from src.runtime.event_bus import runtime_events
+from src.applications import session_memory_forge_service, life_chronicle_service
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -130,6 +132,9 @@ model_info = {}
 _approval_execution_worker: Optional[ApprovalExecutionWorker] = None
 _runtime_task_manager = RuntimeTaskManager()
 rag_engine.set_runtime_task_manager(_runtime_task_manager)
+_background_scheduler_registered = False
+_background_agent_loops: Dict[str, Any] = {}
+_server_event_loop: Optional[asyncio.AbstractEventLoop] = None
 
 SUPPORTED_RUNTIME_MODES = ("cloud", "hybrid", "local_offline")
 SUPPORTED_LLM_PROVIDERS = ("local", "gemini", "gemma_local")
@@ -148,10 +153,10 @@ _VOICE_PROVIDER_ALIAS_TO_BACKEND = {
 _runtime_selection: Dict[str, Any] = {
     "mode": "cloud",
     "llm_provider": "local",
-    "stt_provider": "traditional",
-    "tts_provider": "traditional",
+    "stt_provider": "gemini",
+    "tts_provider": "gemini",
     "allow_cloud_fallback": True,
-    "updated_at": datetime.utcnow().isoformat() + "Z",
+    "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
 }
 
 _MODELPACK_MANIFEST_PATH = os.path.join(
@@ -303,6 +308,489 @@ def _build_approval_execution_handlers() -> Dict[str, Any]:
     }
 
 
+def _schedule_interval_seconds(schedule: Any) -> int:
+    if not schedule:
+        return 60
+    interval_min = int(getattr(schedule, "interval_min", 0) or 0)
+    if interval_min > 0:
+        return max(interval_min * 60, 30)
+    if getattr(schedule, "daily", ""):
+        return 24 * 60 * 60
+    if getattr(schedule, "weekly", ""):
+        return 7 * 24 * 60 * 60
+    if getattr(schedule, "continuous", False):
+        return 30 * 60
+    if getattr(schedule, "always_on", False):
+        return 60
+    return 60
+
+
+def _scheduled_agent_prompt(
+    agent_id: str,
+    *,
+    reason: str,
+    event_name: str = "",
+    payload: dict[str, Any] | None = None,
+) -> str:
+    payload_json = "{}"
+    if payload:
+        try:
+            payload_json = json.dumps(payload, default=str)[:2800]
+        except Exception:
+            payload_json = str(payload)[:2800]
+
+    if agent_id == "wiki_agent" and reason == "event" and event_name == "memory_ingested":
+        memory_id = str((payload or {}).get("memory_id", ""))
+        source = str((payload or {}).get("source", ""))
+        session_id = str((payload or {}).get("session_id", ""))
+        preview = str((payload or {}).get("preview", ""))
+        content = str((payload or {}).get("content", ""))
+        return (
+            "Wiki maintenance ingestion cycle.\n"
+            f"Memory ID: {memory_id}\n"
+            f"Source: {source}\n"
+            f"Session ID: {session_id}\n"
+            f"Preview: {preview}\n"
+            f"Content excerpt: {content[:1200]}\n"
+            "Task requirements:\n"
+            "1) Extract atomic claims from the provided content.\n"
+            "2) Upsert claims with confidence + provenance.\n"
+            "3) Update or create wiki pages and link claim IDs.\n"
+            "4) If contradictions are found, keep both claims and flag for arbitration.\n"
+            "Return concise machine-readable JSON summary only."
+        )
+
+    if reason == "event" and event_name:
+        return (
+            f"Run scheduled background cycle for agent '{agent_id}'.\n"
+            f"Trigger event: {event_name}\n"
+            f"Event payload: {payload_json}\n"
+            "Perform your configured background task and return concise machine-readable output."
+        )
+
+    if agent_id == "wiki_agent":
+        return (
+            "Run periodic wiki maintenance cycle.\n"
+            "Perform targeted lint and compaction on the most recently updated pages, "
+            "and only patch pages when changes are evidence-backed.\n"
+            "Return concise machine-readable JSON summary with checked pages and actions."
+        )
+
+    return (
+        f"Run periodic scheduled background cycle for agent '{agent_id}'.\n"
+        "Use your configured tools and produce a concise summary of what changed, "
+        "what was checked, and any follow-up actions needed."
+    )
+
+
+def _build_scheduled_agent_config(base_config: Any) -> Any:
+    from src.agents.autonomous_loop import AgentConfig
+    from src.agents.cortex_extensions import DEFAULT_EXTENSIONS
+
+    return AgentConfig(
+        agent_id=base_config.agent_id,
+        system_prompt=base_config.system_prompt,
+        tools=base_config.tools,
+        extensions=list(DEFAULT_EXTENSIONS) + list(base_config.extensions),
+        session_config=base_config.session_config,
+        scheduling=base_config.scheduling,
+        retry_config=base_config.retry_config,
+        resource_tier_minimum=base_config.resource_tier_minimum,
+        max_turns=base_config.max_turns,
+        max_tool_chain_depth=base_config.max_tool_chain_depth,
+        context_window=base_config.context_window,
+        llm_provider=base_config.llm_provider,
+    )
+
+
+def _get_background_agent_loop(agent_id: str):
+    from src.agents.agent_configs import ALL_AGENT_CONFIGS
+    from src.agents.autonomous_loop import CortexAgentLoop
+    from src.agents.llm_adapter import make_cortex_loop_llm_fn
+
+    existing = _background_agent_loops.get(agent_id)
+    if existing is not None:
+        return existing
+
+    base_config = ALL_AGENT_CONFIGS.get(agent_id)
+    if base_config is None:
+        raise ValueError(f"Unknown scheduled agent: {agent_id}")
+
+    scheduled_config = _build_scheduled_agent_config(base_config)
+    llm_fn = make_cortex_loop_llm_fn(
+        rag_engine.llm,
+        preferred_provider=scheduled_config.llm_provider,
+    )
+    loop = CortexAgentLoop(
+        config=scheduled_config,
+        llm_fn=llm_fn,
+        runtime_task_manager=_runtime_task_manager,
+    )
+    _background_agent_loops[agent_id] = loop
+    return loop
+
+
+async def _run_background_agent(
+    agent_id: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    reason: str = "interval",
+    event_name: str = "",
+) -> None:
+    if not rag_engine.initialized:
+        return
+    loop = _get_background_agent_loop(agent_id)
+    prompt = _scheduled_agent_prompt(
+        agent_id,
+        reason=reason,
+        event_name=event_name,
+        payload=payload,
+    )
+    await loop.prompt(prompt)
+
+
+def _emit_runtime_event(
+    event_type: str,
+    payload: dict[str, Any],
+    *,
+    session_id: str = "",
+) -> None:
+    try:
+        runtime_events.emit(
+            plane="EVENT_BUS",
+            event_type=event_type,
+            payload=dict(payload or {}),
+            session_id=session_id,
+        )
+    except Exception as e:
+        print(f"  ⚠ Runtime event emit failed ({event_type}): {e}")
+
+
+async def _run_session_forge_crystallizer_task(
+    *,
+    payload: dict[str, Any] | None = None,
+    reason: str = "interval",
+    event_name: str = "",
+) -> None:
+    session_id = str((payload or {}).get("session_id", ""))
+    result = session_memory_forge_service.run_crystallizer(
+        session_id=session_id,
+        payload=payload,
+        trigger=reason,
+    )
+    _emit_runtime_event(
+        "quality_loop",
+        {
+            "agent_id": "session_forge_crystallizer",
+            "stage": "session_crystallizer",
+            "reason": reason,
+            "event_name": event_name,
+            "result": result,
+        },
+        session_id=session_id,
+    )
+
+
+async def _run_session_forge_summary_task(
+    *,
+    payload: dict[str, Any] | None = None,
+    reason: str = "interval",
+    event_name: str = "",
+) -> None:
+    session_id = str((payload or {}).get("session_id", ""))
+    result = session_memory_forge_service.run_summary_forge(
+        session_id=session_id,
+        trigger=reason,
+    )
+    _emit_runtime_event(
+        "wiki_update",
+        {
+            "agent_id": "session_forge_summary_forge",
+            "stage": "structured_summary_forge",
+            "reason": reason,
+            "event_name": event_name,
+            "result": result,
+        },
+        session_id=session_id,
+    )
+
+
+async def _run_session_forge_gap_task(
+    *,
+    payload: dict[str, Any] | None = None,
+    reason: str = "interval",
+    event_name: str = "",
+) -> None:
+    del payload
+    result = session_memory_forge_service.run_gap_mapper(trigger=reason)
+    signals = list(result.get("signals", []) or [])
+    for signal in signals[:5]:
+        _emit_runtime_event(
+            "gap_signal",
+            {
+                "agent_id": "session_forge_gap_mapper",
+                **signal,
+            },
+        )
+    _emit_runtime_event(
+        "quality_loop",
+        {
+            "agent_id": "session_forge_gap_mapper",
+            "stage": "gap_mapper",
+            "reason": reason,
+            "event_name": event_name,
+            "generated": len(signals),
+        },
+    )
+
+
+async def _run_session_forge_belief_task(
+    *,
+    payload: dict[str, Any] | None = None,
+    reason: str = "interval",
+    event_name: str = "",
+) -> None:
+    del payload
+    result = session_memory_forge_service.run_belief_detector(trigger=reason)
+    records = list(result.get("records", []) or [])
+    for record in records[:5]:
+        _emit_runtime_event(
+            "belief_shift",
+            {
+                "agent_id": "session_forge_belief_detector",
+                **record,
+            },
+        )
+    _emit_runtime_event(
+        "quality_loop",
+        {
+            "agent_id": "session_forge_belief_detector",
+            "stage": "belief_detector",
+            "reason": reason,
+            "event_name": event_name,
+            "generated": len(records),
+        },
+    )
+
+
+async def _run_life_chronicle_passive_task(
+    *,
+    payload: dict[str, Any] | None = None,
+    reason: str = "interval",
+    event_name: str = "",
+) -> None:
+    del payload
+    status = life_chronicle_service.heartbeat()
+    if status.get("passive_mode_enabled"):
+        _emit_runtime_event(
+            "quality_loop",
+            {
+                "agent_id": "life_chronicle_passive",
+                "stage": "passive_heartbeat",
+                "reason": reason,
+                "event_name": event_name,
+                "status": status,
+            },
+        )
+
+
+async def _run_wiki_lint_task(
+    *,
+    payload: dict[str, Any] | None = None,
+    reason: str = "interval",
+    event_name: str = "",
+) -> None:
+    del payload
+    from src.wiki.lint import WikiLinter
+
+    summary = WikiLinter().lint_all(limit=200)
+    _emit_runtime_event(
+        "wiki_lint_report",
+        {
+            "agent_id": "wiki_lint_governor",
+            "stage": "lint",
+            "reason": reason,
+            "event_name": event_name,
+            "summary": {
+                "pages_checked": summary.get("pages_checked", 0),
+                "dirty_pages": summary.get("dirty_pages", 0),
+                "issue_total": summary.get("issue_total", 0),
+                "avg_hygiene_score": summary.get("avg_hygiene_score", 0),
+            },
+        },
+    )
+
+
+async def _run_wiki_compaction_task(
+    *,
+    payload: dict[str, Any] | None = None,
+    reason: str = "interval",
+    event_name: str = "",
+) -> None:
+    del payload
+    from src.wiki.compactor import WikiCompactor
+
+    summary = WikiCompactor().compact_all(
+        limit=60,
+        max_tokens_per_section=500,
+        section_limit=2,
+    )
+    _emit_runtime_event(
+        "wiki_compaction",
+        {
+            "agent_id": "wiki_compaction_governor",
+            "stage": "compaction",
+            "reason": reason,
+            "event_name": event_name,
+            "summary": {
+                "pages_checked": summary.get("pages_checked", 0),
+                "sections_checked": summary.get("sections_checked", 0),
+                "sections_compacted": summary.get("sections_compacted", 0),
+            },
+        },
+    )
+
+
+async def _run_vector_maintenance_task(
+    *,
+    payload: dict[str, Any] | None = None,
+    reason: str = "interval",
+    event_name: str = "",
+) -> None:
+    del payload
+    if not rag_engine.initialized or not getattr(rag_engine, "vector_store", None):
+        return
+
+    report = rag_engine.vector_store.compact_tombstones(
+        force=False,
+        min_deleted=100,
+        min_deleted_ratio=0.15,
+    )
+
+    # Persist state after compaction or when tombstone pressure is notable.
+    if report.get("compacted") or report.get("deleted_count", 0) > 0:
+        rag_engine.vector_store.save()
+
+    _emit_runtime_event(
+        "vector_maintenance",
+        {
+            "agent_id": "vector_store_maintenance",
+            "stage": "tombstone_compaction",
+            "reason": reason,
+            "event_name": event_name,
+            "summary": {
+                "compacted": bool(report.get("compacted")),
+                "deleted_compacted": int(report.get("deleted_compacted", 0)),
+                "live_count": int(report.get("live_count", 0)),
+                "deleted_count": int(report.get("deleted_count", 0)),
+                "deleted_ratio": float(report.get("deleted_ratio", 0.0)),
+                "reason": str(report.get("reason", "")),
+            },
+        },
+    )
+
+
+def _register_phase1_deep_app_tasks(background_scheduler: Any) -> None:
+    background_scheduler.register(
+        agent_id="session_forge_crystallizer",
+        factory=_run_session_forge_crystallizer_task,
+        interval_seconds=15 * 60,
+        events=["memory_ingested"],
+    )
+    background_scheduler.register(
+        agent_id="session_forge_gap_mapper",
+        factory=_run_session_forge_gap_task,
+        interval_seconds=24 * 60 * 60,
+    )
+    background_scheduler.register(
+        agent_id="session_forge_belief_detector",
+        factory=_run_session_forge_belief_task,
+        interval_seconds=7 * 24 * 60 * 60,
+    )
+    background_scheduler.register(
+        agent_id="session_forge_summary_forge",
+        factory=_run_session_forge_summary_task,
+        interval_seconds=72 * 60 * 60,
+    )
+    background_scheduler.register(
+        agent_id="life_chronicle_passive",
+        factory=_run_life_chronicle_passive_task,
+        interval_seconds=30 * 60,
+    )
+
+
+def _register_wiki_governance_tasks(background_scheduler: Any) -> None:
+    background_scheduler.register(
+        agent_id="wiki_lint_governor",
+        factory=_run_wiki_lint_task,
+        interval_seconds=24 * 60 * 60,
+    )
+    background_scheduler.register(
+        agent_id="wiki_compaction_governor",
+        factory=_run_wiki_compaction_task,
+        interval_seconds=7 * 24 * 60 * 60,
+    )
+    background_scheduler.register(
+        agent_id="vector_store_maintenance",
+        factory=_run_vector_maintenance_task,
+        interval_seconds=6 * 60 * 60,
+    )
+
+
+async def _configure_background_scheduler() -> None:
+    global _background_scheduler_registered
+
+    from src.agents.agent_configs import ALL_AGENT_CONFIGS
+    from src.agents.scheduler import background_scheduler
+
+    if _background_scheduler_registered:
+        await background_scheduler.start()
+        return
+
+    for agent_id, cfg in ALL_AGENT_CONFIGS.items():
+        if not cfg.scheduling:
+            continue
+
+        interval_seconds = _schedule_interval_seconds(cfg.scheduling)
+        events: list[str] = []
+        if cfg.scheduling.on_ingest:
+            events.append("memory_ingested")
+
+        async def _factory(
+            *,
+            payload: dict[str, Any] | None = None,
+            reason: str = "interval",
+            event_name: str = "",
+            _agent_id: str = agent_id,
+        ):
+            await _run_background_agent(
+                _agent_id,
+                payload=payload,
+                reason=reason,
+                event_name=event_name,
+            )
+
+        background_scheduler.register(
+            agent_id=agent_id,
+            factory=_factory,
+            interval_seconds=interval_seconds,
+            events=events,
+        )
+
+    _register_phase1_deep_app_tasks(background_scheduler)
+    _register_wiki_governance_tasks(background_scheduler)
+
+    _background_scheduler_registered = True
+    await background_scheduler.start()
+
+
+async def _stop_background_scheduler() -> None:
+    from src.agents.scheduler import background_scheduler
+
+    await background_scheduler.stop()
+    _background_agent_loops.clear()
+
+
 async def _start_approval_execution_worker() -> None:
     global _approval_execution_worker
 
@@ -339,7 +827,9 @@ async def _stop_approval_execution_worker() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global model, tokenizer, model_loaded, model_info
+    global model, tokenizer, model_loaded, model_info, _server_event_loop
+
+    _server_event_loop = asyncio.get_running_loop()
 
     print("\n" + "=" * 64)
     print("  Cortex Lab  ·  Qwen3.5-9B-Opus Reasoning  ·  FastAPI Backend")
@@ -368,7 +858,6 @@ async def lifespan(app: FastAPI):
 
         # Still initialize RAG engine without a local model
         # Run in thread so the event loop stays responsive during init
-        import asyncio
         loop = asyncio.get_event_loop()
         try:
             await loop.run_in_executor(
@@ -381,16 +870,26 @@ async def lifespan(app: FastAPI):
         # Set provider to Gemini since we have no local model
         if rag_engine.initialized and hasattr(rag_engine.llm, "set_provider"):
             rag_engine.llm.set_provider("gemini")
+            _set_runtime_selection(llm_provider="gemini", stt_provider="gemini", tts_provider="gemini")
+
+        _apply_ambient_gemini_defaults()
 
         try:
             await _start_approval_execution_worker()
         except Exception as e:
             print(f"  ⚠ Approval execution worker start failed: {e}")
 
+        try:
+            await _configure_background_scheduler()
+            print("  ✓ Background scheduler started")
+        except Exception as e:
+            print(f"  ⚠ Background scheduler start failed: {e}")
+
         model_loaded = True  # Mark ready so health check returns "ok"
         print(f"\n  Server ready → http://{HOST}:{PORT}\n")
 
         yield
+        await _stop_background_scheduler()
         await _stop_approval_execution_worker()
         rag_engine.shutdown()
         return
@@ -494,14 +993,23 @@ async def lifespan(app: FastAPI):
         print(f"  ⚠ RAG Engine initialization error: {e}")
         print("  ⚠ RAG features will be unavailable, basic chat still works.")
 
+    _apply_ambient_gemini_defaults()
+
     try:
         await _start_approval_execution_worker()
     except Exception as e:
         print(f"  ⚠ Approval execution worker start failed: {e}")
 
+    try:
+        await _configure_background_scheduler()
+        print("  ✓ Background scheduler started")
+    except Exception as e:
+        print(f"  ⚠ Background scheduler start failed: {e}")
+
     yield  # ← app runs here
 
     # cleanup
+    await _stop_background_scheduler()
     await _stop_approval_execution_worker()
     rag_engine.shutdown()
     del model, tokenizer
@@ -534,6 +1042,7 @@ _allowed_origins = [o.strip() for o in _allowed_origins_env.split(",") if o.stri
 _default_origin_regex = (
     r"^https?://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?$"
     r"|^https://.*\.trycloudflare\.com$"
+    r"|^https://.*\.onrender\.com$"
     r"|^https://.*\.up\.railway\.app$"
     r"|^https://.*\.railway\.app$"
 )
@@ -606,6 +1115,30 @@ class ChatMessage(BaseModel):
     role: str = Field(..., description="'user' or 'assistant'")
     content: str
 
+
+def _default_request_llm_provider() -> str:
+    """Pick request default provider from runtime selection with safe fallbacks."""
+    requested = str(_runtime_selection.get("llm_provider", "local") or "local").strip().lower()
+    if requested not in SUPPORTED_LLM_PROVIDERS:
+        requested = "local"
+
+    try:
+        availability = _llm_provider_availability()
+    except Exception:
+        return requested
+
+    if requested in ("local", "gemma_local") and availability.get("local"):
+        return requested
+    if requested == "gemini" and availability.get("gemini"):
+        return requested
+
+    if availability.get("gemini"):
+        return "gemini"
+    if availability.get("local"):
+        return "local"
+
+    return requested
+
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     temperature: float = Field(0.6, ge=0.0, le=2.0)
@@ -613,7 +1146,7 @@ class ChatRequest(BaseModel):
     max_tokens: int = Field(4096, ge=1, le=32768)
     stream: bool = False
     llm_provider: str = Field(
-        "local",
+        default_factory=_default_request_llm_provider,
         description="'local'/'gemma_local' for on-device model or 'gemini' for Gemini API",
     )
     thinking_mode: bool = Field(True, description="When True, stream <think> reasoning blocks; when False, suppress for faster responses")
@@ -630,6 +1163,11 @@ class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
     model_info: dict
+    memories_count: int = 0
+    vectors_count: int = 0
+    graph_nodes: int = 0
+    graph_edges: int = 0
+    memories_backend: str = "unknown"
 
 # ── RAG Schemas ──────────────────────────────────────────────────────────────
 
@@ -642,7 +1180,7 @@ class RAGChatRequest(BaseModel):
     use_rag: bool = True  # Enable/disable RAG enhancement
     session_id: str = ""
     llm_provider: str = Field(
-        "local",
+        default_factory=_default_request_llm_provider,
         description="'local'/'gemma_local' for on-device model or 'gemini' for Gemini API",
     )
     thinking_mode: bool = Field(True, description="When True, stream <think> reasoning blocks; when False, suppress for faster responses")
@@ -1486,6 +2024,13 @@ def _normalize_llm_provider(provider: str) -> str:
     return _LLM_PROVIDER_ALIAS_TO_BACKEND.get(requested, requested)
 
 
+def _resolve_request_llm_provider(provider: Optional[str]) -> str:
+    requested = str(provider or "").strip().lower()
+    if not requested:
+        return _default_request_llm_provider()
+    return requested
+
+
 def _normalize_voice_provider(provider: str) -> str:
     requested = str(provider or "traditional").strip().lower()
     return _VOICE_PROVIDER_ALIAS_TO_BACKEND.get(requested, requested)
@@ -1512,6 +2057,7 @@ def _llm_provider_availability() -> Dict[str, bool]:
 def _runtime_provider_availability() -> Dict[str, Any]:
     llm = _llm_provider_availability()
     ambient = rag_engine.ambient_service if rag_engine.initialized else None
+    gemini_voice_ready = bool(ambient is not None and ambient._gemini_api_key is not None)
 
     traditional_stt = bool(ambient is not None and ambient._traditional_stt is not None)
     traditional_tts = bool(
@@ -1519,8 +2065,8 @@ def _runtime_provider_availability() -> Dict[str, Any]:
         and ambient._traditional_tts is not None
         and ambient._traditional_tts.is_available
     )
-    gemini_stt = bool(ambient is not None and ambient._gemini_stt is not None)
-    gemini_tts = bool(ambient is not None and ambient._gemini_tts is not None)
+    gemini_stt = bool(ambient is not None and (ambient._gemini_stt is not None or gemini_voice_ready))
+    gemini_tts = bool(ambient is not None and (ambient._gemini_tts is not None or gemini_voice_ready))
 
     return {
         "llm": llm,
@@ -1539,7 +2085,7 @@ def _runtime_provider_availability() -> Dict[str, Any]:
 
 
 def _utc_now_iso() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _runtime_selection_snapshot() -> Dict[str, Any]:
@@ -1609,10 +2155,149 @@ def _apply_voice_provider_selection(kind: str, provider: str) -> None:
         raise HTTPException(409, result.get("error", f"Unable to set {kind}_provider"))
 
 
+async def _ambient_live_assistant_reply(user_text: str, session_id: str) -> str:
+    """Generate assistant replies for Gemini Live sessions via the RAG engine."""
+    text = str(user_text or "").strip()
+    if not text:
+        return ""
+
+    if not rag_engine.initialized:
+        return "I heard you. The reasoning engine is still starting up, so I will keep listening."
+
+    previous_provider = None
+    provider_changed = False
+    try:
+        if hasattr(rag_engine.llm, "provider"):
+            previous_provider = rag_engine.llm.provider
+
+        if hasattr(rag_engine.llm, "has_gemini") and rag_engine.llm.has_gemini and hasattr(rag_engine.llm, "set_provider"):
+            rag_engine.llm.set_provider("gemini")
+            provider_changed = True
+
+        result = await rag_engine.rag_chat(
+            user_message=text,
+            session_id=f"ambient-live:{session_id or 'default'}",
+            conversation_history=[],
+        )
+        answer = str((result or {}).get("answer", "") or "").strip()
+        if answer:
+            return answer
+    except Exception as e:
+        print(f"  ⚠ Gemini live assistant reply failed: {e}")
+    finally:
+        if provider_changed and previous_provider and hasattr(rag_engine.llm, "set_provider"):
+            try:
+                rag_engine.llm.set_provider(previous_provider)
+            except Exception:
+                pass
+
+    return "I heard you. Please continue, and I will keep listening and capturing context."
+
+
+async def _ambient_live_retrieve_reply(user_text: str, session_id: str) -> str:
+    """Retrieve-only live response path triggered by the wake phrase mode."""
+    text = str(user_text or "").strip()
+    if not text:
+        return "Retrieve mode is active. Ask your question and I will search your memory quickly."
+
+    if not rag_engine.initialized:
+        return "I am still starting up, so I cannot retrieve memories yet."
+
+    previous_provider = None
+    provider_changed = False
+    try:
+        if hasattr(rag_engine.llm, "provider"):
+            previous_provider = rag_engine.llm.provider
+
+        if hasattr(rag_engine.llm, "has_gemini") and rag_engine.llm.has_gemini and hasattr(rag_engine.llm, "set_provider"):
+            rag_engine.llm.set_provider("gemini")
+            provider_changed = True
+
+        retrieval = await rag_engine.rag_retrieve(
+            user_message=text,
+            session_id=f"ambient-live:{session_id or 'default'}",
+            conversation_history=[],
+        )
+
+        evidence_items = list((retrieval or {}).get("evidence", []) or [])
+        evidence_texts: list[str] = []
+        for item in evidence_items:
+            if not isinstance(item, dict):
+                continue
+            content = str(item.get("content", "") or "").strip()
+            if content:
+                evidence_texts.append(content)
+
+        # Retrieve-only mode still needs natural generation for voice output.
+        # Use Gemini generation over retrieved evidence for fast conversational replies.
+        if evidence_texts and hasattr(rag_engine.llm, "generate_faithful"):
+            answer = await asyncio.to_thread(
+                rag_engine.llm.generate_faithful,
+                text,
+                evidence_texts[:8],
+                "Retrieve-only live voice mode. Keep the answer concise and conversational.",
+            )
+            answer = str(answer or "").strip()
+            if answer:
+                return answer
+
+        if hasattr(rag_engine.llm, "generate"):
+            prompt = (
+                "You are Cortex. Answer conversationally in 2-4 sentences. "
+                "If evidence is weak, say that clearly and ask one short clarification.\n\n"
+                f"User query: {text}\n"
+                f"Retrieved evidence count: {len(evidence_texts)}\n"
+                "Evidence snippets:\n"
+                + "\n".join(f"- {snippet[:350]}" for snippet in evidence_texts[:6])
+            )
+            answer = await asyncio.to_thread(
+                rag_engine.llm.generate,
+                prompt,
+                256,
+                0.2,
+                0.95,
+            )
+            answer = str(answer or "").strip()
+            if answer:
+                return answer
+    except Exception as e:
+        print(f"  ⚠ Gemini live retrieve reply failed: {e}")
+    finally:
+        if provider_changed and previous_provider and hasattr(rag_engine.llm, "set_provider"):
+            try:
+                rag_engine.llm.set_provider(previous_provider)
+            except Exception:
+                pass
+
+    return "I searched your memory but could not find a confident answer yet. Give me one more detail and I will try again."
+
+
+def _apply_ambient_gemini_defaults() -> None:
+    """Set Gemini-first ambient runtime defaults when voice API key is available."""
+    if not rag_engine.initialized or not rag_engine.ambient_service:
+        return
+
+    ambient = rag_engine.ambient_service
+    if not ambient._gemini_api_key:
+        return
+
+    try:
+        ambient.set_live_assistant_callback(_ambient_live_assistant_reply)
+        ambient.set_live_retrieve_callback(_ambient_live_retrieve_reply)
+        ambient.update_config({
+            "stt_provider": "gemini",
+            "tts_provider": "gemini",
+            "live_mode": "gemini_live",
+        })
+        _set_runtime_selection(stt_provider="gemini", tts_provider="gemini")
+    except Exception as e:
+        print(f"  ⚠ Failed to apply Gemini ambient defaults: {e}")
+
+
 def _set_request_provider(provider: str):
     """Set the LLM provider for this request. Raises ValueError if the
     requested provider is unavailable (no silent fallback)."""
-    requested = str(provider or "local").strip().lower()
+    requested = _resolve_request_llm_provider(provider)
     normalized = _normalize_llm_provider(requested)
 
     if requested not in SUPPORTED_LLM_PROVIDERS:
@@ -1643,7 +2328,7 @@ def _is_gemini_active() -> bool:
 def _effective_max_tokens(req, local_default: int = 8192) -> int:
     """Apply token caps only for paid providers; local runtime uses full local budget."""
     requested = int(getattr(req, "max_tokens", local_default) or local_default)
-    provider = str(getattr(req, "llm_provider", "local") or "local").lower()
+    provider = _resolve_request_llm_provider(getattr(req, "llm_provider", None))
     if provider in ("local", "gemma_local"):
         return local_default
     return max(1, min(requested, local_default))
@@ -1751,6 +2436,36 @@ async def health():
             ambient_status = rag_engine.ambient_service.get_status()
         except Exception:
             pass
+
+    memories_count = 0
+    vectors_count = 0
+    graph_nodes = 0
+    graph_edges = 0
+    memories_backend = "unknown"
+
+    try:
+        if rag_engine.initialized and rag_engine.metadata_store:
+            mem_stats = rag_engine.metadata_store.get_stats() or {}
+            memories_count = int(mem_stats.get("memories", 0) or 0)
+            memories_backend = str(mem_stats.get("backend", "unknown") or "unknown")
+    except Exception:
+        pass
+
+    try:
+        if rag_engine.initialized and rag_engine.vector_store:
+            vec_stats = rag_engine.vector_store.get_stats() or {}
+            vectors_count = int(vec_stats.get("total_vectors", 0) or 0)
+    except Exception:
+        pass
+
+    try:
+        if rag_engine.initialized and rag_engine.knowledge_graph:
+            graph_stats = rag_engine.knowledge_graph.get_stats() or {}
+            graph_nodes = int(graph_stats.get("nodes", 0) or 0)
+            graph_edges = int(graph_stats.get("edges", 0) or 0)
+    except Exception:
+        pass
+
     return HealthResponse(
         status="ok" if model_loaded else "loading",
         model_loaded=model_loaded,
@@ -1760,6 +2475,11 @@ async def health():
             "runtime_llm_provider": _runtime_selection.get("llm_provider", "local"),
             "gemini_available": rag_engine.llm.has_gemini if rag_engine.initialized and hasattr(rag_engine.llm, "has_gemini") else False,
         },
+        memories_count=memories_count,
+        vectors_count=vectors_count,
+        graph_nodes=graph_nodes,
+        graph_edges=graph_edges,
+        memories_backend=memories_backend,
     )
 
 
@@ -2082,21 +2802,24 @@ async def verify_modelpack(req: ModelpackVerifyRequest):
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
+    requested_provider = _resolve_request_llm_provider(req.llm_provider)
+    req.llm_provider = requested_provider
+
     # Apply per-request LLM provider switch
     try:
-        _set_request_provider(req.llm_provider)
+        _set_request_provider(requested_provider)
     except ValueError as e:
         if "unsupported_provider" in str(e):
             raise HTTPException(
                 400,
-                f"Unsupported LLM provider '{req.llm_provider}'. Supported providers: {', '.join(SUPPORTED_LLM_PROVIDERS)}",
+                f"Unsupported LLM provider '{requested_provider}'. Supported providers: {', '.join(SUPPORTED_LLM_PROVIDERS)}",
             )
         if "local_unavailable" in str(e):
             raise HTTPException(
                 503,
                 "Local model is not loaded. Switch to Gemini in settings, or start the server with a local model."
             )
-        raise HTTPException(503, f"LLM provider '{req.llm_provider}' is not available.")
+        raise HTTPException(503, f"LLM provider '{requested_provider}' is not available.")
 
     # ── Gemini path (no local model needed) ──────────────────────────────
     if _is_gemini_active():
@@ -2331,21 +3054,24 @@ async def rag_chat(req: RAGChatRequest):
     if not rag_engine.initialized:
         raise HTTPException(503, "RAG engine is still initializing.")
 
+    requested_provider = _resolve_request_llm_provider(req.llm_provider)
+    req.llm_provider = requested_provider
+
     # Apply per-request LLM provider switch
     try:
-        _set_request_provider(req.llm_provider)
+        _set_request_provider(requested_provider)
     except ValueError as e:
         if "unsupported_provider" in str(e):
             raise HTTPException(
                 400,
-                f"Unsupported LLM provider '{req.llm_provider}'. Supported providers: {', '.join(SUPPORTED_LLM_PROVIDERS)}",
+                f"Unsupported LLM provider '{requested_provider}'. Supported providers: {', '.join(SUPPORTED_LLM_PROVIDERS)}",
             )
         if "local_unavailable" in str(e):
             raise HTTPException(
                 503,
                 "Local model is not loaded. Switch to Gemini in settings, or start the server with a local model."
             )
-        raise HTTPException(503, f"LLM provider '{req.llm_provider}' is not available.")
+        raise HTTPException(503, f"LLM provider '{requested_provider}' is not available.")
 
     user_message = req.messages[-1].content if req.messages else ""
     if not user_message:
@@ -2390,6 +3116,7 @@ async def rag_chat(req: RAGChatRequest):
                 "agents_used": result.get("agents_used", []),
                 "confidence": result.get("confidence", 0),
                 "query_analysis": result.get("query_analysis", {}),
+                "answer_plan": result.get("answer_plan", {}),
                 "processing_time_ms": result.get("processing_time_ms", 0),
                 "cache_hit": result.get("cache_hit", False),
                 "pipeline_trace": result.get("pipeline_trace", None),
@@ -2551,6 +3278,7 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
                 "agents_used": agents_used,
                 "confidence": confidence,
                 "query_analysis": query_analysis,
+                "answer_plan": rag_result.get("answer_plan", {}),
                 "thinking": thinking,
                 "pipeline_trace": rag_result.get("pipeline_trace", None),
                 "runtime_tasks": runtime_tasks,
@@ -2841,6 +3569,8 @@ async def ingest_memory(req: MemoryIngestRequest):
             content=req.content, source=req.source, session_id=req.session_id
         )
         return {"status": "ok", "memory": result}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -3771,6 +4501,10 @@ class AmbientConfigUpdate(BaseModel):
     wake_word_enabled: Optional[bool] = None  # Enable wake word detection
     wake_word_threshold: Optional[float] = None  # Wake word confidence threshold
     wake_word_mode: Optional[str] = None     # "always_on", "manual", "hybrid"
+    live_mode: Optional[str] = None          # "gemini_live" | "classic"
+    energy_gate_threshold: Optional[float] = None
+    energy_min_speech_ms: Optional[int] = None
+    energy_silence_ms: Optional[int] = None
 
 class TTSSynthesizeRequest(BaseModel):
     text: str
@@ -3779,6 +4513,10 @@ class TTSSynthesizeRequest(BaseModel):
 class VoiceQueryRequest(BaseModel):
     audio_base64: str  # Base64-encoded int16 PCM audio at 16kHz
     settings: Optional[dict] = None
+
+class AmbientLiveInjectAudioRequest(BaseModel):
+    audio_base64: str  # Base64-encoded int16 PCM audio at 16kHz
+    sample_rate: int = Field(16000, ge=8000, le=48000)
 
 class EnrollmentRequest(BaseModel):
     duration_seconds: int = Field(20, ge=10, le=30)
@@ -3792,6 +4530,11 @@ def _get_ambient():
     """Helper to get ambient service or raise 503."""
     if not rag_engine.initialized or not rag_engine.ambient_service:
         raise HTTPException(503, "Ambient service not available.")
+    try:
+        rag_engine.ambient_service.set_live_assistant_callback(_ambient_live_assistant_reply)
+        rag_engine.ambient_service.set_live_retrieve_callback(_ambient_live_retrieve_reply)
+    except Exception:
+        pass
     return rag_engine.ambient_service
 
 
@@ -3811,6 +4554,89 @@ async def ambient_stop():
     ambient = _get_ambient()
     result = await ambient.stop()
     return result
+
+
+@app.post("/api/ambient/live/start")
+async def ambient_live_start():
+    """Start Gemini Live ambient mode (always-on full duplex)."""
+    ambient = _get_ambient()
+    result = await ambient.start_live()
+    return result
+
+
+@app.post("/api/ambient/live/stop")
+async def ambient_live_stop():
+    """Stop Gemini Live ambient mode."""
+    ambient = _get_ambient()
+    result = await ambient.stop_live()
+    return result
+
+
+@app.get("/api/ambient/live/status")
+async def ambient_live_status():
+    """Get Gemini Live ambient session status and diagnostics."""
+    ambient = _get_ambient()
+    return ambient.get_live_status()
+
+
+@app.post("/api/ambient/live/inject-audio")
+async def ambient_live_inject_audio(req: AmbientLiveInjectAudioRequest):
+    """Inject PCM audio into live mode for deterministic deep testing.
+
+    This endpoint is intended for local validation scripts that need to verify
+    the full always-listening orchestrator path without relying on microphone
+    input timing.
+    """
+    import base64
+    import numpy as np
+
+    ambient = _get_ambient()
+    live = ambient.live_orchestrator
+    if not live or not live.running:
+        raise HTTPException(409, "Gemini live mode is not running. Start /api/ambient/live/start first.")
+
+    try:
+        audio_bytes = base64.b64decode(req.audio_base64)
+        audio = np.frombuffer(audio_bytes, dtype=np.int16)
+    except Exception as e:
+        raise HTTPException(400, f"Invalid audio payload: {e}")
+
+    if audio.size == 0:
+        raise HTTPException(400, "Audio payload is empty")
+
+    target_rate = int(getattr(ambient.audio_capture, "SAMPLE_RATE", 16000) or 16000)
+    if int(req.sample_rate) != target_rate:
+        # Lightweight resampler for test harness inputs.
+        x = np.linspace(0.0, 1.0, num=audio.size, endpoint=False)
+        new_size = max(1, int(round(audio.size * target_rate / req.sample_rate)))
+        xp = np.linspace(0.0, 1.0, num=new_size, endpoint=False)
+        audio = np.interp(xp, x, audio.astype(np.float32)).astype(np.int16)
+
+    frame_size = int(getattr(ambient.audio_capture, "frame_size", 512) or 512)
+    if frame_size <= 0:
+        frame_size = 512
+
+    # Feed audio as if it was captured by the live audio callback.
+    for i in range(0, audio.size, frame_size):
+        frame = audio[i:i + frame_size]
+        if frame.size < frame_size:
+            frame = np.pad(frame, (0, frame_size - frame.size), mode="constant")
+        live.process_audio_frame(frame)
+
+    # Push trailing silence to force segment finalization.
+    silence = np.zeros(frame_size, dtype=np.int16)
+    for _ in range(24):
+        live.process_audio_frame(silence)
+
+    # Allow worker loop to process transcription + downstream tasks.
+    await asyncio.sleep(1.5)
+
+    return {
+        "success": True,
+        "injected_samples": int(audio.size),
+        "sample_rate": target_rate,
+        "live": ambient.get_live_status(),
+    }
 
 
 @app.post("/api/ambient/pause")
@@ -3861,6 +4687,7 @@ class VoiceProviderRequest(BaseModel):
 async def get_voice_providers():
     """Get available voice providers and current selection."""
     ambient = _get_ambient()
+    gemini_ready = ambient._gemini_api_key is not None
     traditional_stt_available = ambient._traditional_stt is not None
     traditional_tts_available = (
         ambient._traditional_tts is not None
@@ -3869,13 +4696,15 @@ async def get_voice_providers():
     return {
         "stt_provider": ambient.get_stt_provider(),
         "tts_provider": ambient.get_tts_provider(),
-        "gemini_available": ambient._gemini_api_key is not None,
+        "gemini_available": gemini_ready,
         "traditional_stt_available": traditional_stt_available,
         "traditional_tts_available": traditional_tts_available,
         "local_stt_available": traditional_stt_available,
         "local_tts_available": traditional_tts_available,
-        "gemini_stt_available": ambient._gemini_stt is not None,
-        "gemini_tts_available": ambient._gemini_tts is not None,
+        "gemini_stt_available": ambient._gemini_stt is not None or gemini_ready,
+        "gemini_tts_available": ambient._gemini_tts is not None or gemini_ready,
+        "live_mode": ambient.get_config().get("live_mode", "classic"),
+        "live_status": ambient.get_live_status(),
         "supported_stt_providers": list(SUPPORTED_VOICE_PROVIDERS),
         "supported_tts_providers": list(SUPPORTED_VOICE_PROVIDERS),
         "gemini_tts_voices": ["Aoede", "Charon", "Fenrir", "Kore",
@@ -4126,18 +4955,39 @@ async def voice_query(req: VoiceQueryRequest):
 _ws_clients: set[WebSocket] = set()
 
 
-async def _broadcast_to_ws_clients(data: dict):
-    """Broadcast ambient events to all connected WebSocket clients."""
-    if not _ws_clients:
-        return
-    msg = json.dumps(data)
+async def _send_to_ws_clients(msg: str) -> None:
     disconnected = set()
-    for ws in _ws_clients:
+    for ws in list(_ws_clients):
         try:
             await ws.send_text(msg)
         except Exception:
             disconnected.add(ws)
-    _ws_clients -= disconnected
+    _ws_clients.difference_update(disconnected)
+
+
+async def _broadcast_to_ws_clients(data: dict):
+    """Broadcast ambient events to all connected WebSocket clients."""
+    if not _ws_clients:
+        return
+
+    msg = json.dumps(data)
+
+    if _server_event_loop is None:
+        await _send_to_ws_clients(msg)
+        return
+
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
+    if current_loop is _server_event_loop:
+        await _send_to_ws_clients(msg)
+        return
+
+    # Ambient live events can originate from a background worker loop.
+    # Marshal websocket sends back onto the server loop to avoid cross-loop errors.
+    asyncio.run_coroutine_threadsafe(_send_to_ws_clients(msg), _server_event_loop)
 
 
 @app.websocket("/ws/ambient")
@@ -4147,6 +4997,10 @@ async def websocket_ambient(ws: WebSocket):
     Sends:
       - {"type": "transcript", "speaker_label": ..., "text": ..., ...}
       - {"type": "vad_activity", "speech_prob": ..., "timestamp": ...}
+            - {"type": "session_state", "state": ..., "session_id": ...}
+            - {"type": "live_partial", ...}
+            - {"type": "live_final_turn", ...}
+            - {"type": "assistant_audio_chunk", ...}
       - {"type": "status", "status": "listening"|"transcribing"|...}
     """
     await ws.accept()
@@ -4163,6 +5017,10 @@ async def websocket_ambient(ws: WebSocket):
             await ws.send_text(json.dumps({
                 "type": "status",
                 **ambient.get_status(),
+            }))
+            await ws.send_text(json.dumps({
+                "type": "session_state",
+                **ambient.get_live_status(),
             }))
 
         # Keep connection alive, listen for client messages
@@ -4376,12 +5234,25 @@ async def query_documents(request: MemorySearchRequest):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 from src.agents.autonomous_loop import CortexAgentLoop, AgentConfig
+from src.agents.llm_adapter import make_cortex_loop_llm_fn
 from src.agents.tier_router import TierRouter, ResponseCache
 from src.agents.tool_types import CortexEvent, CortexEventType
 from src.agents.scheduler import background_scheduler
 
 _agent_sessions: Dict[str, CortexAgentLoop] = {}
 _tier_router = TierRouter()
+
+
+def _build_agent_loop(config: AgentConfig) -> CortexAgentLoop:
+    llm_fn = make_cortex_loop_llm_fn(
+        rag_engine.llm,
+        preferred_provider=config.llm_provider,
+    )
+    return CortexAgentLoop(
+        config=config,
+        llm_fn=llm_fn,
+        runtime_task_manager=_runtime_task_manager,
+    )
 
 
 class AgentQueryRequest(BaseModel):
@@ -4401,6 +5272,38 @@ class AgentFollowUpRequest(BaseModel):
 class AgentSessionCreateRequest(BaseModel):
     agent_id: str = Field("l1_orchestrator", description="Agent config ID to use")
     title: Optional[str] = Field(None, description="Session title")
+
+
+class SessionForgeRunRequest(BaseModel):
+    session_id: Optional[str] = Field(None, description="Session to process")
+    lookback_days: int = Field(7, ge=1, le=180, description="Lookback window in days")
+
+
+class SessionForgeSummaryRequest(BaseModel):
+    session_id: Optional[str] = Field(None, description="Optional single-session summary")
+    window_days: int = Field(14, ge=1, le=180, description="Window for summary generation")
+
+
+class ChroniclePassiveEnableRequest(BaseModel):
+    consent: bool = Field(..., description="Explicit user consent to enable passive mode")
+    consent_actor: str = Field("user", description="Actor granting consent")
+
+
+class ChroniclePassiveObserveRequest(BaseModel):
+    note: str = Field("", description="Optional passive observation note")
+    location: dict[str, Any] = Field(default_factory=dict, description="Location snapshot")
+    people_present: list[str] = Field(default_factory=list, description="Detected or tagged people")
+    tags: list[str] = Field(default_factory=list, description="Optional moment tags")
+    media_ref: str = Field("", description="Optional media reference from client")
+    source: str = Field("passive_notification", description="Observation source")
+    emotion_hint: str = Field("", description="Optional emotion hint")
+
+
+class ChroniclePassiveSaveRequest(BaseModel):
+    title: str = Field("", description="Optional title for saved moment")
+    window_seconds: int = Field(180, ge=10, le=1800, description="How much of buffer to persist")
+    retrieval_hint: str = Field("", description="Optional retrieval hint")
+    life_domain: str = Field("everyday", description="Domain label for indexing")
 
 
 # ── Agent Session Management ─────────────────────────────────────────────────
@@ -4432,7 +5335,7 @@ async def create_agent_session(request: AgentSessionCreateRequest):
         llm_provider=config.llm_provider,
     )
 
-    loop = CortexAgentLoop(config=config_with_ext)
+    loop = _build_agent_loop(config_with_ext)
     session_id = loop.session.session_id if loop.session else str(uuid.uuid4())
     _agent_sessions[session_id] = loop
 
@@ -4504,7 +5407,7 @@ async def agent_query(request: AgentQueryRequest):
             context_window=config.context_window,
             llm_provider=config.llm_provider,
         )
-        loop = CortexAgentLoop(config=config_with_ext)
+        loop = _build_agent_loop(config_with_ext)
         if loop.session:
             _agent_sessions[loop.session.session_id] = loop
 
@@ -4546,54 +5449,43 @@ async def agent_query_stream(request: AgentQueryRequest):
             context_window=config.context_window,
             llm_provider=config.llm_provider,
         )
-        loop = CortexAgentLoop(config=config_with_ext)
+        loop = _build_agent_loop(config_with_ext)
         if loop.session:
             _agent_sessions[loop.session.session_id] = loop
 
     event_queue: asyncio.Queue = asyncio.Queue()
-    collected_events: list[dict] = []
 
     def on_event(event: CortexEvent):
         event_queue.put_nowait(event)
-        collected_events.append(event.to_dict())
 
     unsubscribe = loop.subscribe(on_event)
 
     async def event_generator():
-        tier_event = CortexEvent(
-            type=CortexEventType.TIER_SELECTED,
-            data=tier.to_dict(),
-            session_id=loop.session.session_id if loop.session else "",
-            agent_id=loop.config.agent_id,
-        )
-        yield tier_event.to_sse()
+        try:
+            tier_event = CortexEvent(
+                type=CortexEventType.TIER_SELECTED,
+                data=tier.to_dict(),
+                session_id=loop.session.session_id if loop.session else "",
+                agent_id=loop.config.agent_id,
+            )
+            yield tier_event.to_sse()
 
-        prompt_task = asyncio.create_task(loop.prompt(request.query))
+            prompt_task = asyncio.create_task(loop.prompt(request.query))
 
-        while not prompt_task.done():
-            try:
-                event = await asyncio.wait_for(event_queue.get(), timeout=0.5)
+            while not prompt_task.done():
+                try:
+                    event = await asyncio.wait_for(event_queue.get(), timeout=0.5)
+                    yield event.to_sse()
+                except asyncio.TimeoutError:
+                    continue
+
+            await prompt_task
+
+            while not event_queue.empty():
+                event = event_queue.get_nowait()
                 yield event.to_sse()
-            except asyncio.TimeoutError:
-                continue
-
-        result = await prompt_task
-
-        while not event_queue.empty():
-            event = event_queue.get_nowait()
-            yield event.to_sse()
-
-        final_event = CortexEvent(
-            type=CortexEventType.AGENT_END,
-            data={
-                "answer": result.get("text", ""),
-                "turns": result.get("turns", 0),
-                "session_id": loop.session.session_id if loop.session else None,
-            },
-        )
-        yield final_event.to_sse()
-
-        unsubscribe()
+        finally:
+            unsubscribe()
 
     return StreamingResponse(
         event_generator(),
@@ -4732,6 +5624,33 @@ async def list_claims():
     return store.stats()
 
 
+@app.post("/api/wiki/rebuild")
+async def rebuild_wiki_from_memories(request: dict | None = None):
+    """Backfill wiki pages/claims from already-ingested memories."""
+    if not rag_engine.initialized:
+        raise HTTPException(503, "RAG engine not ready.")
+
+    body = dict(request or {})
+    limit = int(body.get("limit", 300) or 300)
+    offset = int(body.get("offset", 0) or 0)
+    max_claims_per_memory = int(body.get("max_claims_per_memory", 10) or 10)
+
+    memories = rag_engine.metadata_store.get_all_memories(limit=limit, offset=offset)
+    from src.wiki.materializer import materialize_memories_into_wiki
+
+    summary = materialize_memories_into_wiki(
+        memories,
+        max_claims_per_memory=max_claims_per_memory,
+    )
+    return {
+        "status": "ok",
+        "scanned": len(memories),
+        "limit": limit,
+        "offset": offset,
+        **summary,
+    }
+
+
 @app.post("/api/wiki/claims/search")
 async def search_claims(request: dict):
     """Search atomic claims."""
@@ -4742,6 +5661,86 @@ async def search_claims(request: dict):
         min_confidence=request.get("min_confidence", 0.5),
     )
     return {"claims": results}
+
+
+@app.get("/api/wiki/lint/latest")
+async def wiki_lint_latest():
+    """Get latest wiki lint aggregate summary."""
+    from src.wiki.lint import WikiLinter
+
+    return WikiLinter().latest_summary()
+
+
+@app.post("/api/wiki/lint/run")
+async def wiki_lint_run(request: dict | None = None):
+    """Run lint on a specific wiki page or run full lint sweep."""
+    from src.wiki.lint import WikiLinter
+
+    body = dict(request or {})
+    linter = WikiLinter()
+
+    page_id = str(body.get("page_id", "") or "").strip()
+    stale_days = int(body.get("stale_days", 90) or 90)
+    min_confidence = float(body.get("min_confidence", 0.45) or 0.45)
+
+    if page_id:
+        return {
+            "report": linter.lint_page(
+                page_id,
+                stale_days=stale_days,
+                min_confidence=min_confidence,
+            )
+        }
+
+    limit = int(body.get("limit", 200) or 200)
+    return linter.lint_all(
+        limit=limit,
+        stale_days=stale_days,
+        min_confidence=min_confidence,
+    )
+
+
+@app.get("/api/wiki/compaction/latest")
+async def wiki_compaction_latest():
+    """Get latest wiki compaction summary."""
+    from src.wiki.compactor import WikiCompactor
+
+    return WikiCompactor().latest_summary()
+
+
+@app.post("/api/wiki/compaction/run")
+async def wiki_compaction_run(request: dict | None = None):
+    """Run section/page/global wiki compaction."""
+    from src.wiki.compactor import WikiCompactor
+
+    body = dict(request or {})
+    compactor = WikiCompactor()
+
+    page_id = str(body.get("page_id", "") or "").strip()
+    section = str(body.get("section", "") or "").strip()
+    max_tokens = int(body.get("max_tokens", 500) or 500)
+
+    if page_id and section:
+        return {
+            "result": compactor.compact_section(
+                page_id,
+                section,
+                max_tokens=max_tokens,
+            )
+        }
+
+    if page_id:
+        return compactor.compact_page(
+            page_id,
+            max_tokens_per_section=max_tokens,
+            section_limit=int(body.get("section_limit", 3) or 3),
+        )
+
+    return compactor.compact_all(
+        limit=int(body.get("limit", 60) or 60),
+        max_tokens_per_section=max_tokens,
+        section_limit=int(body.get("section_limit", 2) or 2),
+    )
 
 
 # ── Background Scheduler ─────────────────────────────────────────────────────
@@ -4766,6 +5765,205 @@ async def disable_scheduled_agent(agent_id: str):
     return {"agent_id": agent_id, "enabled": False}
 
 
+# ── Phase 1 Deep Apps ───────────────────────────────────────────────────────
+
+@app.get("/api/deep/session-forge/status")
+async def session_forge_status():
+    return {
+        "status": session_memory_forge_service.status(),
+        "recent_runs": session_memory_forge_service.recent_runs(limit=20),
+    }
+
+
+@app.post("/api/deep/session-forge/crystallize")
+async def session_forge_crystallize(request: SessionForgeRunRequest):
+    result = session_memory_forge_service.run_crystallizer(
+        session_id=request.session_id or "",
+        trigger="api",
+    )
+    _emit_runtime_event(
+        "quality_loop",
+        {
+            "agent_id": "session_forge_crystallizer",
+            "stage": "session_crystallizer",
+            "reason": "api",
+            "result": result,
+        },
+        session_id=result.get("session_id", "") or "",
+    )
+    return result
+
+
+@app.post("/api/deep/session-forge/summary")
+async def session_forge_summary(request: SessionForgeSummaryRequest):
+    result = session_memory_forge_service.run_summary_forge(
+        session_id=request.session_id or "",
+        window_days=request.window_days,
+        trigger="api",
+    )
+    _emit_runtime_event(
+        "wiki_update",
+        {
+            "agent_id": "session_forge_summary_forge",
+            "stage": "structured_summary_forge",
+            "reason": "api",
+            "result": result,
+        },
+        session_id=request.session_id or "",
+    )
+    return result
+
+
+@app.post("/api/deep/session-forge/gaps")
+async def session_forge_gaps(request: SessionForgeRunRequest):
+    result = session_memory_forge_service.run_gap_mapper(
+        lookback_days=request.lookback_days,
+        trigger="api",
+    )
+    for signal in list(result.get("signals", []) or [])[:5]:
+        _emit_runtime_event(
+            "gap_signal",
+            {
+                "agent_id": "session_forge_gap_mapper",
+                **signal,
+            },
+        )
+    return result
+
+
+@app.post("/api/deep/session-forge/beliefs")
+async def session_forge_beliefs(request: SessionForgeRunRequest):
+    result = session_memory_forge_service.run_belief_detector(
+        lookback_days=request.lookback_days,
+        trigger="api",
+    )
+    for record in list(result.get("records", []) or [])[:5]:
+        _emit_runtime_event(
+            "belief_shift",
+            {
+                "agent_id": "session_forge_belief_detector",
+                **record,
+            },
+        )
+    return result
+
+
+@app.get("/api/deep/session-forge/artifacts/{artifact_type}")
+async def session_forge_artifacts(
+    artifact_type: str,
+    limit: int = Query(50, ge=1, le=200),
+    session_id: str = Query(""),
+):
+    try:
+        rows = session_memory_forge_service.list_artifacts(
+            artifact_type,
+            limit=limit,
+            session_id=session_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "artifact_type": artifact_type,
+        "count": len(rows),
+        "items": rows,
+    }
+
+
+@app.post("/api/chronicle/passive/enable")
+async def chronicle_enable_passive(request: ChroniclePassiveEnableRequest):
+    if not request.consent:
+        raise HTTPException(status_code=400, detail="Explicit consent is required for passive mode")
+
+    status = life_chronicle_service.enable_passive_mode(consent_actor=request.consent_actor)
+    _emit_runtime_event(
+        "presence_initiative",
+        {
+            "agent_id": "life_chronicle_passive",
+            "message": "Life Chronicle passive mode enabled",
+            "status": status,
+        },
+    )
+    return status
+
+
+@app.post("/api/chronicle/passive/disable")
+async def chronicle_disable_passive(reason: str = Query("user_request")):
+    status = life_chronicle_service.disable_passive_mode(reason=reason)
+    _emit_runtime_event(
+        "quality_loop",
+        {
+            "agent_id": "life_chronicle_passive",
+            "stage": "passive_disabled",
+            "reason": reason,
+            "status": status,
+        },
+    )
+    return status
+
+
+@app.get("/api/chronicle/passive/status")
+async def chronicle_passive_status():
+    return life_chronicle_service.status()
+
+
+@app.post("/api/chronicle/passive/observe")
+async def chronicle_passive_observe(request: ChroniclePassiveObserveRequest):
+    try:
+        return life_chronicle_service.add_passive_observation(
+            note=request.note,
+            location=request.location,
+            people_present=request.people_present,
+            tags=request.tags,
+            media_ref=request.media_ref,
+            source=request.source,
+            emotion_hint=request.emotion_hint,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.post("/api/chronicle/passive/save")
+async def chronicle_passive_save(request: ChroniclePassiveSaveRequest):
+    result = life_chronicle_service.save_recent_window(
+        title=request.title,
+        window_seconds=request.window_seconds,
+        retrieval_hint=request.retrieval_hint,
+        life_domain=request.life_domain,
+    )
+    if result.get("status") == "saved":
+        _emit_runtime_event(
+            "quality_loop",
+            {
+                "agent_id": "life_chronicle_passive",
+                "stage": "moment_saved",
+                "result": {
+                    "memory_id": result.get("memory_id", ""),
+                    "observation_count": result.get("observation_count", 0),
+                    "window_seconds": result.get("window_seconds", 0),
+                },
+            },
+        )
+    return result
+
+
+@app.get("/api/chronicle/moments")
+async def chronicle_list_moments(
+    limit: int = Query(50, ge=1, le=200),
+    tag: str = Query(""),
+):
+    moments = life_chronicle_service.list_moments(limit=limit, tag=tag)
+    return {"count": len(moments), "moments": moments}
+
+
+@app.get("/api/chronicle/moments/{memory_id}")
+async def chronicle_get_moment(memory_id: str):
+    moment = life_chronicle_service.get_moment(memory_id)
+    if not moment:
+        raise HTTPException(status_code=404, detail="Moment not found")
+    return moment
+
+
 # ── SSE Event Stream (Global) ────────────────────────────────────────────────
 
 @app.get("/api/agent/events")
@@ -4784,9 +5982,32 @@ async def agent_event_stream():
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=30.0)
-                    yield event.to_sse()
+                    payload = dict(event.payload or {})
+                    cortex_event = {
+                        "event_id": str(payload.get("event_id") or event.message_id),
+                        "type": event.event_type,
+                        "data": payload,
+                        "timestamp": event.timestamp,
+                        "session_id": event.session_id,
+                        "agent_id": str(payload.get("agent_id", "")),
+                        "trace_id": event.trace_id,
+                    }
+                    yield f"data: {json.dumps(cortex_event)}\n\n"
                 except asyncio.TimeoutError:
-                    yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "type": "keepalive",
+                                "data": {},
+                                "timestamp": _utc_now_iso(),
+                                "session_id": "",
+                                "agent_id": "",
+                                "trace_id": "",
+                            }
+                        )
+                        + "\n\n"
+                    )
         except asyncio.CancelledError:
             pass
         finally:
