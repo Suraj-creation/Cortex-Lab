@@ -41,6 +41,14 @@ class EmbeddingModel:
 
     def _load_model(self):
         """Try loading models in priority order: local → Gemini API → hash."""
+        # Cloud deployments set SKIP_LOCAL_MODEL=true; avoid loading local embedding
+        # models to keep startup memory within free-tier limits.
+        skip_local = os.environ.get("SKIP_LOCAL_MODEL", "false").lower() == "true"
+        if skip_local:
+            print("  ℹ SKIP_LOCAL_MODEL=true, using Gemini/hash embeddings")
+            self._try_gemini_embeddings()
+            return
+
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError:
