@@ -1,0 +1,63 @@
+{
+  "schema_version": "1.1",
+  "generated_at": "2026-04-06T00:00:00Z",
+  "signature_required": true,
+  "channels": [
+    "stable",
+    "candidate",
+    "canary"
+  ],
+  "docs_url": "https://github.com/google-ai-edge/LiteRT-LM/blob/main/docs%2Fapi%2Fkotlin%2Fgetting_started.md",
+  "packs": [
+    {
+      "id": "gemma-4-e4b-it-litert-lm",
+      "display_name": "Gemma 4 E4B IT (LiteRT-LM)",
+      "version": "2026.04.0",
+      "target": "android-web",
+      "family": "gemma-4",
+      "quantization": "E4B",
+      "availability": "available",
+      "summary": "Higher-quality Gemma 4 local model for capable devices.",
+      "download_url": "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm",
+      "cta_label": "Download from Hugging Face",
+      "requires": [
+        "litertlm-runtime",
+        "gemma-runtime-bridge"
+      ],
+      "files": []
+    },
+    {
+      "id": "gemma-4-e2b-it-litert-lm",
+      "display_name": "Gemma 4 E2B IT (LiteRT-LM)",
+      "version": "2026.04.0",
+      "target": "android-web",
+      "family": "gemma-4",
+      "quantization": "E2B",
+      "availability": "available",
+      "summary": "Lean Gemma 4 local model for faster installs and mid-range devices.",
+      "download_url": "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm",
+      "cta_label": "Download from Hugging Face",
+      "requires": [
+        "litertlm-runtime",
+        "gemma-runtime-bridge"
+      ],
+      "files": []
+    },
+    {
+      "id": "gemma-3-5-ft-local",
+      "display_name": "Gemma 3.5 Fine-Tuned (Planned)",
+      "version": "planned",
+      "target": "android-web",
+      "family": "gemma-3.5",
+      "quantization": "tbd",
+      "availability": "coming_soon",
+      "summary": "Reserved slot for your upcoming fine-tuned local model integration.",
+      "cta_label": "Coming Soon",
+      "requires": [
+        "litertlm-runtime",
+        "finetuned-pack-release"
+      ],
+      "files": []
+    }
+  ]
+}

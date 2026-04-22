@@ -1,0 +1,585 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap");
+@import url("https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css");
+
+:root {
+  --bg-primary: #f8fafc;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #f1f5f9;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --accent: #6366f1;
+  --accent-secondary: #8b5cf6;
+  --accent-glow: rgba(99, 102, 241, 0.1);
+  --border: rgba(15, 23, 42, 0.08);
+  --glass: rgba(255, 255, 255, 0.8);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: "Inter", system-ui, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.12);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(15, 23, 42, 0.25);
+}
+
+/* ── Selection ──────────────────────────────────────────────────── */
+::selection {
+  background: rgba(99, 102, 241, 0.15);
+  color: #1e1b4b;
+}
+
+/* ── Glass morphism ─────────────────────────────────────────────── */
+.glass {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+}
+
+.glass-subtle {
+  background: rgba(255, 255, 255, 0.5);
+  backdrop-filter: blur(12px) saturate(150%);
+  -webkit-backdrop-filter: blur(12px) saturate(150%);
+}
+
+/* ── Markdown content ───────────────────────────────────────────── */
+.prose-chat {
+  @apply text-sm leading-relaxed;
+}
+
+.prose-chat p {
+  @apply mb-3 last:mb-0;
+}
+
+.prose-chat pre {
+  @apply my-3 rounded-xl overflow-x-auto border border-slate-200 p-4;
+  background: #f8fafc;
+}
+
+.prose-chat code {
+  @apply font-mono text-xs;
+}
+
+.prose-chat :not(pre) > code {
+  @apply bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded-md text-xs border border-indigo-100;
+}
+
+.prose-chat ul,
+.prose-chat ol {
+  @apply ml-5 mb-3 space-y-1.5;
+}
+
+.prose-chat ul {
+  @apply list-disc;
+}
+
+.prose-chat ol {
+  @apply list-decimal;
+}
+
+.prose-chat li {
+  @apply pl-1;
+}
+
+.prose-chat h1,
+.prose-chat h2,
+.prose-chat h3,
+.prose-chat h4 {
+  @apply font-semibold mb-2 mt-4 first:mt-0;
+}
+
+.prose-chat h1 { @apply text-lg; }
+.prose-chat h2 { @apply text-base; }
+.prose-chat h3 { @apply text-sm; }
+
+.prose-chat blockquote {
+  @apply border-l-2 border-indigo-300 pl-4 italic text-slate-500 my-3;
+}
+
+.prose-chat table {
+  @apply w-full border-collapse my-3 text-xs;
+}
+
+.prose-chat th,
+.prose-chat td {
+  @apply border border-slate-200 px-3 py-2 text-left;
+}
+
+.prose-chat th {
+  @apply bg-slate-50 font-medium text-slate-600;
+}
+
+.prose-chat hr {
+  @apply my-4 border-slate-200;
+}
+
+.prose-chat a {
+  @apply text-indigo-600 hover:text-indigo-500 underline underline-offset-2 decoration-indigo-300;
+}
+
+/* ── KaTeX ──────────────────────────────────────────────────────── */
+.katex {
+  font-size: 1em !important;
+}
+
+/* ── Typing dots animation ──────────────────────────────────────── */
+.typing-dot {
+  animation: bounce-dot 1.4s infinite ease-in-out both;
+}
+.typing-dot:nth-child(1) { animation-delay: -0.32s; }
+.typing-dot:nth-child(2) { animation-delay: -0.16s; }
+
+@keyframes bounce-dot {
+  0%, 80%, 100% { transform: scale(0); }
+  40% { transform: scale(1); }
+}
+
+/* ── Glow effects ───────────────────────────────────────────────── */
+.glow-border {
+  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.08),
+              0 1px 3px rgba(15, 23, 42, 0.04),
+              inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.glow-border:focus-within {
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2),
+              0 2px 8px rgba(99, 102, 241, 0.06),
+              inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+/* ── Gradient text ──────────────────────────────────────────────── */
+.gradient-text {
+  background: linear-gradient(135deg, #4f46e5, #7c3aed, #4f46e5);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: gradient-shift 4s ease-in-out infinite;
+}
+
+.gradient-text-static {
+  background: linear-gradient(135deg, #4f46e5, #6d28d9, #7c3aed);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+@keyframes gradient-shift {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+/* ── Animated gradient orb ─────────────────────────────────────── */
+.gradient-orb {
+  background: radial-gradient(circle at 30% 30%, 
+    rgba(99, 102, 241, 0.06) 0%,
+    rgba(139, 92, 246, 0.04) 30%,
+    rgba(168, 85, 247, 0.02) 60%,
+    transparent 70%
+  );
+  animation: orb-float 8s ease-in-out infinite;
+}
+
+@keyframes orb-float {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  25% { transform: translate(10px, -15px) scale(1.02); }
+  50% { transform: translate(-5px, 10px) scale(0.98); }
+  75% { transform: translate(15px, 5px) scale(1.01); }
+}
+
+/* ── Thinking panel ─────────────────────────────────────────────── */
+.thinking-panel {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.04), rgba(139, 92, 246, 0.02));
+  border: 1px solid rgba(99, 102, 241, 0.12);
+}
+
+.prose-thinking {
+  @apply text-sm leading-relaxed;
+  color: #64748b;
+}
+
+.prose-thinking p {
+  @apply mb-2.5 last:mb-0;
+}
+
+.prose-thinking strong,
+.prose-thinking b {
+  @apply font-semibold text-slate-600;
+}
+
+.prose-thinking em,
+.prose-thinking i {
+  @apply italic text-slate-500;
+}
+
+.prose-thinking ul,
+.prose-thinking ol {
+  @apply ml-4 mb-2 space-y-1;
+}
+
+.prose-thinking ul { @apply list-disc; }
+.prose-thinking ol { @apply list-decimal; }
+
+.prose-thinking li {
+  @apply pl-0.5 text-slate-500;
+}
+
+.prose-thinking code {
+  @apply font-mono text-xs bg-indigo-50/60 text-indigo-500 px-1 py-0.5 rounded;
+}
+
+.prose-thinking pre {
+  @apply my-2 rounded-lg overflow-x-auto p-3 text-xs;
+  background: rgba(99, 102, 241, 0.04);
+  border: 1px solid rgba(99, 102, 241, 0.08);
+}
+
+.prose-thinking blockquote {
+  @apply border-l-2 border-indigo-200 pl-3 italic text-slate-400 my-2;
+}
+
+.prose-thinking h1, .prose-thinking h2, .prose-thinking h3, .prose-thinking h4 {
+  @apply font-semibold text-slate-600 mb-1.5 mt-3 first:mt-0 text-sm;
+}
+
+/* Thinking panel expand/collapse animation */
+@keyframes thinking-expand {
+  from { max-height: 0; opacity: 0; }
+  to { max-height: 24rem; opacity: 1; }
+}
+
+@keyframes thinking-pulse-border {
+  0%, 100% { border-color: rgba(99, 102, 241, 0.15); }
+  50% { border-color: rgba(99, 102, 241, 0.3); }
+}
+
+.thinking-active {
+  animation: thinking-pulse-border 2s ease-in-out infinite;
+}
+
+.thinking-content-enter {
+  animation: thinking-expand 0.3s ease-out forwards;
+  overflow: hidden;
+}
+
+/* ── Sidebar animation ──────────────────────────────────────────── */
+.sidebar-enter {
+  animation: sidebar-in 0.2s ease-out;
+}
+
+@keyframes sidebar-in {
+  from { opacity: 0; transform: translateX(-12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/* ── Fade-in ────────────────────────────────────────────────────── */
+.fade-in {
+  animation: fade-in 0.3s ease-out;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Card hover lift ────────────────────────────────────────────── */
+.card-hover {
+  transition: all 0.2s ease;
+}
+.card-hover:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.08);
+}
+
+/* ── Custom range slider ────────────────────────────────────────── */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.08);
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  height: 16px;
+  width: 16px;
+  border-radius: 50%;
+  background: #6366f1;
+  margin-top: -6px;
+  box-shadow: 0 0 10px rgba(99, 102, 241, 0.2);
+  transition: all 0.15s ease;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+  background: #4f46e5;
+  box-shadow: 0 0 16px rgba(99, 102, 241, 0.3);
+}
+
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.08);
+  border: none;
+}
+
+input[type="range"]::-moz-range-thumb {
+  height: 16px;
+  width: 16px;
+  border-radius: 50%;
+  background: #6366f1;
+  border: none;
+  box-shadow: 0 0 10px rgba(99, 102, 241, 0.2);
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   CORTEX LAB — Hero & EmptyState Animations
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── Cortex Icon Background ──────────────────────────────────────── */
+.cortex-icon-bg {
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 50%, #6d28d9 100%);
+  background-size: 200% 200%;
+  animation: icon-gradient-shift 6s ease-in-out infinite;
+}
+
+@keyframes icon-gradient-shift {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+/* ── Hero Title Animated Gradient ────────────────────────────────── */
+.cortex-hero-text {
+  background: linear-gradient(
+    135deg,
+    #4f46e5 0%,
+    #7c3aed 25%,
+    #a855f7 50%,
+    #7c3aed 75%,
+    #4f46e5 100%
+  );
+  background-size: 300% auto;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: hero-gradient 6s ease-in-out infinite;
+}
+
+@keyframes hero-gradient {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+/* ── Pulsing Rings Around Icon ───────────────────────────────────── */
+.animate-pulse-ring {
+  animation: pulse-ring 3s ease-in-out infinite;
+}
+
+.animate-pulse-ring-delayed {
+  animation: pulse-ring 3s ease-in-out 1s infinite;
+}
+
+@keyframes pulse-ring {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.3;
+  }
+  50% {
+    transform: scale(1.1);
+    opacity: 0.1;
+  }
+}
+
+/* ── Spinning Neural Rings ───────────────────────────────────────── */
+.animate-spin-slow {
+  animation: spin-slow 20s linear infinite;
+  transform-origin: 24px 24px;
+}
+
+.animate-spin-reverse {
+  animation: spin-reverse 25s linear infinite;
+  transform-origin: 24px 24px;
+}
+
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes spin-reverse {
+  from { transform: rotate(360deg); }
+  to { transform: rotate(0deg); }
+}
+
+/* ── Neural Node Pulses ──────────────────────────────────────────── */
+.animate-pulse-node {
+  animation: pulse-node 2s ease-in-out infinite;
+}
+
+.animate-pulse-node-delayed {
+  animation: pulse-node 2s ease-in-out 1s infinite;
+}
+
+@keyframes pulse-node {
+  0%, 100% { opacity: 0.3; r: 1.5; }
+  50% { opacity: 0.8; r: 2.2; }
+}
+
+/* ── Synaptic Flash Animations ───────────────────────────────────── */
+.animate-synapse-1 { animation: synapse-flash 3s ease-in-out 0s infinite; }
+.animate-synapse-2 { animation: synapse-flash 3s ease-in-out 0.7s infinite; }
+.animate-synapse-3 { animation: synapse-flash 3s ease-in-out 1.4s infinite; }
+.animate-synapse-4 { animation: synapse-flash 3s ease-in-out 2.1s infinite; }
+
+@keyframes synapse-flash {
+  0%, 70%, 100% { opacity: 0.1; r: 0.5; }
+  35% { opacity: 0.9; r: 1.5; }
+}
+
+/* ── Ambient Gradient Orbs ───────────────────────────────────────── */
+.hero-orb-1 {
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.08) 0%, transparent 70%);
+  animation: orb-drift-1 12s ease-in-out infinite;
+  border-radius: 50%;
+  filter: blur(40px);
+}
+
+.hero-orb-2 {
+  background: radial-gradient(circle, rgba(139, 92, 246, 0.06) 0%, transparent 70%);
+  animation: orb-drift-2 15s ease-in-out infinite;
+  border-radius: 50%;
+  filter: blur(50px);
+}
+
+.hero-orb-3 {
+  background: radial-gradient(circle, rgba(168, 85, 247, 0.04) 0%, transparent 70%);
+  animation: orb-drift-3 10s ease-in-out infinite;
+  border-radius: 50%;
+  filter: blur(60px);
+}
+
+@keyframes orb-drift-1 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(30px, -20px) scale(1.05); }
+  66% { transform: translate(-15px, 15px) scale(0.95); }
+}
+
+@keyframes orb-drift-2 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(-25px, 20px) scale(0.96); }
+  66% { transform: translate(20px, -10px) scale(1.04); }
+}
+
+@keyframes orb-drift-3 {
+  0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 0.5; }
+  50% { transform: translate(-50%, -50%) scale(1.15); opacity: 0.8; }
+}
+
+/* ── Layer Pipeline ──────────────────────────────────────────────── */
+.layer-pipeline {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.layer-pipeline::-webkit-scrollbar {
+  display: none;
+}
+
+.layer-node {
+  transition: all 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.animate-ping-slow {
+  animation: ping-slow 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+@keyframes ping-slow {
+  0% { transform: scale(1); opacity: 0.4; }
+  75%, 100% { transform: scale(1.6); opacity: 0; }
+}
+
+/* ── Data Flow Animation on Pipeline Connectors ──────────────────── */
+.animate-data-flow {
+  animation: data-flow 1s ease-in-out infinite;
+}
+
+@keyframes data-flow {
+  0% { width: 0; opacity: 0.5; }
+  50% { width: 100%; opacity: 1; }
+  100% { width: 0; opacity: 0.5; }
+}
+
+/* ── Capability Pills Entrance ───────────────────────────────────── */
+.capability-pill {
+  animation: pill-entrance 0.5s ease-out backwards;
+}
+
+@keyframes pill-entrance {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* ── Suggestion Card Effects ─────────────────────────────────────── */
+.suggestion-card {
+  transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  animation: card-entrance 0.6s ease-out backwards;
+  backdrop-filter: blur(8px);
+}
+
+.suggestion-card:hover {
+  transform: translateY(-3px) scale(1.01);
+  box-shadow:
+    0 8px 30px rgba(15, 23, 42, 0.08),
+    0 2px 8px rgba(99, 102, 241, 0.06);
+}
+
+@keyframes card-entrance {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}

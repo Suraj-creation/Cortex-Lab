@@ -1,0 +1,170 @@
+[
+    {
+        "name": "health",
+        "method": "GET",
+        "path": "/health",
+        "status": 200,
+        "pass": true,
+        "note": "{\"status\":\"ok\",\"model_loaded\":true,\"model_info\":{\"name\":\"Gemini-Only Mode (no local model)\",\"parameters\":\"\",\"quantization\":\"\",\"device\":\"API\",\"gpu_memory\":\"\",\"max_context\":1048576,\"load_time_seconds\":0,\"fine_tuned\":false,\"training_stages_completed\":0,\"model_path\":\"\",\"base_model\":\"gemini-2.5-flash\",\"llm_provider\":\"gemini\",\"runtime_llm_provider\":\"gemini\",\"gemini_available\":true}}"
+    },
+    {
+        "name": "llm_provider_get",
+        "method": "GET",
+        "path": "/llm/provider",
+        "status": 200,
+        "pass": true,
+        "note": "{\"provider\":\"gemini\",\"active_backend\":\"gemini\",\"available\":[\"gemini\"],\"gemini_configured\":true,\"local_model_loaded\":false}"
+    },
+    {
+        "name": "llm_provider_set_gemini",
+        "method": "POST",
+        "path": "/llm/provider",
+        "status": 200,
+        "pass": true,
+        "note": "{\"provider\":\"gemini\",\"active_backend\":\"gemini\",\"status\":\"switched\"}"
+    },
+    {
+        "name": "scheduler_status_before",
+        "method": "GET",
+        "path": "/agent/scheduler/status",
+        "status": 200,
+        "pass": true,
+        "note": "{\"running\":true,\"event_handlers\":{\"memory_ingested\":[\"wiki_agent\",\"session_forge_crystallizer\"]},\"tasks\":{\"l0_master\":{\"interval_seconds\":60,\"last_run\":1776063693.937151,\"last_reason\":\"interval\",\"last_event\":\"\",\"is_running\":false,\"run_count\":5,\"error_count\":0,\"enabled\":true},\"wiki_agent\":{\"interval_seconds\":86400,\"last_run\":1776063498.5549233,\"last_reason\":\"event\",\"last_event\":\"memory_ingested\",\"is_running\":false,\"run_count\":2,\"error_count\":0,\"enabled\":true},\"presence\":{\"interval_seconds\":1800,\""
+    },
+    {
+        "name": "memories_ingest",
+        "method": "POST",
+        "path": "/memories/ingest",
+        "status": 200,
+        "pass": true,
+        "note": "{\"status\":\"ok\",\"memory\":{\"id\":\"189df52e-4c57-4c1f-b259-c5c4892a8b76\",\"content\":\"live smoke 2026-04-13T12:31:30.108745\",\"memory_type\":\"episodic\",\"timestamp\":\"2026-04-13T12:31:40.301944\",\"emotion\":\"neutral\",\"emotion_confidence\":0.5,\"importance\":0.5,\"topics\":[],\"entities\":[],\"entity_ids\":[],\"causes\":[],\"effects\":[],\"causal_description\":\"\",\"context_prefix\":\"\",\"propositions\":[\"Smoke is detected.\",\"The detection is live.\",\"The timestamp of the detection is 2026-04-13T12:31:30.108745.\"],\"raptor_level\":"
+    },
+    {
+        "name": "scheduler_status_after_ingest",
+        "method": "GET",
+        "path": "/agent/scheduler/status",
+        "status": 200,
+        "pass": true,
+        "note": "{\"running\":true,\"event_handlers\":{\"memory_ingested\":[\"wiki_agent\",\"session_forge_crystallizer\"]},\"tasks\":{\"l0_master\":{\"interval_seconds\":60,\"last_run\":1776063693.937151,\"last_reason\":\"interval\",\"last_event\":\"\",\"is_running\":false,\"run_count\":5,\"error_count\":0,\"enabled\":true},\"wiki_agent\":{\"interval_seconds\":86400,\"last_run\":1776063709.7986798,\"last_reason\":\"event\",\"last_event\":\"memory_ingested\",\"is_running\":false,\"run_count\":3,\"error_count\":0,\"enabled\":true},\"presence\":{\"interval_seconds\":1800,\""
+    },
+    {
+        "name": "session_forge_status",
+        "method": "GET",
+        "path": "/deep/session-forge/status",
+        "status": 200,
+        "pass": true,
+        "note": "{\"status\":{\"service\":\"session_memory_forge\",\"base_dir\":\"data\\\\deep_apps\\\\session_forge\",\"artifacts\":{\"thought_objects\":0,\"decision_records\":0,\"open_loops\":0,\"gap_signals\":0,\"belief_evolution\":0,\"structured_summaries\":0},\"runs\":50,\"updated_at\":\"2026-04-13T07:01:53.882666+00:00\"},\"recent_runs\":[{\"run_id\":\"forge-run-afec11f03077\",\"run_type\":\"crystallizer\",\"timestamp\":\"2026-04-13T07:01:49.802664+00:00\",\"payload\":{\"status\":\"skipped\",\"reason\":\"no_session_available\",\"trigger\":\"event\",\"session_id\":\"\",\"g"
+    },
+    {
+        "name": "session_forge_crystallize",
+        "method": "POST",
+        "path": "/deep/session-forge/crystallize",
+        "status": 200,
+        "pass": true,
+        "note": "{\"status\":\"skipped\",\"reason\":\"no_session_turns\",\"trigger\":\"api\",\"session_id\":\"smoke-e2e\",\"generated\":{\"thought_objects\":0,\"decision_records\":0,\"open_loops\":0}}"
+    },
+    {
+        "name": "session_forge_summary",
+        "method": "POST",
+        "path": "/deep/session-forge/summary",
+        "status": 200,
+        "pass": true,
+        "note": "{\"status\":\"ok\",\"trigger\":\"api\",\"session_id\":\"smoke-e2e\",\"created\":0,\"summaries\":[]}"
+    },
+    {
+        "name": "session_forge_gaps",
+        "method": "POST",
+        "path": "/deep/session-forge/gaps",
+        "status": 200,
+        "pass": true,
+        "note": "{\"status\":\"ok\",\"trigger\":\"api\",\"generated\":0,\"signals\":[]}"
+    },
+    {
+        "name": "session_forge_beliefs",
+        "method": "POST",
+        "path": "/deep/session-forge/beliefs",
+        "status": 200,
+        "pass": true,
+        "note": "{\"status\":\"ok\",\"trigger\":\"api\",\"generated\":0,\"records\":[]}"
+    },
+    {
+        "name": "chronicle_passive_status_before",
+        "method": "GET",
+        "path": "/chronicle/passive/status",
+        "status": 200,
+        "pass": true,
+        "note": "{\"service\":\"life_chronicle\",\"passive_mode_enabled\":false,\"consent_granted_at\":\"\",\"consent_actor\":\"\",\"buffer_seconds\":180,\"buffer_entries\":0,\"buffer_oldest\":\"\",\"buffer_newest\":\"\",\"saved_moments\":0,\"updated_at\":\"2026-04-13T07:02:04.099842+00:00\"}"
+    },
+    {
+        "name": "chronicle_passive_enable",
+        "method": "POST",
+        "path": "/chronicle/passive/enable",
+        "status": 200,
+        "pass": true,
+        "note": "{\"service\":\"life_chronicle\",\"passive_mode_enabled\":true,\"consent_granted_at\":\"2026-04-13T07:02:06.143292+00:00\",\"consent_actor\":\"smoke-test\",\"buffer_seconds\":180,\"buffer_entries\":0,\"buffer_oldest\":\"\",\"buffer_newest\":\"\",\"saved_moments\":0,\"updated_at\":\"2026-04-13T07:02:06.143323+00:00\"}"
+    },
+    {
+        "name": "chronicle_passive_observe",
+        "method": "POST",
+        "path": "/chronicle/passive/observe",
+        "status": 200,
+        "pass": true,
+        "note": "{\"status\":\"buffered\",\"observation_id\":\"obs-bf3ba2dca732\",\"buffer_entries\":1,\"passive_mode_enabled\":true}"
+    },
+    {
+        "name": "chronicle_passive_save",
+        "method": "POST",
+        "path": "/chronicle/passive/save",
+        "status": 200,
+        "pass": true,
+        "note": "{\"status\":\"saved\",\"memory_id\":\"moment-f636ff3a86b9\",\"file_path\":\"data\\\\chronicle\\\\moments\\\\2026\\\\04\\\\13\\\\moment-f636ff3a86b9.json\",\"observation_count\":1,\"window_seconds\":120,\"moment\":{\"memory_id\":\"moment-f636ff3a86b9\",\"type\":\"captured_moment\",\"capture_mode\":\"passive\",\"timestamp\":\"2026-04-13T07:02:10.225465+00:00\",\"location\":{\"label\":\"desk\",\"confidence\":0.7},\"people_present\":[\"self\"],\"duration_seconds\":120,\"media\":{\"video_path\":\"\",\"thumbnail_paths\":[],\"audio_transcript\":\"\",\"observation_refs\":[\"ob"
+    },
+    {
+        "name": "chronicle_moments",
+        "method": "GET",
+        "path": "/chronicle/moments?limit=3&offset=0",
+        "status": 200,
+        "pass": true,
+        "note": "{\"count\":3,\"moments\":[{\"memory_id\":\"moment-f636ff3a86b9\",\"type\":\"captured_moment\",\"capture_mode\":\"passive\",\"timestamp\":\"2026-04-13T07:02:10.225465+00:00\",\"location\":{\"label\":\"desk\",\"confidence\":0.7},\"people_present\":[\"self\"],\"duration_seconds\":120,\"media\":{\"video_path\":\"\",\"thumbnail_paths\":[],\"audio_transcript\":\"\",\"observation_refs\":[\"obs-bf3ba2dca732\"],\"media_refs\":[]},\"narrative\":\"This moment was captured passively. The overall tone felt neutral. Notable context: smoke observation\",\"key_quotes"
+    },
+    {
+        "name": "wiki_lint_run",
+        "method": "POST",
+        "path": "/wiki/lint/run",
+        "status": 200,
+        "pass": true,
+        "note": "{\"checked_at\":\"2026-04-13T07:02:14.313651+00:00\",\"pages_checked\":0,\"dirty_pages\":0,\"issue_total\":0,\"avg_hygiene_score\":0.0,\"reports\":[]}"
+    },
+    {
+        "name": "wiki_lint_latest",
+        "method": "GET",
+        "path": "/wiki/lint/latest",
+        "status": 200,
+        "pass": true,
+        "note": "{\"checked_at\":\"2026-04-13T07:02:14.313651+00:00\",\"pages_checked\":0,\"dirty_pages\":0,\"issue_total\":0,\"avg_hygiene_score\":0.0,\"reports\":[]}"
+    },
+    {
+        "name": "wiki_compaction_run",
+        "method": "POST",
+        "path": "/wiki/compaction/run",
+        "status": 200,
+        "pass": true,
+        "note": "{\"checked_at\":\"2026-04-13T07:02:18.405892+00:00\",\"pages_checked\":0,\"sections_checked\":0,\"sections_compacted\":0,\"page_runs\":[]}"
+    },
+    {
+        "name": "wiki_compaction_latest",
+        "method": "GET",
+        "path": "/wiki/compaction/latest",
+        "status": 200,
+        "pass": true,
+        "note": "{\"checked_at\":\"2026-04-13T07:02:18.405892+00:00\",\"pages_checked\":0,\"sections_checked\":0,\"sections_compacted\":0,\"page_runs\":[]}"
+    },
+    {
+        "name": "scheduler_status_final",
+        "method": "GET",
+        "path": "/agent/scheduler/status",
+        "status": 200,
+        "pass": true,
+        "note": "{\"running\":true,\"event_handlers\":{\"memory_ingested\":[\"wiki_agent\",\"session_forge_crystallizer\"]},\"tasks\":{\"l0_master\":{\"interval_seconds\":60,\"last_run\":1776063693.937151,\"last_reason\":\"interval\",\"last_event\":\"\",\"is_running\":false,\"run_count\":5,\"error_count\":0,\"enabled\":true},\"wiki_agent\":{\"interval_seconds\":86400,\"last_run\":1776063709.7986798,\"last_reason\":\"event\",\"last_event\":\"memory_ingested\",\"is_running\":false,\"run_count\":3,\"error_count\":0,\"enabled\":true},\"presence\":{\"interval_seconds\":1800,\""
+    }
+]

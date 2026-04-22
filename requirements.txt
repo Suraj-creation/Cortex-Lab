@@ -1,0 +1,59 @@
+# ============================================================
+# Cortex Lab — Requirements for Gemma-4-E2B-it Training
+# Hardware: NVIDIA RTX 6000 Ada Generation (24GB VRAM)
+# ============================================================
+
+# Core PyTorch (CUDA 12.x)
+torch>=2.3.0
+torchvision>=0.18.0
+
+# Transformers with Gemma-4 support
+transformers>=4.51.0
+
+# Training acceleration
+accelerate>=0.29.0
+
+# Parameter-efficient fine-tuning
+peft>=0.10.0
+
+# Quantization (4-bit NF4 QLoRA)
+bitsandbytes>=0.43.1
+
+# Training utilities (SFTTrainer, DPOTrainer, ORPOTrainer)
+trl>=0.8.6
+
+# Dataset loading from HuggingFace Hub
+datasets>=2.19.0
+
+# HuggingFace Hub for model/dataset download
+huggingface_hub>=0.23.0
+
+# Tokenizers
+tokenizers>=0.19.0
+sentencepiece>=0.2.0
+protobuf>=4.25.0
+
+# Safe model serialization
+safetensors>=0.4.3
+
+# Numeric + data
+numpy>=1.26.0
+pandas>=2.1.0
+scipy>=1.12.0
+
+# Progress + utilities
+tqdm>=4.66.0
+python-dotenv>=1.0.0
+
+# Audio processing (Gemma-4-E2B audio native support)
+librosa>=0.10.1
+
+# Monitoring (optional but recommended)
+tensorboard>=2.16.0
+wandb>=0.17.0
+
+# Optional: faster inference validation
+# vllm>=0.4.0  # uncomment if using vLLM for evaluation
+
+# Optional: distributed training
+# deepspeed>=0.14.0  # uncomment for multi-GPU

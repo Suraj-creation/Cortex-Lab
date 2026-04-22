@@ -1,0 +1,38 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.0.0
+torch>=2.0.0
+transformers>=4.37.0
+accelerate>=0.25.0
+bitsandbytes>=0.41.0
+sentencepiece>=0.1.99
+protobuf>=3.20.0
+safetensors>=0.4.0
+
+# RAG System Dependencies
+sentence-transformers>=2.2.0
+faiss-cpu>=1.7.4
+duckdb>=0.9.0
+networkx>=3.0
+numpy>=1.24.0
+scikit-learn>=1.3.0
+
+# Google Gemini API (alternative LLM provider)
+google-genai>=1.0.0
+python-dotenv>=1.0.0
+
+# PageIndex — Cloud document reasoning retrieval (6th channel)
+pageindex>=0.2.0
+python-multipart>=0.0.9
+
+# Voice / Ambient Listening (STT + TTS)
+sounddevice>=0.4.6
+faster-whisper>=1.0.0
+resemblyzer>=0.1.3
+piper-tts>=1.2.0
+onnxruntime>=1.17.0
+webrtcvad>=2.0.10
+websockets>=12.0
+
+# Wake Word Detection (Phase 4 — optional)
+openwakeword>=0.6.0
