@@ -67,6 +67,30 @@ class _MemoryBackedStore:
         ]
 
 
+class _ContentOnlyMemoryStore:
+    def get_entities(self, limit: int = 100):
+        return []
+
+    def get_edges(self, entity_id=None):
+        return []
+
+    def get_all_memories(self, limit: int = 100, offset: int = 0):
+        return [
+            type(
+                "Memory",
+                (),
+                {
+                    "id": "mem-3",
+                    "content": "Cortex Lab uses Eva to power the Personal Wiki and Knowledge Graph retrieval loop.",
+                    "topics": [],
+                    "entities": [],
+                    "timestamp": None,
+                    "metadata": {"tags": ["ambient_listening", "session_forge"]},
+                },
+            )(),
+        ]
+
+
 def test_engine_projects_graph_from_metadata_when_runtime_graph_is_empty():
     from src.engine import CortexRAGEngine
 
@@ -122,3 +146,19 @@ def test_engine_derives_graph_from_memories_when_entities_are_missing():
     assert {"Cortex Lab", "Eva", "Knowledge Graph", "Ambient Capture"} <= labels
     assert ("entity:eva", "topic:knowledge_graph", "memory_topic") in relations
     assert ("entity:cortex_lab", "entity:eva", "co_occurs") in relations
+
+
+def test_engine_derives_graph_from_content_and_metadata_when_structured_fields_are_empty():
+    from src.engine import CortexRAGEngine
+
+    engine = CortexRAGEngine.__new__(CortexRAGEngine)
+    engine.initialized = True
+    engine.knowledge_graph = _EmptyKnowledgeGraph()
+    engine.metadata_store = _ContentOnlyMemoryStore()
+
+    projected = engine.get_graph_data()
+    labels = {node["label"] for node in projected["nodes"]}
+    relations = {(edge["source"], edge["target"], edge["relation"]) for edge in projected["edges"]}
+
+    assert {"Cortex Lab", "Eva", "Personal Wiki", "Knowledge Graph"} <= labels
+    assert ("entity:eva", "topic:ambient_listening", "memory_topic") in relations

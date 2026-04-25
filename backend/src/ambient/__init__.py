@@ -802,6 +802,47 @@ class AmbientService:
             mime_type,
             estimated_duration_s=estimated_duration_s,
         )
+        raw_metadata = dict(metadata or {})
+        peak_db = None
+        avg_db = None
+        try:
+            peak_db = float(raw_metadata.get("audio_peak_db")) if raw_metadata.get("audio_peak_db") is not None else None
+        except (TypeError, ValueError):
+            peak_db = None
+        try:
+            avg_db = float(raw_metadata.get("audio_avg_db")) if raw_metadata.get("audio_avg_db") is not None else None
+        except (TypeError, ValueError):
+            avg_db = None
+
+        if (
+            duration_s >= 1.0
+            and peak_db is not None
+            and avg_db is not None
+            and peak_db < -48.0
+            and avg_db < -54.0
+        ):
+            self._status = AmbientStatus.LISTENING
+            return {
+                "success": True,
+                "session_id": session_id,
+                "transcript": "",
+                "analysis": analyze_client_turn(
+                    "",
+                    assistant_aliases=build_assistant_aliases(
+                        self.config.assistant_name,
+                        self.config.assistant_aliases,
+                    ),
+                    engaged_until=self._client_followup_until,
+                ),
+                "retention_trace": build_retention_trace(
+                    "",
+                    session_id=session_id,
+                    platform=platform,
+                ),
+                "assistant_text": "",
+                "assistant_audio_base64": "",
+            }
+
         transcriber = self.transcriber
         if not transcriber:
             raise RuntimeError("No transcription provider is available for client companion mode")
@@ -815,6 +856,35 @@ class AmbientService:
             )
         else:
             raise RuntimeError("Selected transcription provider does not support encoded audio input")
+
+        if (
+            duration_s >= 1.0
+            and peak_db is not None
+            and avg_db is not None
+            and peak_db < -48.0
+            and avg_db < -54.0
+        ):
+            self._status = AmbientStatus.LISTENING
+            return {
+                "success": True,
+                "session_id": session_id,
+                "transcript": "",
+                "analysis": analyze_client_turn(
+                    "",
+                    assistant_aliases=build_assistant_aliases(
+                        self.config.assistant_name,
+                        self.config.assistant_aliases,
+                    ),
+                    engaged_until=self._client_followup_until,
+                ),
+                "retention_trace": build_retention_trace(
+                    "",
+                    session_id=session_id,
+                    platform=platform,
+                ),
+                "assistant_text": "",
+                "assistant_audio_base64": "",
+            }
 
         text = str(result.get("text", "") or "").strip()
         session_snapshot = runtime_session_manager.get_session(session_id)
@@ -832,6 +902,8 @@ class AmbientService:
             previous_text=previous_text,
             previous_turn_ts=previous_turn_ts,
             now_ts=time.time(),
+            confidence=float(result.get("confidence", 0.0) or 0.0),
+            estimated_duration_s=duration_s,
         )
         if not text:
             self._status = AmbientStatus.LISTENING

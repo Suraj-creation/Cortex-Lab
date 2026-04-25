@@ -347,6 +347,7 @@ class CortexAgentLoop:
         all_messages = list(initial_messages)
         last_response: dict[str, Any] = {}
         total_tool_calls_executed = 0
+        executed_any_tools = False
         no_progress_rounds = 0
         duplicate_rounds = 0
         previous_round_signatures: list[str] = []
@@ -398,8 +399,17 @@ class CortexAgentLoop:
 
             # No tool calls → agent is done
             if not tool_calls:
+                final_text = assistant_text
+                if executed_any_tools and self._needs_final_synthesis(final_text):
+                    final_context = list(all_messages)
+                    if assistant_text:
+                        final_context.append({"role": "assistant", "content": assistant_text})
+                    final_text = await self._force_final_answer_from_context(
+                        final_context,
+                        reason="tool_execution_completed",
+                    )
                 last_response = {
-                    "text": assistant_text,
+                    "text": final_text,
                     "turns": self._turn_count,
                     "all_messages": all_messages,
                 }
@@ -439,7 +449,18 @@ class CortexAgentLoop:
 
             # Execute tool calls
             tool_results = await self._execute_tools(tool_calls)
+            executed_any_tools = executed_any_tools or bool(tool_results)
             total_tool_calls_executed += len(tool_calls)
+            round_messages = list(all_messages)
+            round_messages.append({"role": "assistant", "content": assistant_text, "tool_calls": tool_calls})
+            for tr in tool_results:
+                round_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tr.tool_call_id,
+                        "content": tr.content,
+                    }
+                )
 
             round_signatures = current_round_signatures
             round_has_progress = False
@@ -468,11 +489,11 @@ class CortexAgentLoop:
 
             if no_progress_rounds >= 3 or duplicate_rounds >= 2:
                 reason = "tool_round_stagnation"
-                final_text = await self._force_final_answer_from_context(all_messages, reason=reason)
+                final_text = await self._force_final_answer_from_context(round_messages, reason=reason)
                 last_response = {
                     "text": final_text,
                     "turns": self._turn_count,
-                    "all_messages": all_messages,
+                    "all_messages": round_messages,
                     "tool_results": [r.model_dump() for r in tool_results],
                     "stop_reason": reason,
                     "no_progress_rounds": no_progress_rounds,
@@ -503,6 +524,16 @@ class CortexAgentLoop:
                 "all_messages": all_messages,
             }
 
+        if (
+            executed_any_tools
+            and last_response.get("all_messages")
+            and self._needs_final_synthesis(str(last_response.get("text", "") or ""))
+        ):
+            last_response["text"] = await self._force_final_answer_from_context(
+                list(last_response.get("all_messages") or []),
+                reason="post_loop_finalize",
+            )
+
         return last_response
 
     @staticmethod
@@ -532,6 +563,25 @@ class CortexAgentLoop:
         if lowered in empty_markers:
             return ""
         return lowered[:2000]
+
+    @staticmethod
+    def _needs_final_synthesis(text: str) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return True
+
+        planning_markers = (
+            "i've already looked into",
+            "i have already looked into",
+            "generated a plan",
+            "i will now provide",
+            "based on the retrieved",
+            "based on retrieved",
+            "let me look into",
+            "i'm going to look",
+            "i will look",
+        )
+        return any(marker in normalized for marker in planning_markers)
 
     async def _force_final_answer_from_context(self, messages: list[dict[str, Any]], reason: str) -> str:
         guard_instruction = {

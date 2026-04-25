@@ -81,6 +81,14 @@ GREETING_PREFIXES = ("hey", "hi", "hello", "yo")
 KNOWN_HALLUCINATED_TRANSCRIPTS = {
     "quick brown fox jumps over the lazy dog",
     "the quick brown fox jumps over the lazy dog",
+    "i m not sure if i m going to be able to make it to the meeting",
+    "im not sure if im going to be able to make it to the meeting",
+    "i'm not sure if i'm going to be able to make it to the meeting",
+}
+
+LOW_SIGNAL_TRANSCRIPTS = {
+    "she had a",
+    "she had",
 }
 
 
@@ -150,6 +158,8 @@ def sanitize_client_transcript(
     previous_text: str = "",
     previous_turn_ts: float = 0.0,
     now_ts: float | None = None,
+    confidence: float = 0.0,
+    estimated_duration_s: float = 0.0,
 ) -> str:
     cleaned = clean_transcript(str(text or ""), confidence=0.0) or ""
     if not cleaned:
@@ -159,7 +169,18 @@ def sanitize_client_transcript(
     if not normalized:
         return ""
 
-    if normalized in KNOWN_HALLUCINATED_TRANSCRIPTS:
+    if normalized in KNOWN_HALLUCINATED_TRANSCRIPTS or normalized in LOW_SIGNAL_TRANSCRIPTS:
+        return ""
+
+    if _looks_like_looped_hallucination(normalized):
+        return ""
+
+    duration_s = max(float(estimated_duration_s or 0.0), 0.0)
+    if confidence > 0 and confidence < 0.33 and duration_s >= 1.0:
+        return ""
+
+    word_count = len(normalized.split())
+    if duration_s >= 2.0 and word_count <= 2:
         return ""
 
     now_value = float(now_ts if now_ts is not None else time.time())
@@ -174,6 +195,29 @@ def sanitize_client_transcript(
         return ""
 
     return cleaned
+
+
+def _looks_like_looped_hallucination(normalized: str) -> bool:
+    words = [part for part in normalized.split() if part]
+    if len(words) < 8:
+        return False
+
+    if len(set(words)) <= max(2, len(words) // 5):
+        return True
+
+    for size in range(4, min(9, len(words) // 2 + 1)):
+        segment = words[:size]
+        segment_text = " ".join(segment)
+        if not segment_text:
+            continue
+        if " ".join(words).count(segment_text) >= 3:
+            return True
+
+    sentences = [part.strip() for part in re.split(r"[.!?]+", normalized) if part.strip()]
+    if len(sentences) >= 2 and len(set(sentences)) == 1:
+        return True
+
+    return False
 
 
 def analyze_client_turn(

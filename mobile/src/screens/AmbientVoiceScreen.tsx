@@ -48,7 +48,15 @@ import {
 type AmbientTab = 'live' | 'conversations' | 'settings';
 type CompanionMode = 'idle' | 'requesting' | 'listening' | 'processing' | 'speaking' | 'error';
 
-const MOBILE_CAPTURE_MS = 4200;
+const MOBILE_CAPTURE_MS = 3200;
+const MOBILE_RECORDING_OPTIONS = {
+  ...RecordingPresets.HIGH_QUALITY,
+  isMeteringEnabled: true,
+};
+const MOBILE_CAPTURE_GATE = {
+  peakDb: -46,
+  avgDb: -52,
+};
 
 function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -60,6 +68,17 @@ function inferMimeType(uri: string): string {
   if (normalized.endsWith('.webm')) return 'audio/webm';
   if (normalized.endsWith('.3gp')) return 'audio/3gpp';
   return 'audio/mp4';
+}
+
+function summarizeMetering(samples: number[]): { peakDb: number | null; avgDb: number | null } {
+  const finiteSamples = samples.filter((value) => Number.isFinite(value));
+  if (finiteSamples.length === 0) {
+    return { peakDb: null, avgDb: null };
+  }
+
+  const peakDb = finiteSamples.reduce((peak, value) => Math.max(peak, value), -160);
+  const avgDb = finiteSamples.reduce((sum, value) => sum + value, 0) / finiteSamples.length;
+  return { peakDb, avgDb };
 }
 
 function formatCaptureAge(createdAt: number): string {
@@ -118,14 +137,17 @@ export function AmbientVoiceScreen({
   const [ttsDraft, setTtsDraft] = useState('Eva, give me a quick voice systems check.');
   const [ttsTestBusy, setTtsTestBusy] = useState(false);
   const [ttsTestMessage, setTtsTestMessage] = useState('');
+  const [lastChunkPeakDb, setLastChunkPeakDb] = useState<number | null>(null);
+  const [lastChunkAvgDb, setLastChunkAvgDb] = useState<number | null>(null);
 
-  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const recorder = useAudioRecorder(MOBILE_RECORDING_OPTIONS);
   const recorderState = useAudioRecorderState(recorder, 250);
   const loopActiveRef = useRef(false);
   const loopPromiseRef = useRef<Promise<void> | null>(null);
   const loopRunIdRef = useRef(0);
   const playerRef = useRef<ReturnType<typeof createAudioPlayer> | null>(null);
   const sessionIdRef = useRef('');
+  const chunkMeterSamplesRef = useRef<number[]>([]);
 
   const assistantName = ambientConfig?.assistant_name?.trim() || 'Eva';
   const isClientActive =
@@ -195,6 +217,19 @@ export function AmbientVoiceScreen({
       }
     };
   }, [recorder, recorderState.isRecording]);
+
+  useEffect(() => {
+    if (!recorderState.isRecording) {
+      return;
+    }
+
+    const metering = typeof recorderState.metering === 'number' ? recorderState.metering : null;
+    if (metering === null || !Number.isFinite(metering)) {
+      return;
+    }
+
+    chunkMeterSamplesRef.current = [...chunkMeterSamplesRef.current.slice(-31), metering];
+  }, [recorderState.isRecording, recorderState.metering]);
 
   const refreshAmbientViews = useCallback(async () => {
     await Promise.allSettled([loadTranscript(), loadConversations()]);
@@ -293,7 +328,11 @@ export function AmbientVoiceScreen({
     return loopActiveRef.current && runId === loopRunIdRef.current;
   }, []);
 
-  const processRecordedChunk = useCallback(async (recordingUri: string, durationMs: number) => {
+  const processRecordedChunk = useCallback(async (
+    recordingUri: string,
+    durationMs: number,
+    audioStats?: { peakDb: number | null; avgDb: number | null },
+  ) => {
     const activeSessionId = sessionIdRef.current;
     if (!activeSessionId || !recordingUri) return;
 
@@ -309,6 +348,12 @@ export function AmbientVoiceScreen({
       estimatedDurationS: durationMs / 1000,
       metadata: {
         surface: 'ambient-screen',
+        ...(audioStats?.peakDb !== null && audioStats?.peakDb !== undefined
+          ? { audio_peak_db: audioStats.peakDb }
+          : {}),
+        ...(audioStats?.avgDb !== null && audioStats?.avgDb !== undefined
+          ? { audio_avg_db: audioStats.avgDb }
+          : {}),
       },
     });
 
@@ -316,21 +361,29 @@ export function AmbientVoiceScreen({
       return;
     }
 
-    setCapturedChunks((count) => count + 1);
-    setLastTranscript(response.transcript || '');
-    setLastAssistantReply(response.assistant_text || '');
+    const nextTranscript = String(response.transcript || '').trim();
+    const nextAssistantReply = String(response.assistant_text || '').trim();
+    if (nextTranscript || nextAssistantReply) {
+      setCapturedChunks((count) => count + 1);
+    }
+    if (nextTranscript) {
+      setLastTranscript(nextTranscript);
+    }
+    if (nextAssistantReply) {
+      setLastAssistantReply(nextAssistantReply);
+    }
     setLastRetention(response.retention_trace || null);
     setCompanionError('');
     if (response.session_id && response.session_id !== activeSessionId) {
       setClientSessionId(response.session_id);
     }
 
-    if (response.transcript?.trim()) {
+    if (nextTranscript) {
       await appendLocalCapture({
         id: `ambient-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         sessionId: response.session?.session_id || response.session_id || activeSessionId,
-        transcript: response.transcript.trim(),
-        assistantReply: String(response.assistant_text || '').trim(),
+        transcript: nextTranscript,
+        assistantReply: nextAssistantReply,
         createdAt: Date.now(),
         retentionDecision:
           response.retention_trace?.memory_decision ||
@@ -354,6 +407,7 @@ export function AmbientVoiceScreen({
     while (loopActiveRef.current && runId === loopRunIdRef.current) {
       try {
         setCompanionMode('listening');
+        chunkMeterSamplesRef.current = [];
         await recorder.prepareToRecordAsync();
         if (!loopActiveRef.current || runId !== loopRunIdRef.current) {
           break;
@@ -373,9 +427,22 @@ export function AmbientVoiceScreen({
 
         const durationMs = Math.max(Date.now() - startedAt, 1);
         const recordedUri = recorder.uri || statusAfterStop.url || statusBeforeStop.url || '';
+        const audioStats = summarizeMetering(chunkMeterSamplesRef.current);
+        setLastChunkPeakDb(audioStats.peakDb);
+        setLastChunkAvgDb(audioStats.avgDb);
+
+        if (
+          audioStats.peakDb !== null &&
+          audioStats.avgDb !== null &&
+          audioStats.peakDb < MOBILE_CAPTURE_GATE.peakDb &&
+          audioStats.avgDb < MOBILE_CAPTURE_GATE.avgDb
+        ) {
+          continue;
+        }
+
         if (recordedUri && loopActiveRef.current) {
           setCompanionMode('processing');
-          await processRecordedChunk(recordedUri, durationMs);
+          await processRecordedChunk(recordedUri, durationMs, audioStats);
         }
       } catch (error) {
         setCompanionMode('error');
@@ -597,6 +664,9 @@ export function AmbientVoiceScreen({
               <Text style={styles.liveStatText}>Session: {clientSessionId || ambientState?.client_session?.active_session_id || 'not started'}</Text>
               <Text style={styles.liveStatText}>Recorder: {recorderState.isRecording ? 'capturing' : 'waiting'}</Text>
               <Text style={styles.liveStatText}>Chunks: {capturedChunks}</Text>
+              <Text style={styles.liveStatText}>
+                Input: {typeof recorderState.metering === 'number' ? `${recorderState.metering.toFixed(1)} dB` : 'metering unavailable'}
+              </Text>
             </View>
           </Card>
 
@@ -626,8 +696,12 @@ export function AmbientVoiceScreen({
               style={styles.metricHalf}
             />
             <MetricCard
-              label="Memory Tags"
-              value={String(lastRetention?.tags?.length ?? 0)}
+              label="Last Signal"
+              value={
+                lastChunkPeakDb !== null && lastChunkAvgDb !== null
+                  ? `${lastChunkPeakDb.toFixed(0)} / ${lastChunkAvgDb.toFixed(0)} dB`
+                  : 'No speech yet'
+              }
               tone="blue"
               compact
               style={styles.metricHalf}

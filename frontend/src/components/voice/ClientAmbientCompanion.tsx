@@ -57,6 +57,13 @@ function bufferToBase64(buffer: ArrayBuffer): string {
   return window.btoa(binary);
 }
 
+function rmsToDb(rms: number): number {
+  if (!Number.isFinite(rms) || rms <= 0) {
+    return -160;
+  }
+  return 20 * Math.log10(rms);
+}
+
 export function ClientAmbientCompanion({
   ambientState,
   ambientConfig,
@@ -93,6 +100,9 @@ export function ClientAmbientCompanion({
   const activeChunksRef = useRef<Blob[]>([]);
   const preRollChunksRef = useRef<Blob[]>([]);
   const stoppingRef = useRef(false);
+  const utterancePeakRmsRef = useRef(0);
+  const utteranceRmsSumRef = useRef(0);
+  const utteranceRmsCountRef = useRef(0);
 
   const assistantName = ambientConfig?.assistant_name?.trim() || "Eva";
   const assistantAliases = (ambientConfig?.assistant_aliases || [])
@@ -153,6 +163,9 @@ export function ClientAmbientCompanion({
     analyserRef.current = null;
     audioContextRef.current = null;
     utteranceActiveRef.current = false;
+    utterancePeakRmsRef.current = 0;
+    utteranceRmsSumRef.current = 0;
+    utteranceRmsCountRef.current = 0;
     activeChunksRef.current = [];
     preRollChunksRef.current = [];
     setSpeechDetected(false);
@@ -181,7 +194,11 @@ export function ClientAmbientCompanion({
     }
   }
 
-  async function uploadUtterance(blob: Blob, durationMs: number) {
+  async function uploadUtterance(
+    blob: Blob,
+    durationMs: number,
+    audioStats?: { peakDb?: number; avgDb?: number }
+  ) {
     const activeSessionId = sessionIdRef.current;
     if (!activeSessionId || blob.size === 0) {
       return;
@@ -196,6 +213,8 @@ export function ClientAmbientCompanion({
       estimatedDurationS: durationMs / 1000,
       metadata: {
         surface: "ambient-panel",
+        ...(audioStats?.peakDb !== undefined ? { audio_peak_db: audioStats.peakDb } : {}),
+        ...(audioStats?.avgDb !== undefined ? { audio_avg_db: audioStats.avgDb } : {}),
       },
     });
 
@@ -203,8 +222,12 @@ export function ClientAmbientCompanion({
       return;
     }
 
-    setLastTranscript(response.transcript || "");
-    setLastAssistantReply(response.assistant_text || "");
+    if (response.transcript?.trim()) {
+      setLastTranscript(response.transcript.trim());
+    }
+    if (response.assistant_text?.trim()) {
+      setLastAssistantReply(response.assistant_text.trim());
+    }
     setLastRetention(response.retention_trace || null);
     if (response.session_id && response.session_id !== activeSessionId) {
       setSessionId(response.session_id);
@@ -225,8 +248,14 @@ export function ClientAmbientCompanion({
 
     const chunks = [...activeChunksRef.current];
     const durationMs = performance.now() - utteranceStartedAtRef.current;
+    const peakRms = utterancePeakRmsRef.current;
+    const avgRms =
+      utteranceRmsCountRef.current > 0 ? utteranceRmsSumRef.current / utteranceRmsCountRef.current : 0;
 
     utteranceActiveRef.current = false;
+    utterancePeakRmsRef.current = 0;
+    utteranceRmsSumRef.current = 0;
+    utteranceRmsCountRef.current = 0;
     activeChunksRef.current = [];
     preRollChunksRef.current = [];
 
@@ -244,7 +273,10 @@ export function ClientAmbientCompanion({
     uploadQueueRef.current = uploadQueueRef.current
       .then(async () => {
         setMode("processing");
-        await uploadUtterance(blob, durationMs);
+        await uploadUtterance(blob, durationMs, {
+          peakDb: rmsToDb(peakRms),
+          avgDb: rmsToDb(avgRms),
+        });
       })
       .catch((uploadError) => {
         setMode("error");
@@ -283,10 +315,20 @@ export function ClientAmbientCompanion({
         if (!utteranceActiveRef.current) {
           utteranceActiveRef.current = true;
           utteranceStartedAtRef.current = now;
+          utterancePeakRmsRef.current = rms;
+          utteranceRmsSumRef.current = rms;
+          utteranceRmsCountRef.current = 1;
           activeChunksRef.current = [...preRollChunksRef.current];
           preRollChunksRef.current = [];
+        } else {
+          utterancePeakRmsRef.current = Math.max(utterancePeakRmsRef.current, rms);
+          utteranceRmsSumRef.current += rms;
+          utteranceRmsCountRef.current += 1;
         }
       } else if (utteranceActiveRef.current) {
+        utterancePeakRmsRef.current = Math.max(utterancePeakRmsRef.current, rms);
+        utteranceRmsSumRef.current += rms;
+        utteranceRmsCountRef.current += 1;
         if (lastSpeechAtRef.current === 0) {
           lastSpeechAtRef.current = now;
         }

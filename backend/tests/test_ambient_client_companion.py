@@ -191,6 +191,47 @@ class _FakeHallucinatedSTT:
         }
 
 
+class _FakeMeetingHallucinationSTT:
+    async def transcribe_bytes(
+        self,
+        audio_bytes: bytes,
+        *,
+        mime_type: str,
+        language: str | None = None,
+        quality_mode: bool = False,
+        estimated_duration_s: float = 0.0,
+    ) -> dict[str, Any]:
+        assert audio_bytes
+        return {
+            "text": "I'm not sure if I'm going to be able to make it to the meeting.",
+            "confidence": 0.91,
+            "language": language or "en",
+            "segments": [{"start": 0.0, "end": estimated_duration_s or 2.0, "text": "meeting"}],
+        }
+
+
+class _TrackingSTT:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def transcribe_bytes(
+        self,
+        audio_bytes: bytes,
+        *,
+        mime_type: str,
+        language: str | None = None,
+        quality_mode: bool = False,
+        estimated_duration_s: float = 0.0,
+    ) -> dict[str, Any]:
+        self.calls += 1
+        return {
+            "text": "Eva save this note.",
+            "confidence": 0.91,
+            "language": language or "en",
+            "segments": [{"start": 0.0, "end": estimated_duration_s or 1.8, "text": "note"}],
+        }
+
+
 def test_client_companion_discards_known_hallucinated_pangram(tmp_path, monkeypatch):
     from src.ambient import AmbientService
     from src.runtime.session_manager import runtime_session_manager
@@ -231,6 +272,86 @@ def test_client_companion_discards_known_hallucinated_pangram(tmp_path, monkeypa
     session_snapshot = runtime_session_manager.get_session(session_id)
     assert session_snapshot is not None
     assert session_snapshot.metadata.get("last_user_text") in (None, "")
+
+
+def test_client_companion_discards_known_meeting_hallucination(tmp_path, monkeypatch):
+    from src.ambient import AmbientService
+
+    service = AmbientService(
+        ingestion_pipeline=None,
+        data_dir=str(tmp_path),
+        gemini_api_key="test-gemini-key",
+    )
+    service._gemini_stt = _FakeMeetingHallucinationSTT()
+    service._gemini_tts = _FakeTTS()
+    service.conversation = _FakeConversation()
+    service.set_live_assistant_callback(_assistant_reply)
+
+    fake_store = _FakeMetadataStore()
+    fake_engine = type("FakeEngine", (), {"metadata_store": fake_store})()
+    monkeypatch.setattr("src.engine.rag_engine", fake_engine, raising=False)
+
+    session = asyncio.run(service.start_client_session(platform="web"))
+    session_id = str(session["session_id"])
+
+    result = asyncio.run(
+        service.process_client_audio(
+            session_id=session_id,
+            audio_bytes=b"hallucinated-meeting-audio",
+            mime_type="audio/webm",
+            platform="web",
+            estimated_duration_s=2.3,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["transcript"] == ""
+    assert result["assistant_text"] == ""
+    assert service.conversation.turns == []
+    assert fake_store.turns == []
+
+
+def test_client_companion_skips_silent_chunk_before_stt(tmp_path, monkeypatch):
+    from src.ambient import AmbientService
+
+    tracking_stt = _TrackingSTT()
+    service = AmbientService(
+        ingestion_pipeline=None,
+        data_dir=str(tmp_path),
+        gemini_api_key="test-gemini-key",
+    )
+    service._gemini_stt = tracking_stt
+    service._gemini_tts = _FakeTTS()
+    service.conversation = _FakeConversation()
+    service.set_live_assistant_callback(_assistant_reply)
+
+    fake_store = _FakeMetadataStore()
+    fake_engine = type("FakeEngine", (), {"metadata_store": fake_store})()
+    monkeypatch.setattr("src.engine.rag_engine", fake_engine, raising=False)
+
+    session = asyncio.run(service.start_client_session(platform="web"))
+    session_id = str(session["session_id"])
+
+    result = asyncio.run(
+        service.process_client_audio(
+            session_id=session_id,
+            audio_bytes=b"mostly-silent-audio",
+            mime_type="audio/webm",
+            platform="web",
+            estimated_duration_s=1.8,
+            metadata={
+                "audio_peak_db": -59.0,
+                "audio_avg_db": -64.0,
+            },
+        )
+    )
+
+    assert result["success"] is True
+    assert result["transcript"] == ""
+    assert result["assistant_text"] == ""
+    assert tracking_stt.calls == 0
+    assert service.conversation.turns == []
+    assert fake_store.turns == []
 
 
 def test_gemini_live_wake_trigger_accepts_assistant_aliases():

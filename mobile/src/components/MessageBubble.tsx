@@ -1,9 +1,7 @@
 /**
- * MessageBubble — Cortex Aurora chat message
- * User: indigo gradient, right-aligned. Assistant: white card, left-aligned.
- * Expandable metadata: thinking, evidence, agents, query analysis
+ * MessageBubble - Cortex Aurora chat message.
  */
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -14,7 +12,7 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT, SHADOWS } from '../theme/colors';
-import { AppIcon } from './ui/AppIcon';
+import { AppIcon, type AppIconName } from './ui/AppIcon';
 import { Badge } from './ui/Badge';
 
 interface MessageBubbleProps {
@@ -28,6 +26,155 @@ interface MessageBubbleProps {
   evidence?: string[];
   queryAnalysis?: Record<string, unknown>;
   processingTimeMs?: number;
+}
+
+interface DetailCardData {
+  title: string;
+  body: string;
+  caption?: string;
+  icon: AppIconName;
+}
+
+function titleize(value: string): string {
+  return value
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function compactValue(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => compactValue(item))
+      .filter(Boolean)
+      .join(', ');
+  }
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+function truncate(value: string, maxLength: number = 220): string {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLength - 1).trim()}...`;
+}
+
+function parseMaybeJson(value: unknown): unknown {
+  if (typeof value !== 'string') {
+    return value;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+    return trimmed;
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
+
+function normalizeEvidence(items: unknown[] | undefined): DetailCardData[] {
+  if (!items || items.length === 0) {
+    return [];
+  }
+
+  return items.slice(0, 6).map((item, index) => {
+    const parsed = parseMaybeJson(item);
+
+    if (typeof parsed === 'string') {
+      return {
+        title: `Evidence ${index + 1}`,
+        body: truncate(parsed),
+        icon: 'file-document-outline',
+      };
+    }
+
+    if (Array.isArray(parsed)) {
+      return {
+        title: `Evidence ${index + 1}`,
+        body: truncate(compactValue(parsed)),
+        icon: 'file-document-outline',
+      };
+    }
+
+    if (parsed && typeof parsed === 'object') {
+      const record = parsed as Record<string, unknown>;
+      const title =
+        compactValue(record.title) ||
+        compactValue(record.source) ||
+        compactValue(record.entity) ||
+        compactValue(record.id) ||
+        `Evidence ${index + 1}`;
+      const body =
+        compactValue(record.snippet) ||
+        compactValue(record.text) ||
+        compactValue(record.summary) ||
+        compactValue(record.content) ||
+        compactValue(record.body) ||
+        compactValue(record.payload);
+      const captionParts = [
+        compactValue(record.type),
+        compactValue(record.relation),
+        compactValue(record.memory_id || record.memoryId),
+      ].filter(Boolean);
+
+      return {
+        title: truncate(title, 72),
+        body: truncate(body || compactValue(record)),
+        caption: captionParts.length ? truncate(captionParts.join(' | '), 80) : undefined,
+        icon: 'file-document-outline',
+      };
+    }
+
+    return {
+      title: `Evidence ${index + 1}`,
+      body: truncate(compactValue(parsed)),
+      icon: 'file-document-outline',
+    };
+  });
+}
+
+function normalizeAnalysisRows(queryAnalysis?: Record<string, unknown>): Array<{ label: string; value: string }> {
+  if (!queryAnalysis) {
+    return [];
+  }
+
+  return Object.entries(queryAnalysis)
+    .map(([key, value]) => ({
+      label: titleize(key),
+      value: truncate(compactValue(parseMaybeJson(value)), 160),
+    }))
+    .filter((item) => item.value.length > 0);
+}
+
+function normalizeThinkingCards(thinking?: string): DetailCardData[] {
+  if (!thinking?.trim()) {
+    return [];
+  }
+
+  return [
+    {
+      title: 'Reasoning Trace',
+      body: truncate(thinking, 260),
+      icon: 'brain',
+    },
+  ];
 }
 
 export function MessageBubble({
@@ -44,7 +191,12 @@ export function MessageBubble({
 }: MessageBubbleProps) {
   const [showMeta, setShowMeta] = useState(false);
   const isUser = role === 'user';
-  const hasMetadata = !isUser && (thinking || (evidence && evidence.length > 0) || (agentsUsed && agentsUsed.length > 0) || queryAnalysis);
+  const evidenceCards = useMemo(() => normalizeEvidence(evidence as unknown[] | undefined), [evidence]);
+  const thinkingCards = useMemo(() => normalizeThinkingCards(thinking), [thinking]);
+  const analysisRows = useMemo(() => normalizeAnalysisRows(queryAnalysis), [queryAnalysis]);
+  const hasMetadata =
+    !isUser &&
+    (thinkingCards.length > 0 || evidenceCards.length > 0 || (agentsUsed && agentsUsed.length > 0) || analysisRows.length > 0);
 
   const handleCopy = () => {
     if (Platform.OS === 'web') {
@@ -54,7 +206,9 @@ export function MessageBubble({
     }
   };
 
-  const timeStr = timestamp ? new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+  const timeStr = timestamp
+    ? new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : '';
 
   if (isUser) {
     return (
@@ -74,7 +228,6 @@ export function MessageBubble({
 
   return (
     <View style={styles.assistantRow}>
-      {/* Avatar */}
       <View style={styles.avatar}>
         <AppIcon name="robot-outline" size={16} color="#6366f1" />
       </View>
@@ -92,8 +245,7 @@ export function MessageBubble({
             <Text style={styles.assistantText}>{content}</Text>
           )}
 
-          {/* Confidence + Agents row */}
-          {!isStreaming && (confidence !== undefined || (agentsUsed && agentsUsed.length > 0)) && (
+          {!isStreaming && (confidence !== undefined || (agentsUsed && agentsUsed.length > 0) || processingTimeMs) && (
             <View style={styles.badgeRow}>
               {confidence !== undefined && (
                 <Badge
@@ -109,66 +261,109 @@ export function MessageBubble({
                   size="sm"
                 />
               )}
-              {processingTimeMs && (
-                <Badge
-                  label={`${processingTimeMs}ms`}
-                  variant="default"
-                  size="sm"
-                />
-              )}
+              {processingTimeMs ? <Badge label={`${processingTimeMs}ms`} variant="default" size="sm" /> : null}
             </View>
           )}
         </View>
 
-        {/* Action bar */}
         {!isStreaming && content && (
           <View style={styles.actionBar}>
             <TouchableOpacity onPress={handleCopy} style={styles.actionBtn}>
               <AppIcon name="content-copy" size={13} color="#94a3b8" />
             </TouchableOpacity>
-            {hasMetadata && (
-              <TouchableOpacity onPress={() => setShowMeta(!showMeta)} style={styles.actionBtn}>
+            {hasMetadata ? (
+              <TouchableOpacity onPress={() => setShowMeta((value) => !value)} style={styles.actionBtn}>
                 <AppIcon name={showMeta ? 'chevron-up' : 'chevron-down'} size={13} color="#94a3b8" />
                 <Text style={styles.actionText}>Details</Text>
               </TouchableOpacity>
-            )}
+            ) : null}
             {timeStr ? <Text style={styles.timeText}>{timeStr}</Text> : null}
           </View>
         )}
 
-        {/* Expandable metadata */}
         {showMeta && (
           <View style={styles.metaContainer}>
-            {thinking && (
-              <View style={styles.metaSection}>
-                <Text style={styles.metaLabel}>💭 Thinking</Text>
-                <Text style={styles.metaContent}>{thinking}</Text>
+            <View style={styles.metaHeader}>
+              <View style={styles.metaHeaderTitle}>
+                <AppIcon name="text-search" size={14} color="#475569" />
+                <Text style={styles.metaHeaderText}>Response Details</Text>
               </View>
-            )}
-            {evidence && evidence.length > 0 && (
+              <Badge label="Grounding" variant="default" size="sm" />
+            </View>
+
+            {thinkingCards.length > 0 ? (
               <View style={styles.metaSection}>
-                <Text style={styles.metaLabel}>📚 Evidence ({evidence.length})</Text>
-                {evidence.slice(0, 5).map((e, i) => (
-                  <Text key={i} style={styles.metaEvidence}>• {typeof e === 'string' ? e.slice(0, 200) : JSON.stringify(e).slice(0, 200)}</Text>
+                <View style={styles.metaTitleRow}>
+                  <AppIcon name="brain" size={14} color="#6366f1" />
+                  <Text style={styles.metaSectionTitle}>Reasoning</Text>
+                </View>
+                {thinkingCards.map((card, index) => (
+                  <View key={`thinking-${index}`} style={styles.detailCard}>
+                    <View style={styles.detailCardIcon}>
+                      <AppIcon name={card.icon} size={14} color="#6366f1" />
+                    </View>
+                    <View style={styles.detailCardBody}>
+                      <Text style={styles.detailCardTitle}>{card.title}</Text>
+                      <Text style={styles.detailCardText}>{card.body}</Text>
+                      {card.caption ? <Text style={styles.detailCardCaption}>{card.caption}</Text> : null}
+                    </View>
+                  </View>
                 ))}
               </View>
-            )}
-            {agentsUsed && agentsUsed.length > 0 && (
+            ) : null}
+
+            {evidenceCards.length > 0 ? (
               <View style={styles.metaSection}>
-                <Text style={styles.metaLabel}>🤖 Agents Used</Text>
+                <View style={styles.metaTitleRow}>
+                  <AppIcon name="file-document-outline" size={14} color="#6366f1" />
+                  <Text style={styles.metaSectionTitle}>Evidence</Text>
+                  <Badge label={`${evidenceCards.length}`} variant="primary" size="sm" />
+                </View>
+                {evidenceCards.map((card, index) => (
+                  <View key={`evidence-${index}`} style={styles.detailCard}>
+                    <View style={styles.detailCardIcon}>
+                      <AppIcon name={card.icon} size={14} color="#6366f1" />
+                    </View>
+                    <View style={styles.detailCardBody}>
+                      <Text style={styles.detailCardTitle}>{card.title}</Text>
+                      <Text style={styles.detailCardText}>{card.body}</Text>
+                      {card.caption ? <Text style={styles.detailCardCaption}>{card.caption}</Text> : null}
+                    </View>
+                  </View>
+                ))}
+              </View>
+            ) : null}
+
+            {agentsUsed && agentsUsed.length > 0 ? (
+              <View style={styles.metaSection}>
+                <View style={styles.metaTitleRow}>
+                  <AppIcon name="robot-outline" size={14} color="#6366f1" />
+                  <Text style={styles.metaSectionTitle}>Agents</Text>
+                </View>
                 <View style={styles.agentChips}>
-                  {agentsUsed.map((a, i) => (
-                    <Badge key={i} label={a} variant="primary" size="sm" />
+                  {agentsUsed.map((agent, index) => (
+                    <Badge key={`${agent}-${index}`} label={titleize(agent)} variant="primary" size="sm" />
                   ))}
                 </View>
               </View>
-            )}
-            {queryAnalysis && (
+            ) : null}
+
+            {analysisRows.length > 0 ? (
               <View style={styles.metaSection}>
-                <Text style={styles.metaLabel}>🔍 Query Analysis</Text>
-                <Text style={styles.metaContent}>{JSON.stringify(queryAnalysis, null, 2)}</Text>
+                <View style={styles.metaTitleRow}>
+                  <AppIcon name="magnify" size={14} color="#6366f1" />
+                  <Text style={styles.metaSectionTitle}>Query Analysis</Text>
+                </View>
+                <View style={styles.analysisGrid}>
+                  {analysisRows.map((row) => (
+                    <View key={row.label} style={styles.analysisRow}>
+                      <Text style={styles.analysisLabel}>{row.label}</Text>
+                      <Text style={styles.analysisValue}>{row.value}</Text>
+                    </View>
+                  ))}
+                </View>
               </View>
-            )}
+            ) : null}
           </View>
         )}
       </View>
@@ -177,7 +372,6 @@ export function MessageBubble({
 }
 
 const styles = StyleSheet.create({
-  // User message
   userRow: {
     flexDirection: 'row',
     justifyContent: 'flex-end',
@@ -203,8 +397,6 @@ const styles = StyleSheet.create({
     marginTop: 4,
     textAlign: 'right',
   },
-
-  // Assistant message
   assistantRow: {
     flexDirection: 'row',
     paddingHorizontal: SPACING.lg,
@@ -242,8 +434,6 @@ const styles = StyleSheet.create({
     color: '#1e293b',
     lineHeight: 22,
   },
-
-  // Typing indicator
   typingIndicator: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -261,16 +451,12 @@ const styles = StyleSheet.create({
     color: '#94a3b8',
     marginLeft: 4,
   },
-
-  // Badges row
   badgeRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 4,
     marginTop: SPACING.sm,
   },
-
-  // Action bar
   actionBar: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -296,8 +482,6 @@ const styles = StyleSheet.create({
     color: '#cbd5e1',
     marginLeft: 'auto',
   },
-
-  // Metadata
   metaContainer: {
     marginTop: SPACING.sm,
     backgroundColor: '#f8fafc',
@@ -307,29 +491,98 @@ const styles = StyleSheet.create({
     borderColor: '#e2e8f0',
     gap: SPACING.md,
   },
-  metaSection: {
-    gap: 4,
+  metaHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: SPACING.sm,
   },
-  metaLabel: {
+  metaHeaderTitle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  metaHeaderText: {
+    fontSize: FONT_SIZE.xs,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: '#334155',
+    letterSpacing: 0.2,
+  },
+  metaSection: {
+    gap: SPACING.sm,
+  },
+  metaTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  metaSectionTitle: {
     fontSize: FONT_SIZE.xs,
     fontWeight: FONT_WEIGHT.semibold,
     color: '#475569',
   },
-  metaContent: {
-    fontSize: FONT_SIZE.xs,
-    color: '#64748b',
-    lineHeight: 16,
+  detailCard: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    backgroundColor: '#ffffff',
+    padding: SPACING.sm,
   },
-  metaEvidence: {
+  detailCardIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: RADIUS.md,
+    backgroundColor: '#eef2ff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  detailCardBody: {
+    flex: 1,
+    gap: 3,
+  },
+  detailCardTitle: {
     fontSize: FONT_SIZE.xs,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: '#334155',
+  },
+  detailCardText: {
+    fontSize: FONT_SIZE.xs,
+    lineHeight: 18,
     color: '#64748b',
-    lineHeight: 16,
-    paddingLeft: 8,
+  },
+  detailCardCaption: {
+    fontSize: 10,
+    color: '#94a3b8',
   },
   agentChips: {
     flexDirection: 'row',
     flexWrap: 'wrap',
+    gap: 6,
+  },
+  analysisGrid: {
+    gap: 8,
+  },
+  analysisRow: {
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: 10,
     gap: 4,
-    marginTop: 2,
+  },
+  analysisLabel: {
+    fontSize: 10,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    color: '#94a3b8',
+    fontWeight: FONT_WEIGHT.semibold,
+  },
+  analysisValue: {
+    fontSize: FONT_SIZE.xs,
+    lineHeight: 18,
+    color: '#475569',
   },
 });

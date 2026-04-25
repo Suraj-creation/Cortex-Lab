@@ -12,10 +12,12 @@ import {
   FlatList,
   KeyboardAvoidingView,
   Platform,
+  Keyboard,
   TextInput as RNTextInput,
   Alert,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT, SHADOWS } from '../theme/colors';
 import { AppIcon } from '../components/ui/AppIcon';
 import { Card } from '../components/ui/Card';
@@ -51,6 +53,7 @@ const TIER_COLORS: Record<string, { bg: string; border: string; text: string; la
 };
 
 export function AgentScreen({ api }: AgentScreenProps) {
+  const insets = useSafeAreaInsets();
   const [activeTab, setActiveTab] = useState<AgentTab>('chat');
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [input, setInput] = useState('');
@@ -70,8 +73,11 @@ export function AgentScreen({ api }: AgentScreenProps) {
   const [scheduler, setScheduler] = useState<any>(null);
   const [cacheStats, setCacheStats] = useState<any>(null);
   const [loading, setLoading] = useState(false);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
 
   const flatRef = useRef<FlatList>(null);
+  const composerLift = Platform.OS === 'android' ? Math.max(0, keyboardHeight - insets.bottom) : 0;
+  const listBottomPadding = 208 + (composerLift > 0 ? composerLift : insets.bottom);
 
   const scrollToEnd = useCallback(() => {
     setTimeout(() => flatRef.current?.scrollToEnd({ animated: true }), 100);
@@ -164,6 +170,23 @@ export function AgentScreen({ api }: AgentScreenProps) {
     if (activeTab === 'configs') loadConfigs();
     if (activeTab === 'scheduler') loadScheduler();
   }, [activeTab, loadSessions, loadConfigs, loadScheduler]);
+
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+
+    const showSub = Keyboard.addListener(showEvent, (event) => {
+      setKeyboardHeight(event.endCoordinates?.height || 0);
+    });
+    const hideSub = Keyboard.addListener(hideEvent, () => {
+      setKeyboardHeight(0);
+    });
+
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, [insets.bottom]);
 
   const tabs: { key: AgentTab; label: string; icon: string }[] = [
     { key: 'chat', label: 'Agent Chat', icon: 'robot-outline' },
@@ -400,8 +423,9 @@ export function AgentScreen({ api }: AgentScreenProps) {
             ref={flatRef}
             data={messages}
             keyExtractor={(m) => m.id}
-            contentContainerStyle={styles.msgList}
+            contentContainerStyle={[styles.msgList, { paddingBottom: listBottomPadding }]}
             showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
             renderItem={({ item }) => {
               if (item.role === 'user') {
                 return (
@@ -458,8 +482,12 @@ export function AgentScreen({ api }: AgentScreenProps) {
           />
 
           {/* Input */}
-          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={16}>
-            <View style={styles.inputBar}>
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top + 6 : 0}
+            style={{ marginBottom: composerLift }}
+          >
+            <View style={[styles.inputBar, { paddingBottom: Math.max(SPACING.md, insets.bottom + 6) }]}>
               <RNTextInput
                 style={styles.chatInput}
                 placeholder="Ask Cortex Agent..."

@@ -23,7 +23,11 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -32,11 +36,11 @@
       "expo-font",
       "expo-audio"
     ],
+    "owner": "suraj-creation4u",
     "extra": {
       "eas": {
-        "projectId": "65feda36-c0e8-49fd-9c38-b5a54906e831"
+        "projectId": "2a48d53b-5ef6-4490-b96b-e7eb98546949"
       }
-    },
-    "owner": "surajcreation"
+    }
   }
 }

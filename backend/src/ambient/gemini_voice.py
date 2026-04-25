@@ -13,6 +13,7 @@ import struct
 import base64
 import time
 import asyncio
+import json
 import numpy as np
 from typing import Optional, Dict, Generator
 from concurrent.futures import ThreadPoolExecutor
@@ -123,9 +124,13 @@ class GeminiSTT:
         """Synchronous Gemini transcription call."""
         lang_hint = f" The audio is in {language}." if language else ""
         prompt = (
+            "You are a strict speech transcription classifier. "
             f"Transcribe the following audio accurately.{lang_hint} "
-            "Return ONLY the transcribed text, nothing else. "
-            "If the audio is silent or unintelligible, return an empty string."
+            "Return compact JSON with keys: "
+            '{"transcript":"...", "confidence":0.0, "contains_speech":true}. '
+            "If the audio is silent, noise-only, clipped, echoic, test audio, or uncertain, "
+            "return an empty transcript with confidence 0.0 and contains_speech false. "
+            "Do not guess words and do not output placeholder phrases."
         )
 
         audio_part = self._types.Part.from_bytes(
@@ -144,17 +149,9 @@ class GeminiSTT:
             config=config,
         )
 
-        text = ""
-        if response and response.text:
-            text = response.text.strip()
-            # Clean up any markup Gemini might add
-            if text.startswith('"') and text.endswith('"'):
-                text = text[1:-1]
-            if text.startswith("'") and text.endswith("'"):
-                text = text[1:-1]
-
-        # Estimate confidence from response
-        confidence = 0.9 if text else 0.0
+        payload = self._extract_transcription_payload(response.text if response else "")
+        text = payload["transcript"]
+        confidence = payload["confidence"] if payload["contains_speech"] else 0.0
 
         detected_lang = language or "en"
 
@@ -176,9 +173,13 @@ class GeminiSTT:
     ) -> Dict:
         lang_hint = f" The audio is in {language}." if language else ""
         prompt = (
+            "You are a strict speech transcription classifier. "
             f"Transcribe the following audio accurately.{lang_hint} "
-            "Return ONLY the transcribed text, nothing else. "
-            "If the audio is silent or unintelligible, return an empty string."
+            "Return compact JSON with keys: "
+            '{"transcript":"...", "confidence":0.0, "contains_speech":true}. '
+            "If the audio is silent, noise-only, clipped, echoic, test audio, or uncertain, "
+            "return an empty transcript with confidence 0.0 and contains_speech false. "
+            "Do not guess words and do not output placeholder phrases."
         )
 
         audio_part = self._types.Part.from_bytes(
@@ -197,15 +198,9 @@ class GeminiSTT:
             config=config,
         )
 
-        text = ""
-        if response and response.text:
-            text = response.text.strip()
-            if text.startswith('"') and text.endswith('"'):
-                text = text[1:-1]
-            if text.startswith("'") and text.endswith("'"):
-                text = text[1:-1]
-
-        confidence = 0.9 if text else 0.0
+        payload = self._extract_transcription_payload(response.text if response else "")
+        text = payload["transcript"]
+        confidence = payload["confidence"] if payload["contains_speech"] else 0.0
         detected_lang = language or "en"
 
         return {
@@ -214,6 +209,60 @@ class GeminiSTT:
             "language_probability": 0.95 if text else 0.0,
             "segments": [{"start": 0.0, "end": 0.0, "text": text}] if text else [],
             "confidence": confidence,
+        }
+
+    @staticmethod
+    def _extract_transcription_payload(raw_text: str) -> Dict[str, object]:
+        text = str(raw_text or "").strip()
+        if not text:
+            return {
+                "transcript": "",
+                "confidence": 0.0,
+                "contains_speech": False,
+            }
+
+        candidate = text
+        if candidate.startswith("```"):
+            candidate = candidate.strip("`")
+            if candidate.lower().startswith("json"):
+                candidate = candidate[4:].strip()
+
+        parsed: dict[str, object] | None = None
+        try:
+            parsed_value = json.loads(candidate)
+            if isinstance(parsed_value, dict):
+                parsed = parsed_value
+        except Exception:
+            parsed = None
+
+        if parsed is None:
+            cleaned = candidate.strip()
+            if cleaned.startswith('"') and cleaned.endswith('"'):
+                cleaned = cleaned[1:-1]
+            if cleaned.startswith("'") and cleaned.endswith("'"):
+                cleaned = cleaned[1:-1]
+            return {
+                "transcript": cleaned,
+                "confidence": 0.62 if cleaned else 0.0,
+                "contains_speech": bool(cleaned),
+            }
+
+        transcript = str(parsed.get("transcript", "") or "").strip()
+        contains_speech = bool(parsed.get("contains_speech", bool(transcript)))
+        try:
+            confidence = float(parsed.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        confidence = max(0.0, min(confidence, 1.0))
+
+        if not contains_speech:
+            transcript = ""
+            confidence = 0.0
+
+        return {
+            "transcript": transcript,
+            "confidence": confidence,
+            "contains_speech": contains_speech,
         }
 
     @staticmethod

@@ -79,6 +79,7 @@ import {
 // ── UI Components ─────────────────────────────────────────────────────────────
 import { Header } from './src/components/ui/Header';
 import { BottomNav, type NavKey } from './src/components/ui/BottomNav';
+import { IconFontReadyContext } from './src/components/ui/AppIcon';
 
 // ── Screen Components ─────────────────────────────────────────────────────────
 import { ChatScreen } from './src/screens/ChatScreen';
@@ -1014,19 +1015,24 @@ function AppContent() {
         artifactPaths.push(result.uri);
       }
 
-      updateInstallState({
-        status: 'installed',
-        progress: 100,
-        artifactPaths,
-        activeFile: '',
-        error: '',
-      });
+        updateInstallState({
+          status: 'installed',
+          progress: 100,
+          artifactPaths,
+          activeFile: '',
+          error: '',
+        });
 
-      if (!localModelAvailable) {
-        setGlobalError(
-          'Model pack downloaded to this device. The current deployed backend is Gemini-only, so chat will stay on Gemini until a native local runtime or local backend is available.',
-        );
-      }
+        if (localModelAvailable) {
+          await api.setLLMProvider('gemma_local');
+          setSettings((prev) => ({ ...prev, llmProvider: 'gemma_local' }));
+          await Promise.all([refreshModelStatus(), syncLLMProvider()]);
+          setGlobalError('Gemma Local is ready and has been selected for subsequent chat requests.');
+        } else {
+          setGlobalError(
+            'Model pack downloaded to this device. The current deployed backend is Gemini-only, so chat will stay on Gemini until a native local runtime or local backend is available.',
+          );
+        }
     } catch (e) {
       updateInstallState({
         status: 'error',
@@ -1034,7 +1040,7 @@ function AppContent() {
       });
       setGlobalError(e instanceof Error ? e.message : String(e));
     }
-  }, [api, localModelAvailable]);
+  }, [api, localModelAvailable, refreshModelStatus, syncLLMProvider]);
 
   const deleteDocument = useCallback(async (docId: string) => {
     setDocumentsBusy(true);
@@ -1314,11 +1320,13 @@ export default function App() {
 
   return (
     <SafeAreaProvider>
-      <NetworkProvider>
-        <ErrorBoundary>
-          <AppContent />
-        </ErrorBoundary>
-      </NetworkProvider>
+      <IconFontReadyContext.Provider value={Boolean(fontsLoaded && !fontError)}>
+        <NetworkProvider>
+          <ErrorBoundary>
+            <AppContent />
+          </ErrorBoundary>
+        </NetworkProvider>
+      </IconFontReadyContext.Provider>
     </SafeAreaProvider>
   );
 }

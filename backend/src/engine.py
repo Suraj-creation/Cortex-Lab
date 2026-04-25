@@ -1021,6 +1021,66 @@ class CortexRAGEngine:
         slug = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
         return slug or "unknown"
 
+    @staticmethod
+    def _coerce_graph_terms(value: Any) -> List[str]:
+        if isinstance(value, list):
+            return [str(item or "").strip() for item in value if str(item or "").strip()]
+        if isinstance(value, tuple):
+            return [str(item or "").strip() for item in value if str(item or "").strip()]
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            return [
+                part.strip()
+                for part in re.split(r"[,|;/\n]+", raw)
+                if part.strip()
+            ]
+        return []
+
+    @staticmethod
+    def _normalize_graph_topic(value: str) -> str:
+        cleaned = re.sub(r"[_\-]+", " ", str(value or "").strip())
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
+
+    @staticmethod
+    def _extract_entities_from_content(content: str) -> List[str]:
+        if not content:
+            return []
+
+        candidates: List[str] = []
+        title_case_pattern = re.compile(
+            r"\b(?:[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)*|[A-Z]{2,})(?:\s+(?:[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)*|[A-Z]{2,})){0,2}\b"
+        )
+        skip = {
+            "The", "This", "That", "These", "Those", "And", "But", "Because",
+            "When", "Where", "What", "Why", "How", "I", "We", "You", "They",
+            "He", "She", "It", "Today", "Tomorrow", "Yesterday",
+        }
+
+        for match in title_case_pattern.findall(content):
+            cleaned = str(match or "").strip()
+            if not cleaned or cleaned in skip or len(cleaned) < 3:
+                continue
+            candidates.append(cleaned)
+
+        return list(dict.fromkeys(candidates))
+
+    @staticmethod
+    def _extract_topics_from_content(content: str) -> List[str]:
+        if not content:
+            return []
+
+        matches = re.findall(r"#([a-zA-Z0-9_\-]{3,})", content)
+        return list(
+            dict.fromkeys(
+                match.strip().replace("_", " ").replace("-", " ")
+                for match in matches
+                if match.strip()
+            )
+        )
+
     def _derive_graph_from_memories(self, limit: int = 2000) -> Dict[str, List[Dict[str, Any]]]:
         if not self.metadata_store:
             return {"nodes": [], "edges": []}
@@ -1072,6 +1132,7 @@ class CortexRAGEngine:
 
         for memory in memories:
             timestamp = getattr(memory, "timestamp", None)
+            metadata = dict(getattr(memory, "metadata", {}) or {})
             entities = [
                 str(entity or "").strip()
                 for entity in list(getattr(memory, "entities", []) or [])
@@ -1083,8 +1144,48 @@ class CortexRAGEngine:
                 if str(topic or "").strip()
             ]
 
+            if not entities:
+                entities.extend(self._coerce_graph_terms(metadata.get("entities")))
+                entities.extend(self._coerce_graph_terms(metadata.get("people")))
+                entities.extend(self._coerce_graph_terms(metadata.get("participants")))
+
+            if not topics:
+                topics.extend(self._coerce_graph_terms(metadata.get("topics")))
+                topics.extend(self._coerce_graph_terms(metadata.get("tags")))
+                topics.extend(self._coerce_graph_terms(metadata.get("keywords")))
+                topics.extend(self._coerce_graph_terms(metadata.get("retention_tags")))
+                retention_trace = metadata.get("retention_trace")
+                if isinstance(retention_trace, dict):
+                    topics.extend(self._coerce_graph_terms(retention_trace.get("tags")))
+
+            content = str(getattr(memory, "content", "") or "")
+            if not entities:
+                entities.extend(self._extract_entities_from_content(content))
+            if not topics:
+                topics.extend(self._extract_topics_from_content(content))
+                lowered_content = content.lower()
+                for phrase in (
+                    "knowledge graph",
+                    "personal wiki",
+                    "ambient listening",
+                    "agent chat",
+                    "memory browser",
+                    "session forge",
+                    "life chronicle",
+                    "rag dashboard",
+                    "pipeline observability",
+                ):
+                    if phrase in lowered_content:
+                        topics.append(phrase)
+
             unique_entities = list(dict.fromkeys(entities))
-            unique_topics = list(dict.fromkeys(topics))
+            unique_topics = list(
+                dict.fromkeys(
+                    self._normalize_graph_topic(topic)
+                    for topic in topics
+                    if self._normalize_graph_topic(topic)
+                )
+            )
 
             entity_ids: List[str] = []
             for entity in unique_entities:
