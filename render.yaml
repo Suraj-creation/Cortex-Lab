@@ -14,7 +14,7 @@ services:
       - key: SKIP_LOCAL_MODEL
         value: "true"
       - key: CORTEX_DATA_DIR
-        value: /tmp/cortex
+        value: data
       - key: CORS_ALLOW_ORIGINS
         value: https://cortex-frontend-t53t.onrender.com
       - key: CORS_ALLOW_ORIGIN_REGEX
