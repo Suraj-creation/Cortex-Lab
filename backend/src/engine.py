@@ -7,6 +7,7 @@ Provides a single interface for the FastAPI server.
 
 import asyncio
 import os
+import shutil
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -157,7 +158,40 @@ class CortexRAGEngine:
         # 5. Knowledge Graph
         print("[5/11] Knowledge Graph...")
         try:
-            self.knowledge_graph = KnowledgeGraph(data_dir=f"{self.data_dir}/graph")
+            active_graph_dir = os.path.join(self.data_dir, "graph")
+            self.knowledge_graph = KnowledgeGraph(data_dir=active_graph_dir)
+            if self.knowledge_graph.get_stats().get("nodes", 0) == 0:
+                backend_seed_dir = os.path.abspath(
+                    os.path.join(os.path.dirname(__file__), "..", "data", "graph")
+                )
+                repo_seed_dir = os.path.abspath(
+                    os.path.join(os.path.dirname(__file__), "..", "..", "data", "graph")
+                )
+                for seed_dir in (backend_seed_dir, repo_seed_dir):
+                    seed_graph_path = os.path.join(seed_dir, "knowledge_graph.json")
+                    if not os.path.exists(seed_graph_path):
+                        continue
+
+                    os.makedirs(active_graph_dir, exist_ok=True)
+                    shutil.copy2(
+                        seed_graph_path,
+                        os.path.join(active_graph_dir, "knowledge_graph.json"),
+                    )
+                    fallback_path = os.path.join(seed_dir, "knowledge_graph_fallback.json")
+                    if os.path.exists(fallback_path):
+                        shutil.copy2(
+                            fallback_path,
+                            os.path.join(active_graph_dir, "knowledge_graph_fallback.json"),
+                        )
+
+                    self.knowledge_graph = KnowledgeGraph(data_dir=active_graph_dir)
+                    seeded_nodes = self.knowledge_graph.get_stats().get("nodes", 0)
+                    if seeded_nodes > 0:
+                        print(
+                            f"  ↺ Seeded knowledge graph into active data dir from "
+                            f"{seed_graph_path} ({seeded_nodes} nodes)"
+                        )
+                        break
         except Exception as e:
             print(f"  ⚠ Knowledge graph failed: {e}")
 
