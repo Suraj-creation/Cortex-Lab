@@ -123,6 +123,7 @@ export function AmbientVoiceScreen({
   const recorderState = useAudioRecorderState(recorder, 250);
   const loopActiveRef = useRef(false);
   const loopPromiseRef = useRef<Promise<void> | null>(null);
+  const loopRunIdRef = useRef(0);
   const playerRef = useRef<ReturnType<typeof createAudioPlayer> | null>(null);
   const sessionIdRef = useRef('');
 
@@ -269,6 +270,29 @@ export function AmbientVoiceScreen({
     }
   }, []);
 
+  const stopRecorderCapture = useCallback(async () => {
+    try {
+      const status = recorder.getStatus();
+      if (status.isRecording) {
+        await recorder.stop();
+      }
+    } catch {}
+  }, [recorder]);
+
+  const waitForCaptureWindow = useCallback(async (runId: number, durationMs: number) => {
+    const stepMs = 120;
+    let elapsed = 0;
+    while (elapsed < durationMs) {
+      if (!loopActiveRef.current || runId !== loopRunIdRef.current) {
+        return false;
+      }
+      const chunkMs = Math.min(stepMs, durationMs - elapsed);
+      await wait(chunkMs);
+      elapsed += chunkMs;
+    }
+    return loopActiveRef.current && runId === loopRunIdRef.current;
+  }, []);
+
   const processRecordedChunk = useCallback(async (recordingUri: string, durationMs: number) => {
     const activeSessionId = sessionIdRef.current;
     if (!activeSessionId || !recordingUri) return;
@@ -287,6 +311,10 @@ export function AmbientVoiceScreen({
         surface: 'ambient-screen',
       },
     });
+
+    if (sessionIdRef.current !== activeSessionId) {
+      return;
+    }
 
     setCapturedChunks((count) => count + 1);
     setLastTranscript(response.transcript || '');
@@ -322,22 +350,29 @@ export function AmbientVoiceScreen({
     }
   }, [api, appendLocalCapture, capturedChunks, onAmbientCaptureStored, playAssistantAudio, refreshAmbientViews]);
 
-  const recordingLoop = useCallback(async () => {
-    while (loopActiveRef.current) {
+  const recordingLoop = useCallback(async (runId: number) => {
+    while (loopActiveRef.current && runId === loopRunIdRef.current) {
       try {
         setCompanionMode('listening');
         await recorder.prepareToRecordAsync();
+        if (!loopActiveRef.current || runId !== loopRunIdRef.current) {
+          break;
+        }
         recorder.record({ forDuration: MOBILE_CAPTURE_MS / 1000 });
 
         const startedAt = Date.now();
-        await wait(MOBILE_CAPTURE_MS + 260);
-        const status = recorder.getStatus();
-        if (status.isRecording) {
+        const captureCompleted = await waitForCaptureWindow(runId, MOBILE_CAPTURE_MS + 260);
+        const statusBeforeStop = recorder.getStatus();
+        if (statusBeforeStop.isRecording) {
           await recorder.stop();
+        }
+        const statusAfterStop = recorder.getStatus();
+        if (!captureCompleted || !loopActiveRef.current || runId !== loopRunIdRef.current) {
+          break;
         }
 
         const durationMs = Math.max(Date.now() - startedAt, 1);
-        const recordedUri = recorder.uri || status.url || '';
+        const recordedUri = recorder.uri || statusAfterStop.url || statusBeforeStop.url || '';
         if (recordedUri && loopActiveRef.current) {
           setCompanionMode('processing');
           await processRecordedChunk(recordedUri, durationMs);
@@ -349,10 +384,10 @@ export function AmbientVoiceScreen({
       }
     }
 
-    if (loopActiveRef.current) {
-      setCompanionMode('listening');
+    if (runId === loopRunIdRef.current) {
+      setCompanionMode(loopActiveRef.current ? 'listening' : 'idle');
     }
-  }, [processRecordedChunk, recorder]);
+  }, [processRecordedChunk, recorder, waitForCaptureWindow]);
 
   const startCompanion = useCallback(async () => {
     if (isClientActive) return;
@@ -380,8 +415,10 @@ export function AmbientVoiceScreen({
 
       setClientSessionId(session.session_id);
       sessionIdRef.current = session.session_id;
+      const runId = loopRunIdRef.current + 1;
+      loopRunIdRef.current = runId;
       loopActiveRef.current = true;
-      loopPromiseRef.current = recordingLoop();
+      loopPromiseRef.current = recordingLoop(runId);
       await refreshAmbientViews();
     } catch (error) {
       setCompanionMode('error');
@@ -390,16 +427,20 @@ export function AmbientVoiceScreen({
   }, [api, isClientActive, recordingLoop, refreshAmbientViews]);
 
   const stopCompanion = useCallback(async () => {
+    const activeSessionId = sessionIdRef.current;
     loopActiveRef.current = false;
+    loopRunIdRef.current += 1;
+    sessionIdRef.current = '';
+    setClientSessionId('');
 
     try {
-      if (recorder.getStatus().isRecording) {
-        await recorder.stop();
-      }
-      await loopPromiseRef.current;
+      playerRef.current?.remove();
+      playerRef.current = null;
+      await stopRecorderCapture();
+      const activeLoop = loopPromiseRef.current;
       loopPromiseRef.current = null;
+      await activeLoop;
 
-      const activeSessionId = sessionIdRef.current;
       if (activeSessionId) {
         await api.stopAmbientClientSession({
           sessionId: activeSessionId,
@@ -407,21 +448,17 @@ export function AmbientVoiceScreen({
         });
       }
 
-      playerRef.current?.remove();
-      playerRef.current = null;
       await setAudioModeAsync({
         allowsRecording: false,
         playsInSilentMode: true,
       });
       setCompanionMode('idle');
-      setClientSessionId('');
-      sessionIdRef.current = '';
       await refreshAmbientViews();
     } catch (error) {
       setCompanionMode('error');
       setCompanionError(error instanceof Error ? error.message : String(error));
     }
-  }, [api, recorder, refreshAmbientViews]);
+  }, [api, refreshAmbientViews, stopRecorderCapture]);
 
   const saveCompanionSettings = useCallback(async () => {
     const followupWindow = Math.max(10, Math.min(120, parseInt(followupWindowDraft, 10) || 45));

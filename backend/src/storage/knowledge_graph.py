@@ -511,9 +511,18 @@ class KnowledgeGraph:
                 try:
                     with open(graph_path) as f:
                         data = json.load(f)
+                    edge_field = "edges"
+                    if isinstance(data, dict):
+                        if "links" in data and "edges" not in data:
+                            edge_field = "links"
+                        for edge in data.get(edge_field, []) or []:
+                            if "source" not in edge and "source_id" in edge:
+                                edge["source"] = edge.get("source_id")
+                            if "target" not in edge and "target_id" in edge:
+                                edge["target"] = edge.get("target_id")
                     # Force multigraph=False so we always get a plain DiGraph
                     data["multigraph"] = False
-                    loaded = nx.node_link_graph(data, directed=True)
+                    loaded = nx.node_link_graph(data, directed=True, edges=edge_field)
                     # Ensure we always have a DiGraph, not a MultiDiGraph
                     if isinstance(loaded, nx.MultiDiGraph):
                         self.graph = nx.DiGraph(loaded)

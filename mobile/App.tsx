@@ -7,6 +7,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   StyleSheet,
   Platform,
+  ActivityIndicator,
+  View,
+  Text,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
@@ -1279,10 +1282,34 @@ function AppContent() {
 }
 
 export default function App() {
-  const [fontsLoaded] = useFonts(MaterialCommunityIcons.font);
+  const [fontsLoaded, fontError] = useFonts(MaterialCommunityIcons.font);
+  const [fontLoadTimedOut, setFontLoadTimedOut] = useState(false);
 
-  if (!fontsLoaded) {
-    return null;
+  useEffect(() => {
+    if (fontsLoaded || fontError) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      setFontLoadTimedOut(true);
+    }, 2800);
+
+    return () => clearTimeout(timer);
+  }, [fontError, fontsLoaded]);
+
+  if (!fontsLoaded && !fontError && !fontLoadTimedOut) {
+    return (
+      <SafeAreaProvider>
+        <View style={styles.bootContainer}>
+          <StatusBar style="dark" />
+          <ActivityIndicator size="large" color="#6366f1" />
+          <Text style={styles.bootTitle}>Preparing Cortex Lab</Text>
+          <Text style={styles.bootBody}>
+            Loading your mobile workspace and connection layer.
+          </Text>
+        </View>
+      </SafeAreaProvider>
+    );
   }
 
   return (
@@ -1300,5 +1327,24 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#f8fafc',
+  },
+  bootContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    paddingHorizontal: 28,
+    backgroundColor: '#f8fafc',
+  },
+  bootTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#0f172a',
+  },
+  bootBody: {
+    fontSize: 13,
+    lineHeight: 18,
+    textAlign: 'center',
+    color: '#64748b',
   },
 });

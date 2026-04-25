@@ -167,10 +167,10 @@ export function ClientAmbientCompanion({
     const audio = new Audio(`data:audio/wav;base64,${audioBase64}`);
     audioPlayerRef.current = audio;
     audio.onended = () => {
-      setMode("listening");
+      setMode(stoppingRef.current || !sessionIdRef.current ? "idle" : "listening");
     };
     audio.onerror = () => {
-      setMode("listening");
+      setMode(stoppingRef.current || !sessionIdRef.current ? "idle" : "listening");
     };
 
     try {
@@ -198,6 +198,10 @@ export function ClientAmbientCompanion({
         surface: "ambient-panel",
       },
     });
+
+    if (stoppingRef.current || sessionIdRef.current !== activeSessionId) {
+      return;
+    }
 
     setLastTranscript(response.transcript || "");
     setLastAssistantReply(response.assistant_text || "");
@@ -403,6 +407,10 @@ export function ClientAmbientCompanion({
 
     const activeSessionId = sessionIdRef.current;
     try {
+      try {
+        audioPlayerRef.current?.pause();
+        audioPlayerRef.current = null;
+      } catch {}
       const recorder = recorderRef.current;
       if (recorder && recorder.state !== "inactive") {
         await new Promise<void>((resolve) => {

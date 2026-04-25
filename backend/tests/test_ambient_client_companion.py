@@ -172,6 +172,82 @@ def test_client_companion_processing_persists_session_turns_and_reply(tmp_path, 
     assert service._client_active_session_id == ""
 
 
+class _FakeHallucinatedSTT:
+    async def transcribe_bytes(
+        self,
+        audio_bytes: bytes,
+        *,
+        mime_type: str,
+        language: str | None = None,
+        quality_mode: bool = False,
+        estimated_duration_s: float = 0.0,
+    ) -> dict[str, Any]:
+        assert audio_bytes
+        return {
+            "text": "Quick brown fox jumps over the lazy dog",
+            "confidence": 0.92,
+            "language": language or "en",
+            "segments": [{"start": 0.0, "end": estimated_duration_s or 1.2, "text": "pangram"}],
+        }
+
+
+def test_client_companion_discards_known_hallucinated_pangram(tmp_path, monkeypatch):
+    from src.ambient import AmbientService
+    from src.runtime.session_manager import runtime_session_manager
+
+    service = AmbientService(
+        ingestion_pipeline=None,
+        data_dir=str(tmp_path),
+        gemini_api_key="test-gemini-key",
+    )
+    service._gemini_stt = _FakeHallucinatedSTT()
+    service._gemini_tts = _FakeTTS()
+    service.conversation = _FakeConversation()
+    service.set_live_assistant_callback(_assistant_reply)
+
+    fake_store = _FakeMetadataStore()
+    fake_engine = type("FakeEngine", (), {"metadata_store": fake_store})()
+    monkeypatch.setattr("src.engine.rag_engine", fake_engine, raising=False)
+
+    session = asyncio.run(service.start_client_session(platform="web"))
+    session_id = str(session["session_id"])
+
+    result = asyncio.run(
+        service.process_client_audio(
+            session_id=session_id,
+            audio_bytes=b"hallucinated-audio",
+            mime_type="audio/webm",
+            platform="web",
+            estimated_duration_s=1.1,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["transcript"] == ""
+    assert result["assistant_text"] == ""
+    assert service.conversation.turns == []
+    assert fake_store.turns == []
+
+    session_snapshot = runtime_session_manager.get_session(session_id)
+    assert session_snapshot is not None
+    assert session_snapshot.metadata.get("last_user_text") in (None, "")
+
+
+def test_gemini_live_wake_trigger_accepts_assistant_aliases():
+    from src.ambient.gemini_live import GeminiLiveSessionOrchestrator
+
+    orchestrator = GeminiLiveSessionOrchestrator.__new__(GeminiLiveSessionOrchestrator)
+    orchestrator._assistant_aliases = ["eva", "cortex", "assistant"]
+
+    triggered, query = orchestrator._extract_retrieve_trigger("Eva what did I say about the graph?")
+    assert triggered is True
+    assert query.lower() == "what did i say about the graph?"
+
+    triggered, query = orchestrator._extract_retrieve_trigger("Hey Cortex, summarize the latest session.")
+    assert triggered is True
+    assert query.lower() == "summarize the latest session."
+
+
 class _FakeAmbientService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []

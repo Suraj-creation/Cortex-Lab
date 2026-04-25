@@ -35,6 +35,7 @@ from .companion_logic import (
     analyze_client_turn,
     build_assistant_aliases,
     build_retention_trace,
+    sanitize_client_transcript,
 )
 from src.agents.scheduler import background_scheduler
 from src.runtime.session_manager import runtime_session_manager
@@ -816,6 +817,22 @@ class AmbientService:
             raise RuntimeError("Selected transcription provider does not support encoded audio input")
 
         text = str(result.get("text", "") or "").strip()
+        session_snapshot = runtime_session_manager.get_session(session_id)
+        previous_text = ""
+        previous_turn_ts = 0.0
+        if session_snapshot and isinstance(session_snapshot.metadata, dict):
+            previous_text = str(session_snapshot.metadata.get("last_user_text", "") or "")
+            try:
+                previous_turn_ts = float(session_snapshot.metadata.get("last_user_turn_at", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                previous_turn_ts = 0.0
+
+        text = sanitize_client_transcript(
+            text,
+            previous_text=previous_text,
+            previous_turn_ts=previous_turn_ts,
+            now_ts=time.time(),
+        )
         if not text:
             self._status = AmbientStatus.LISTENING
             return {
@@ -1114,11 +1131,21 @@ class AmbientService:
                 energy_threshold=float(getattr(self.config, "energy_gate_threshold", 700.0)),
                 min_speech_ms=int(getattr(self.config, "energy_min_speech_ms", 320)),
                 silence_ms=int(getattr(self.config, "energy_silence_ms", 420)),
+                assistant_aliases=build_assistant_aliases(
+                    self.config.assistant_name,
+                    self.config.assistant_aliases,
+                ),
             )
         else:
             self.live_orchestrator.set_broadcast_callback(self._ws_broadcast)
             self.live_orchestrator.set_assistant_reply_callback(self._live_assistant_reply_cb)
             self.live_orchestrator.set_retrieve_reply_callback(self._live_retrieve_reply_cb)
+            self.live_orchestrator.set_assistant_aliases(
+                build_assistant_aliases(
+                    self.config.assistant_name,
+                    self.config.assistant_aliases,
+                )
+            )
 
         self._live_components_initialized = True
 
@@ -1412,6 +1439,13 @@ class AmbientService:
                     self.wake_word.stop()
         if "wake_word_threshold" in updates and self.wake_word:
             self.wake_word.set_threshold(updates["wake_word_threshold"])
+        if self.live_orchestrator and ("assistant_name" in updates or "assistant_aliases" in updates):
+            self.live_orchestrator.set_assistant_aliases(
+                build_assistant_aliases(
+                    self.config.assistant_name,
+                    self.config.assistant_aliases,
+                )
+            )
 
         save_config(self.config, self.data_dir)
         return self.config

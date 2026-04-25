@@ -6,6 +6,8 @@ import re
 import time
 from typing import Any
 
+from .speech_cleanup import clean_transcript
+
 
 DEFAULT_ASSISTANT_ALIASES = (
     "eva",
@@ -74,6 +76,13 @@ TECHNICAL_PATTERNS = (
     "mobile",
 )
 
+GREETING_PREFIXES = ("hey", "hi", "hello", "yo")
+
+KNOWN_HALLUCINATED_TRANSCRIPTS = {
+    "quick brown fox jumps over the lazy dog",
+    "the quick brown fox jumps over the lazy dog",
+}
+
 
 def build_assistant_aliases(
     assistant_name: str = "",
@@ -102,6 +111,71 @@ def build_assistant_aliases(
     return normalized
 
 
+def normalize_spoken_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+
+
+def extract_assistant_trigger(
+    text: str,
+    *,
+    assistant_aliases: list[str],
+) -> tuple[bool, str, str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return False, "", ""
+
+    for alias in assistant_aliases:
+        pattern = rf"^\s*(?:(?:{'|'.join(GREETING_PREFIXES)})\s+)?{re.escape(alias)}\b[\s,.:;!?-]*(.*)$"
+        match = re.match(pattern, raw, flags=re.IGNORECASE)
+        if not match:
+            continue
+        query_after_trigger = str(match.group(1) or "").strip()
+        return True, query_after_trigger, alias
+
+    match = re.search(
+        r"\b(?:see[\s\-]*ya|cya|s[\s\.\-]*i[\s\.\-]*a)\b",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return False, raw, ""
+
+    query_after_trigger = str(raw[match.end():] or "").strip(" \t,:;-")
+    return True, query_after_trigger, "retrieve_trigger"
+
+
+def sanitize_client_transcript(
+    text: str,
+    *,
+    previous_text: str = "",
+    previous_turn_ts: float = 0.0,
+    now_ts: float | None = None,
+) -> str:
+    cleaned = clean_transcript(str(text or ""), confidence=0.0) or ""
+    if not cleaned:
+        return ""
+
+    normalized = normalize_spoken_text(cleaned)
+    if not normalized:
+        return ""
+
+    if normalized in KNOWN_HALLUCINATED_TRANSCRIPTS:
+        return ""
+
+    now_value = float(now_ts if now_ts is not None else time.time())
+    previous_normalized = normalize_spoken_text(previous_text)
+    if (
+        previous_normalized
+        and previous_normalized == normalized
+        and len(normalized.split()) >= 4
+        and previous_turn_ts > 0
+        and now_value - previous_turn_ts <= 18
+    ):
+        return ""
+
+    return cleaned
+
+
 def analyze_client_turn(
     text: str,
     *,
@@ -121,18 +195,17 @@ def analyze_client_turn(
             "query_text": "",
         }
 
-    assistant_alias = ""
-    direct_address = False
-    for alias in assistant_aliases:
-        pattern = rf"\b{re.escape(alias)}\b"
-        if re.search(pattern, normalized):
-            assistant_alias = alias
-            direct_address = True
-            break
+    direct_address, query_text, assistant_alias = extract_assistant_trigger(
+        text,
+        assistant_aliases=assistant_aliases,
+    )
 
-    query_text = normalized
+    if not direct_address:
+        assistant_alias = ""
+        query_text = normalized
+
     if assistant_alias:
-        query_text = re.sub(rf"\b{re.escape(assistant_alias)}\b", " ", query_text)
+        query_text = re.sub(rf"\b{re.escape(assistant_alias)}\b", " ", query_text, flags=re.IGNORECASE)
         query_text = re.sub(r"^(hey|hi|hello)\s+", "", query_text).strip(" ,.:;!?-")
 
     retrieval_intent = any(pattern in normalized for pattern in RETRIEVAL_PATTERNS)

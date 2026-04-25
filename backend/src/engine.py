@@ -936,9 +936,80 @@ class CortexRAGEngine:
 
     def get_graph_data(self) -> Dict:
         """Get graph data for visualization."""
-        if not self.initialized or not self.knowledge_graph:
+        if not self.initialized:
             return {"nodes": [], "edges": []}
-        return self.knowledge_graph.get_graph_data()
+
+        graph_data = self.knowledge_graph.get_graph_data() if self.knowledge_graph else {"nodes": [], "edges": []}
+        if graph_data.get("nodes") or graph_data.get("edges"):
+            return graph_data
+
+        return self._project_graph_from_metadata()
+
+    def _project_graph_from_metadata(self, limit: int = 5000) -> Dict[str, List[Dict[str, Any]]]:
+        if not self.metadata_store:
+            return {"nodes": [], "edges": []}
+
+        try:
+            entities = list(self.metadata_store.get_entities(limit=limit) or [])
+            raw_edges = list(self.metadata_store.get_edges() or [])
+        except Exception as e:
+            print(f"  ⚠ Metadata graph projection failed: {e}")
+            return {"nodes": [], "edges": []}
+
+        node_map: Dict[str, Dict[str, Any]] = {}
+        for entity in entities:
+            entity_id = str(entity.get("id", "") or "").strip()
+            if not entity_id:
+                continue
+            memory_ids = list(entity.get("memory_ids") or [])
+            node_map[entity_id] = {
+                "id": entity_id,
+                "label": str(entity.get("canonical_name", "") or entity_id),
+                "type": str(entity.get("entity_type", "") or "unknown"),
+                "memory_count": len(memory_ids),
+                "mentions": len(memory_ids),
+                "firstSeen": entity.get("first_seen"),
+                "lastSeen": entity.get("last_seen"),
+            }
+
+        edges: List[Dict[str, Any]] = []
+        for edge in raw_edges:
+            source_id = str(edge.get("source_id", "") or edge.get("source", "")).strip()
+            target_id = str(edge.get("target_id", "") or edge.get("target", "")).strip()
+            if not source_id or not target_id:
+                continue
+
+            if source_id not in node_map:
+                node_map[source_id] = {
+                    "id": source_id,
+                    "label": source_id,
+                    "type": "unknown",
+                    "memory_count": 0,
+                    "mentions": 0,
+                    "firstSeen": None,
+                    "lastSeen": None,
+                }
+            if target_id not in node_map:
+                node_map[target_id] = {
+                    "id": target_id,
+                    "label": target_id,
+                    "type": "unknown",
+                    "memory_count": 0,
+                    "mentions": 0,
+                    "firstSeen": None,
+                    "lastSeen": None,
+                }
+
+            edges.append(
+                {
+                    "source": source_id,
+                    "target": target_id,
+                    "relation": str(edge.get("relation", "") or "related"),
+                    "weight": float(edge.get("weight", 1.0) or 1.0),
+                }
+            )
+
+        return {"nodes": list(node_map.values()), "edges": edges}
 
     def get_entities(self, limit: int = 100) -> List[Dict]:
         """Get all entities."""

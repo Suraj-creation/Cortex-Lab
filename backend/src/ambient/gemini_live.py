@@ -27,6 +27,8 @@ from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional
 
 import numpy as np
 
+from .companion_logic import DEFAULT_ASSISTANT_ALIASES, extract_assistant_trigger
+
 
 LiveBroadcast = Callable[[Dict[str, Any]], Awaitable[None]]
 AssistantReplyFn = Callable[[str, str], Awaitable[str]]
@@ -303,6 +305,7 @@ class GeminiLiveSessionOrchestrator:
         energy_threshold: float = 700.0,
         min_speech_ms: int = 320,
         silence_ms: int = 420,
+        assistant_aliases: Optional[List[str]] = None,
     ):
         self._api_key = api_key
         self._worker_loop = worker_loop
@@ -315,6 +318,7 @@ class GeminiLiveSessionOrchestrator:
         self._assistant_reply_fn = assistant_reply_fn
         self._retrieve_reply_fn = retrieve_reply_fn
         self._language = language
+        self._assistant_aliases = list(assistant_aliases or DEFAULT_ASSISTANT_ALIASES)
 
         self._frame_ms = int(getattr(audio_capture, "FRAME_MS", 32) or 32)
         self._sample_rate = int(getattr(audio_capture, "SAMPLE_RATE", 16000) or 16000)
@@ -370,23 +374,21 @@ class GeminiLiveSessionOrchestrator:
     def set_retrieve_reply_callback(self, callback: Optional[RetrieveReplyFn]) -> None:
         self._retrieve_reply_fn = callback
 
-    @staticmethod
-    def _extract_retrieve_trigger(text: str) -> tuple[bool, str]:
-        """Detect 'see ya'/'sia' wake trigger and return the post-trigger query."""
-        raw = str(text or "").strip()
-        if not raw:
-            return False, ""
+    def set_assistant_aliases(self, aliases: Optional[List[str]]) -> None:
+        cleaned: List[str] = []
+        for alias in aliases or []:
+            alias_text = str(alias or "").strip().lower()
+            if alias_text and alias_text not in cleaned:
+                cleaned.append(alias_text)
+        self._assistant_aliases = cleaned or list(DEFAULT_ASSISTANT_ALIASES)
 
-        match = re.search(
-            r"\b(?:see[\s\-]*ya|cya|s[\s\.\-]*i[\s\.\-]*a)\b",
-            raw,
-            flags=re.IGNORECASE,
+    def _extract_retrieve_trigger(self, text: str) -> tuple[bool, str]:
+        """Detect assistant wake phrases and return the post-trigger query."""
+        triggered, query_after_trigger, _alias = extract_assistant_trigger(
+            text,
+            assistant_aliases=self._assistant_aliases,
         )
-        if not match:
-            return False, raw
-
-        query_after_trigger = str(raw[match.end():] or "").strip(" \t,:;-")
-        return True, query_after_trigger
+        return triggered, query_after_trigger
 
     async def _set_interaction_mode(self, mode: str, *, reason: str = "") -> None:
         mode = str(mode or LiveInteractionMode.CAPTURE).strip().lower()
