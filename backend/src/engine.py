@@ -7,6 +7,7 @@ Provides a single interface for the FastAPI server.
 
 import asyncio
 import os
+import re
 import shutil
 import time
 from datetime import datetime
@@ -943,7 +944,11 @@ class CortexRAGEngine:
         if graph_data.get("nodes") or graph_data.get("edges"):
             return graph_data
 
-        return self._project_graph_from_metadata()
+        graph_data = self._project_graph_from_metadata()
+        if graph_data.get("nodes") or graph_data.get("edges"):
+            return graph_data
+
+        return self._derive_graph_from_memories()
 
     def _project_graph_from_metadata(self, limit: int = 5000) -> Dict[str, List[Dict[str, Any]]]:
         if not self.metadata_store:
@@ -1010,6 +1015,110 @@ class CortexRAGEngine:
             )
 
         return {"nodes": list(node_map.values()), "edges": edges}
+
+    @staticmethod
+    def _graph_slug(value: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+        return slug or "unknown"
+
+    def _derive_graph_from_memories(self, limit: int = 2000) -> Dict[str, List[Dict[str, Any]]]:
+        if not self.metadata_store:
+            return {"nodes": [], "edges": []}
+
+        try:
+            memories = list(self.metadata_store.get_all_memories(limit=limit, offset=0) or [])
+        except Exception as e:
+            print(f"  ⚠ Memory graph derivation failed: {e}")
+            return {"nodes": [], "edges": []}
+
+        node_map: Dict[str, Dict[str, Any]] = {}
+        edge_map: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+
+        def ensure_node(node_id: str, label: str, node_type: str) -> None:
+            if node_id not in node_map:
+                node_map[node_id] = {
+                    "id": node_id,
+                    "label": label,
+                    "type": node_type,
+                    "memory_count": 0,
+                    "mentions": 0,
+                    "firstSeen": None,
+                    "lastSeen": None,
+                }
+
+        def touch_node(node_id: str, label: str, node_type: str, timestamp: Optional[datetime]) -> None:
+            ensure_node(node_id, label, node_type)
+            node = node_map[node_id]
+            node["memory_count"] += 1
+            node["mentions"] += 1
+            if timestamp is None:
+                return
+            iso_value = timestamp.isoformat()
+            if not node["firstSeen"] or str(node["firstSeen"]) > iso_value:
+                node["firstSeen"] = iso_value
+            if not node["lastSeen"] or str(node["lastSeen"]) < iso_value:
+                node["lastSeen"] = iso_value
+
+        def add_edge(source: str, target: str, relation: str, weight: float = 1.0) -> None:
+            key = (source, target, relation)
+            if key not in edge_map:
+                edge_map[key] = {
+                    "source": source,
+                    "target": target,
+                    "relation": relation,
+                    "weight": 0.0,
+                }
+            edge_map[key]["weight"] += float(weight)
+
+        for memory in memories:
+            timestamp = getattr(memory, "timestamp", None)
+            entities = [
+                str(entity or "").strip()
+                for entity in list(getattr(memory, "entities", []) or [])
+                if str(entity or "").strip()
+            ]
+            topics = [
+                str(topic or "").strip().replace("_", " ")
+                for topic in list(getattr(memory, "topics", []) or [])
+                if str(topic or "").strip()
+            ]
+
+            unique_entities = list(dict.fromkeys(entities))
+            unique_topics = list(dict.fromkeys(topics))
+
+            entity_ids: List[str] = []
+            for entity in unique_entities:
+                node_id = f"entity:{self._graph_slug(entity)}"
+                entity_ids.append(node_id)
+                touch_node(node_id, entity, "entity", timestamp)
+
+            topic_ids: List[str] = []
+            for topic in unique_topics:
+                node_id = f"topic:{self._graph_slug(topic)}"
+                topic_ids.append(node_id)
+                touch_node(node_id, topic.title(), "concept", timestamp)
+
+            for entity_id in entity_ids:
+                for topic_id in topic_ids:
+                    add_edge(entity_id, topic_id, "memory_topic")
+
+            for index, source_id in enumerate(entity_ids):
+                for target_id in entity_ids[index + 1:]:
+                    add_edge(source_id, target_id, "co_occurs")
+
+            for index, source_id in enumerate(topic_ids):
+                for target_id in topic_ids[index + 1:]:
+                    add_edge(source_id, target_id, "topic_cluster", weight=0.5)
+
+        nodes = sorted(
+            node_map.values(),
+            key=lambda item: (-int(item.get("memory_count", 0) or 0), str(item.get("label", ""))),
+        )
+        edges = sorted(
+            edge_map.values(),
+            key=lambda item: (str(item.get("source", "")), str(item.get("target", "")), str(item.get("relation", ""))),
+        )
+        return {"nodes": nodes, "edges": edges}
 
     def get_entities(self, limit: int = 100) -> List[Dict]:
         """Get all entities."""
