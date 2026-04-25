@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Radio, User, Users } from "lucide-react";
-import { getLiveTranscript } from "@/lib/api";
+import { getAmbientWebSocketUrl, getLiveTranscript } from "@/lib/api";
 import { AmbientState, ConversationTurn } from "@/lib/types";
 
 interface Props {
@@ -68,7 +68,7 @@ export function LiveTranscript({ status }: Props) {
       // Don't reconnect if already open
       if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-      const wsUrl = `ws://${window.location.hostname}:8000/ws/ambient`;
+      const wsUrl = getAmbientWebSocketUrl();
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
@@ -177,7 +177,7 @@ export function LiveTranscript({ status }: Props) {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [turns]);
+  }, [turns, partialTurns]);
 
   const active = isActive();
 
@@ -252,6 +252,19 @@ export function LiveTranscript({ status }: Props) {
               <p className="text-sm text-slate-600 leading-relaxed">
                 {turn.text}
               </p>
+              {Array.isArray(turn.retention_trace?.tags) &&
+                turn.retention_trace.tags.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {turn.retention_trace.tags.slice(0, 4).map((tag) => (
+                      <span
+                        key={`${turn.live_turn_id || i}-${tag}`}
+                        className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-slate-500"
+                      >
+                        {tag.replace(/_/g, " ")}
+                      </span>
+                    ))}
+                  </div>
+                )}
             </div>
           </div>
         ))}

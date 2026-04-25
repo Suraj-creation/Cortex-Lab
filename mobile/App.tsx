@@ -1,7 +1,6 @@
 /**
  * Cortex Lab Mobile — App.tsx Orchestrator
- * Neural Dark design system — clean screen routing
- * Stitch ref (App Shell Overview): 440ef4a948904807bfc5a55b0b027242
+ * Cortex Aurora Light design system — premium mobile experience
  * All backend logic preserved from original implementation
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -12,10 +11,17 @@ import {
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import * as DocumentPicker from 'expo-document-picker';
+import {
+  createDownloadResumable,
+  documentDirectory,
+  makeDirectoryAsync,
+} from 'expo-file-system/legacy';
 
 import {
+  type ApiClient,
   createApiClient,
   getDefaultApiBaseUrl,
+  resolveHealthyApiBaseUrl,
   type PageIndexDocument,
   type PageIndexUsage,
   type RAGStreamMeta,
@@ -23,12 +29,16 @@ import {
 } from './shared/core/api';
 import type {
   AmbientConfig,
+  AmbientClientSessionInfo,
   AmbientLiveStatus,
+  AmbientRetentionTrace,
   ChatMessage,
   ChatSettings,
   ConversationRecord,
   ConversationTurn,
   ModelStatus,
+  ModelpackEntry,
+  ModelpackInstallState,
   ModelpackManifest,
   MemoryObject,
   GraphData,
@@ -44,9 +54,11 @@ import {
   getConversation,
   getCurrentConversationId,
   getLastApiUrl,
+  loadModelpackInstalls,
   getOnboardingCompleted,
   initializeStorage,
   loadChatSettings,
+  saveModelpackInstalls,
   saveChatSettings,
   saveConversation,
   saveCurrentConversationId,
@@ -66,9 +78,14 @@ import { GraphScreen } from './src/screens/GraphScreen';
 import { ObservabilityScreen } from './src/screens/ObservabilityScreen';
 import { AgentScreen } from './src/screens/AgentScreen';
 import { WikiScreen } from './src/screens/WikiScreen';
+import { SessionForgeScreen } from './src/screens/SessionForgeScreen';
+import { ChronicleScreen } from './src/screens/ChronicleScreen';
 import { AmbientVoiceScreen } from './src/screens/AmbientVoiceScreen';
 import { DocumentsScreen } from './src/screens/DocumentsScreen';
 import { OnboardingScreen } from './src/screens/OnboardingScreen';
+import { ErrorBoundary } from './src/components/ErrorBoundary';
+import { NetworkStatusBanner } from './src/components/NetworkStatusBanner';
+import { NetworkProvider } from './src/providers/NetworkProvider';
 
 // ── Modals ────────────────────────────────────────────────────────────────────
 import { ConversationDrawer } from './src/modals/ConversationDrawer';
@@ -78,15 +95,17 @@ import { NEURAL } from './src/theme/colors';
 
 // ─── Nav items with icons ─────────────────────────────────────────────────────
 const NAV_ITEMS = [
-  { key: 'chat'          as NavKey, label: 'Chat',    iconName: 'chat-processing-outline' as const },
-  { key: 'memories'      as NavKey, label: 'Memory',  iconName: 'brain' as const },
-  { key: 'graph'         as NavKey, label: 'Graph',   iconName: 'graph-outline' as const },
-  { key: 'dashboard'     as NavKey, label: 'RAG',     iconName: 'view-dashboard-outline' as const },
-  { key: 'observability' as NavKey, label: 'Observe', iconName: 'chart-timeline-variant' as const },
-  { key: 'agent'         as NavKey, label: 'Agent',   iconName: 'robot-outline' as const },
-  { key: 'wiki'          as NavKey, label: 'Wiki',    iconName: 'book-open-page-variant-outline' as const },
-  { key: 'ambient'       as NavKey, label: 'Voice',   iconName: 'microphone-outline' as const },
-  { key: 'documents'     as NavKey, label: 'Docs',    iconName: 'file-document-outline' as const },
+  { key: 'chat'          as NavKey, label: 'Chat',      iconName: 'chat-processing-outline' as const },
+  { key: 'agent'         as NavKey, label: 'Agent',     iconName: 'robot-outline' as const },
+  { key: 'memories'      as NavKey, label: 'Memory',    iconName: 'brain' as const },
+  { key: 'observability' as NavKey, label: 'Observe',   iconName: 'chart-timeline-variant' as const },
+  { key: 'wiki'          as NavKey, label: 'Wiki',      iconName: 'book-open-page-variant-outline' as const },
+  { key: 'session-forge' as NavKey, label: 'Forge',     iconName: 'atom-variant' as const },
+  { key: 'chronicle'     as NavKey, label: 'Chronicle', iconName: 'timeline-text-outline' as const },
+  { key: 'graph'         as NavKey, label: 'Graph',     iconName: 'graph-outline' as const },
+  { key: 'dashboard'     as NavKey, label: 'Hub',       iconName: 'view-dashboard-outline' as const },
+  { key: 'ambient'       as NavKey, label: 'Voice',     iconName: 'microphone-outline' as const },
+  { key: 'documents'     as NavKey, label: 'Docs',      iconName: 'file-document-outline' as const },
 ];
 
 const STARTER_TEXT = 'How can I help you today?';
@@ -103,23 +122,83 @@ interface ConvSummary { id: string; title: string; timestamp: number; }
 interface SettingsPageProps {
   settings: ChatSettings;
   onUpdateSettings: (s: Partial<ChatSettings>) => void;
+  onSelectLLMProvider: (provider: LLMProviderType) => void;
   onBack: () => void;
-  onSave: (backendUrl: string) => void;
-  onTestConnection: (backendUrl: string) => void;
-  testingConnection: boolean;
+  onReconnect: () => void;
+  reconnecting: boolean;
   connectionStatus: string;
-  backendUrl: string;
+  backendUrlLabel: string;
+  localModelAvailable: boolean;
   modelpackManifest: ModelpackManifest | null;
+  modelpackInstalls: Record<string, ModelpackInstallState>;
+  modelpackCapabilityMessage: string;
   modelpackError: string;
   onRefreshModelpacks: () => void;
+  onInstallModelpack: (pack: ModelpackEntry) => void;
 }
 
 const SettingsPage = require('./src/screens/SettingsScreen').SettingsScreen as React.ComponentType<SettingsPageProps>;
+
+function formatApiEndpointLabel(rawUrl: string): string {
+  try {
+    return new URL(rawUrl).host;
+  } catch {
+    return rawUrl;
+  }
+}
+
+function describeApiSource(source: string): string {
+  switch (source) {
+    case 'env':
+      return 'build configuration';
+    case 'canonical':
+      return 'production fallback';
+    case 'persisted':
+      return 'saved remote endpoint';
+    case 'same-origin':
+      return 'same-origin proxy';
+    case 'local-dev':
+      return 'local development host';
+    default:
+      return 'automatic discovery';
+  }
+}
+
+function inferModelpackFiles(pack: ModelpackEntry) {
+  if (Array.isArray(pack.files) && pack.files.length > 0) {
+    return pack.files.filter((file) => file.path.trim().length > 0);
+  }
+
+  switch (pack.id) {
+    case 'gemma-4-e4b-it-litert-lm':
+      return [
+        { path: 'gemma-4-E4B-it.litertlm', size_bytes: 0, sha256: '' },
+        { path: 'gemma-4-E4B-it-web.task', size_bytes: 0, sha256: '' },
+      ];
+    case 'gemma-4-e2b-it-litert-lm':
+      return [
+        { path: 'gemma-4-E2B-it.litertlm', size_bytes: 0, sha256: '' },
+        { path: 'gemma-4-E2B-it-web.task', size_bytes: 0, sha256: '' },
+      ];
+    default:
+      return [];
+  }
+}
+
+function buildModelpackArtifactUrl(pack: ModelpackEntry, relativePath: string): string {
+  const base = (pack.download_url || '').replace(/\/+$/, '');
+  const encodedPath = relativePath
+    .split('/')
+    .map((part) => encodeURIComponent(part))
+    .join('/');
+  return `${base}/resolve/main/${encodedPath}?download=1`;
+}
 
 // ─── Main App Content ─────────────────────────────────────────────────────────
 function AppContent() {
   const [apiBase, setApiBase] = useState<string>(getDefaultApiBaseUrl());
   const api = useMemo(() => createApiClient({ baseUrl: apiBase }), [apiBase]);
+  const apiRef = useRef<ApiClient>(api);
 
   // ── Navigation ──────────────────────────────────────────────────────────────
   const [activeView, setActiveView] = useState<NavKey>('chat');
@@ -127,10 +206,11 @@ function AppContent() {
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
-  const [connectionStatus, setConnectionStatus] = useState('');
-  const [backendUrl, setBackendUrl] = useState(apiBase);
+  const [connectionStatus, setConnectionStatus] = useState('Auto-connecting to Cortex backend…');
+  const [backendUrlLabel, setBackendUrlLabel] = useState(formatApiEndpointLabel(apiBase));
   const [modelpackManifest, setModelpackManifest] = useState<ModelpackManifest | null>(null);
   const [modelpackError, setModelpackError] = useState('');
+  const [modelpackInstalls, setModelpackInstalls] = useState<Record<string, ModelpackInstallState>>({});
 
   // ── Global state ────────────────────────────────────────────────────────────
   const [modelStatus, setModelStatus] = useState<ModelStatus>({ status: 'loading', model_loaded: false, model_info: {} });
@@ -154,6 +234,9 @@ function AppContent() {
   const [memorySearch, setMemorySearch] = useState('');
   const [memoryDraft, setMemoryDraft] = useState('');
   const [memoryBusy, setMemoryBusy] = useState(false);
+  const [lastMemoryRetention, setLastMemoryRetention] = useState<AmbientRetentionTrace | null>(null);
+  const [lastMemorySession, setLastMemorySession] = useState<AmbientClientSessionInfo | null>(null);
+  const [lastMemoryDocument, setLastMemoryDocument] = useState('');
 
   // ── Graph / Dashboard ─────────────────────────────────────────────────────────
   const [graphData, setGraphData] = useState<GraphData | null>(null);
@@ -190,20 +273,24 @@ function AppContent() {
   const [documentsBusy, setDocumentsBusy] = useState(false);
 
   // ─── Backend helpers ────────────────────────────────────────────────────────
+  useEffect(() => {
+    apiRef.current = api;
+  }, [api]);
+
   useEffect(() => { messagesRef.current = messages; }, [messages]);
 
-  const refreshModelStatus = useCallback(async () => {
+  const refreshModelStatus = useCallback(async (client: ApiClient = apiRef.current) => {
     try {
-      const status = await api.getModelStatus();
+      const status = await client.getModelStatus();
       setModelStatus(status);
     } catch {
       setModelStatus({ status: 'offline', model_loaded: false, model_info: {} });
     }
-  }, [api]);
+  }, []);
 
-  const syncLLMProvider = useCallback(async () => {
+  const syncLLMProvider = useCallback(async (client: ApiClient = apiRef.current) => {
     try {
-      const provider = await api.getLLMProvider();
+      const provider = await client.getLLMProvider();
       setLocalModelAvailable(provider.local_model_loaded);
       setSettings((prev) => {
         if (provider.provider === 'local' && !provider.local_model_loaded && provider.gemini_configured) {
@@ -212,17 +299,48 @@ function AppContent() {
         return { ...prev, llmProvider: provider.provider };
       });
     } catch {}
-  }, [api]);
+  }, []);
 
-  const loadModelpackManifest = useCallback(async () => {
+  const loadModelpackManifest = useCallback(async (client: ApiClient = apiRef.current) => {
     try {
-      const manifest = await api.getModelpackManifest();
+      const manifest = await client.getModelpackManifest();
       setModelpackManifest(manifest);
       setModelpackError('');
     } catch (e) {
       setModelpackError(e instanceof Error ? e.message : String(e));
     }
-  }, [api]);
+  }, []);
+
+  const connectBackend = useCallback(async (persistedUrl?: string | null) => {
+    setTestingConnection(true);
+    setConnectionStatus('Auto-connecting to Cortex backend…');
+
+    try {
+      const resolution = await resolveHealthyApiBaseUrl(persistedUrl);
+      const nextBase = resolution.baseUrl;
+      const nextClient = createApiClient({ baseUrl: nextBase });
+
+      setApiBase(nextBase);
+      setBackendUrlLabel(formatApiEndpointLabel(nextBase));
+
+      if (resolution.reachable) {
+        setConnectionStatus(`Connected automatically via ${describeApiSource(resolution.source)}.`);
+        await saveLastApiUrl(nextBase);
+      } else {
+        setConnectionStatus('Preferred backend selected, but the live service is still warming up.');
+      }
+
+      await Promise.allSettled([
+        refreshModelStatus(nextClient),
+        syncLLMProvider(nextClient),
+        loadModelpackManifest(nextClient),
+      ]);
+
+      return nextClient;
+    } finally {
+      setTestingConnection(false);
+    }
+  }, [loadModelpackManifest, refreshModelStatus, syncLLMProvider]);
 
   const loadConversations = useCallback(async () => {
     try {
@@ -257,8 +375,10 @@ function AppContent() {
       try {
         await initializeStorage();
         const ls = await loadChatSettings();
+        const savedModelpacks = await loadModelpackInstalls();
         if (mounted) {
           setSettings(ls);
+          setModelpackInstalls(savedModelpacks);
         }
 
         const onboardingCompleted = await getOnboardingCompleted();
@@ -267,25 +387,17 @@ function AppContent() {
         }
 
         const lastApiUrl = await getLastApiUrl();
-        if (mounted && lastApiUrl?.trim()) {
-          const persistedUrl = lastApiUrl.trim();
-          setApiBase(persistedUrl);
-          setBackendUrl(persistedUrl);
+        if (mounted) {
+          await connectBackend(lastApiUrl);
+          await ensureActiveConversation();
         }
-
-        await Promise.all([
-          refreshModelStatus(),
-          syncLLMProvider(),
-          ensureActiveConversation(),
-          loadModelpackManifest(),
-        ]);
       } catch (e) {
         if (mounted) setGlobalError(e instanceof Error ? e.message : String(e));
       }
     })();
     const interval = setInterval(() => void refreshModelStatus(), 15000);
     return () => { mounted = false; clearInterval(interval); };
-  }, [refreshModelStatus, syncLLMProvider, ensureActiveConversation, loadModelpackManifest]);
+  }, [connectBackend, ensureActiveConversation, refreshModelStatus]);
 
   useEffect(() => {
     if (!settingsVisible) {
@@ -297,6 +409,7 @@ function AppContent() {
   }, [settingsVisible, modelpackManifest, loadModelpackManifest]);
 
   useEffect(() => { void saveChatSettings(settings); }, [settings]);
+  useEffect(() => { void saveModelpackInstalls(modelpackInstalls); }, [modelpackInstalls]);
 
   // Load active conversation messages
   useEffect(() => {
@@ -336,6 +449,28 @@ function AppContent() {
     setMessages(starter);
   }, []);
 
+  const selectProvider = useCallback(async (provider: LLMProviderType) => {
+    if ((provider === 'local' || provider === 'gemma_local') && !localModelAvailable) {
+      setGlobalError('Local model unavailable.');
+      return;
+    }
+
+    setProviderBusy(true);
+    try {
+      await api.setLLMProvider(provider);
+      setSettings((prev) => ({ ...prev, llmProvider: provider }));
+      setGlobalError('');
+      await Promise.all([
+        refreshModelStatus(),
+        syncLLMProvider(),
+      ]);
+    } catch (e) {
+      setGlobalError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setProviderBusy(false);
+    }
+  }, [api, localModelAvailable, refreshModelStatus, syncLLMProvider]);
+
   const toggleProvider = useCallback(async () => {
     const providerCycle: LLMProviderType[] = localModelAvailable
       ? ['local', 'gemma_local', 'gemini']
@@ -343,24 +478,8 @@ function AppContent() {
     const currentIndex = providerCycle.indexOf(settings.llmProvider);
     const safeIndex = currentIndex >= 0 ? currentIndex : providerCycle.length - 1;
     const next = providerCycle[(safeIndex + 1) % providerCycle.length];
-
-    if ((next === 'local' || next === 'gemma_local') && !localModelAvailable) {
-      setGlobalError('Local model unavailable.');
-      return;
-    }
-
-    setProviderBusy(true);
-    try {
-      await api.setLLMProvider(next);
-      setSettings((prev) => ({ ...prev, llmProvider: next }));
-      setGlobalError('');
-      await refreshModelStatus();
-    } catch (e) {
-      setGlobalError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setProviderBusy(false);
-    }
-  }, [api, localModelAvailable, refreshModelStatus, settings.llmProvider]);
+    await selectProvider(next);
+  }, [localModelAvailable, selectProvider, settings.llmProvider]);
 
   const sendChat = useCallback(async () => {
     const text = input.trim();
@@ -453,7 +572,22 @@ function AppContent() {
   const addMemory = useCallback(async () => {
     if (!memoryDraft.trim()) return;
     setMemoryBusy(true);
-    try { await api.ingestMemory(memoryDraft.trim(), 'mobile'); setMemoryDraft(''); await loadMemories(); setGlobalError(''); }
+    try {
+      const result = await api.ingestMemory(
+        memoryDraft.trim(),
+        'manual_memory',
+        {
+          platform: Platform.OS,
+          forceKeep: true,
+        },
+      );
+      setLastMemoryRetention(result.retention_trace || null);
+      setLastMemorySession(result.session || null);
+      setLastMemoryDocument('');
+      setMemoryDraft('');
+      await loadMemories();
+      setGlobalError('');
+    }
     catch (e) { setGlobalError(e instanceof Error ? e.message : String(e)); }
     finally { setMemoryBusy(false); }
   }, [api, loadMemories, memoryDraft]);
@@ -474,7 +608,28 @@ function AppContent() {
 
   const loadDashboard = useCallback(async () => {
     setLoadingView(true);
-    try { setRagStats(await api.getRAGStats()); }
+    try {
+      const [statsR, graphR, docsR] = await Promise.allSettled([
+        api.getRAGStats(),
+        api.getGraphData(),
+        api.listDocuments(),
+      ]);
+
+      if (statsR.status === 'fulfilled') {
+        setRagStats(statsR.value);
+      } else {
+        throw statsR.reason;
+      }
+
+      if (graphR.status === 'fulfilled') {
+        setGraphData(graphR.value);
+      }
+
+      if (docsR.status === 'fulfilled') {
+        setDocuments(docsR.value.documents || []);
+        setPageIndexEnabled(Boolean(docsR.value.pageindex_enabled));
+      }
+    }
     catch (e) { setGlobalError(e instanceof Error ? e.message : String(e)); }
     finally { setLoadingView(false); }
   }, [api]);
@@ -577,7 +732,7 @@ function AppContent() {
     finally { setLoadingView(false); }
   }, [api]);
 
-  const uploadDocument = useCallback(async () => {
+  const uploadDocument = useCallback(async (surface: 'documents' | 'memory' = 'documents') => {
     try {
       setDocumentsBusy(true);
       const picked = await DocumentPicker.getDocumentAsync({ type: 'application/pdf', copyToCacheDirectory: true, multiple: false });
@@ -586,11 +741,131 @@ function AppContent() {
       const form = new FormData();
       if (asset.file) form.append('file', asset.file, asset.name || 'document.pdf');
       else form.append('file', { uri: asset.uri, name: asset.name || 'document.pdf', type: 'application/pdf' } as unknown as Blob);
-      await api.uploadDocument(form);
+      const uploaded = await api.uploadDocument(form);
+
+      if (surface === 'memory') {
+        const intake = await api.ingestMemory(
+          `Uploaded document "${uploaded.filename || asset.name || 'document.pdf'}" into PageIndex for long-term retrieval and memory refinement.`,
+          'pageindex_document',
+          {
+            platform: Platform.OS,
+            forceKeep: true,
+          },
+        );
+        setLastMemoryRetention(intake.retention_trace || null);
+        setLastMemorySession(intake.session || null);
+        setLastMemoryDocument(uploaded.filename || asset.name || 'document.pdf');
+        await loadMemories();
+      }
+
       await loadDocuments();
+      setGlobalError('');
     } catch (e) { setGlobalError(e instanceof Error ? e.message : String(e)); }
     finally { setDocumentsBusy(false); }
-  }, [api, loadDocuments]);
+  }, [api, loadDocuments, loadMemories]);
+
+  const installModelpack = useCallback(async (pack: ModelpackEntry) => {
+    if (Platform.OS === 'web') {
+      setGlobalError('In-app model downloads require an installed iOS or Android build.');
+      return;
+    }
+    if (!documentDirectory) {
+      setGlobalError('App storage is unavailable on this build, so model packs cannot be downloaded.');
+      return;
+    }
+
+    const files = inferModelpackFiles(pack);
+    if (!pack.download_url || files.length === 0) {
+      setGlobalError('This model pack is missing direct artifact files, so it cannot be downloaded in-app yet.');
+      return;
+    }
+
+    const updateInstallState = (patch: Partial<ModelpackInstallState>) => {
+      setModelpackInstalls((prev) => ({
+        ...prev,
+        [pack.id]: {
+          packId: pack.id,
+          status: patch.status || prev[pack.id]?.status || 'queued',
+          progress: typeof patch.progress === 'number' ? patch.progress : prev[pack.id]?.progress || 0,
+          updatedAt: new Date().toISOString(),
+          artifactPaths: patch.artifactPaths ?? prev[pack.id]?.artifactPaths,
+          activeFile: patch.activeFile ?? prev[pack.id]?.activeFile,
+          error: patch.error ?? prev[pack.id]?.error,
+        },
+      }));
+    };
+
+    try {
+      setGlobalError('');
+      updateInstallState({ status: 'queued', progress: 0, error: '' });
+
+      const packDir = `${documentDirectory}modelpacks/${pack.id}/`;
+      await makeDirectoryAsync(packDir, { intermediates: true });
+
+      const artifactPaths: string[] = [];
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        const filename = file.path.split('/').pop() || `${pack.id}-${index + 1}.bin`;
+        const destination = `${packDir}${filename}`;
+        const artifactUrl = buildModelpackArtifactUrl(pack, file.path);
+
+        updateInstallState({
+          status: 'downloading',
+          activeFile: filename,
+          progress: (index / files.length) * 100,
+        });
+
+        const download = createDownloadResumable(
+          artifactUrl,
+          destination,
+          {},
+          (progressEvent) => {
+            const total = progressEvent.totalBytesExpectedToWrite || 0;
+            const current = total > 0 ? progressEvent.totalBytesWritten / total : 0;
+            updateInstallState({
+              status: 'downloading',
+              activeFile: filename,
+              progress: ((index + current) / files.length) * 100,
+            });
+          },
+        );
+
+        const result = await download.downloadAsync();
+        if (!result?.uri) {
+          throw new Error(`Download did not produce a local file for ${filename}.`);
+        }
+
+        if (file.sha256) {
+          const verified = await api.verifyModelpack(result.uri, file.sha256);
+          if (!verified.verified) {
+            throw new Error(`Checksum verification failed for ${filename}.`);
+          }
+        }
+
+        artifactPaths.push(result.uri);
+      }
+
+      updateInstallState({
+        status: 'installed',
+        progress: 100,
+        artifactPaths,
+        activeFile: '',
+        error: '',
+      });
+
+      if (!localModelAvailable) {
+        setGlobalError(
+          'Model pack downloaded to this device. The current deployed backend is Gemini-only, so chat will stay on Gemini until a native local runtime or local backend is available.',
+        );
+      }
+    } catch (e) {
+      updateInstallState({
+        status: 'error',
+        error: e instanceof Error ? e.message : String(e),
+      });
+      setGlobalError(e instanceof Error ? e.message : String(e));
+    }
+  }, [api, localModelAvailable]);
 
   const deleteDocument = useCallback(async (docId: string) => {
     setDocumentsBusy(true);
@@ -625,41 +900,17 @@ function AppContent() {
     finally { setDocumentQueryBusy(false); }
   }, [api, documentQuery]);
 
-  const normalizeBackendUrlInput = useCallback((rawUrl: string) => {
-    const fallback = apiBase.trim();
-    const trimmed = rawUrl.trim();
-    const candidate = trimmed || fallback;
-    const withoutTrailingSlash = candidate.endsWith('/') ? candidate.slice(0, -1) : candidate;
-    return withoutTrailingSlash.endsWith('/api') ? withoutTrailingSlash : `${withoutTrailingSlash}/api`;
-  }, [apiBase]);
-
-  // Connection test
-  const testConnection = useCallback(async (urlDraft: string) => {
-    setTestingConnection(true);
+  const reconnectBackend = useCallback(async () => {
     try {
-      const targetUrl = normalizeBackendUrlInput(urlDraft);
-      const testApi = createApiClient({ baseUrl: targetUrl });
-      const status = await testApi.getModelStatus();
-      setConnectionStatus(`Connected · ${status.status}`);
-      setModelStatus(status);
-      setApiBase(targetUrl);
-      setBackendUrl(targetUrl);
+      const persistedUrl = await getLastApiUrl();
+      await connectBackend(persistedUrl);
       setGlobalError('');
-      await saveLastApiUrl(targetUrl);
-    } catch {
-      setConnectionStatus('Connection failed');
-    } finally {
+    } catch (e) {
+      setGlobalError(e instanceof Error ? e.message : String(e));
+      setConnectionStatus('Automatic backend reconnection failed.');
       setTestingConnection(false);
     }
-  }, [normalizeBackendUrlInput]);
-
-  const handleSaveSettings = useCallback(async (urlDraft: string) => {
-    const targetUrl = normalizeBackendUrlInput(urlDraft);
-    setApiBase(targetUrl);
-    setBackendUrl(targetUrl);
-    await saveLastApiUrl(targetUrl);
-    setConnectionStatus('');
-  }, [normalizeBackendUrlInput]);
+  }, [connectBackend]);
 
   const completeOnboarding = useCallback(async () => {
     await saveOnboardingCompleted(true);
@@ -699,26 +950,34 @@ function AppContent() {
     return () => clearInterval(interval);
   }, [activeView, loadAmbient]);
 
-  const isOnline = modelStatus.status === 'ready' || modelStatus.status === 'gemini' || modelStatus.model_loaded;
+  const isOnline = modelStatus.status !== 'offline';
 
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
-      <StatusBar style="light" />
+      <StatusBar style="dark" />
 
       {settingsVisible ? (
         <SettingsPage
           settings={settings}
           onUpdateSettings={(patch: Partial<ChatSettings>) => setSettings((prev) => ({ ...prev, ...patch }))}
+          onSelectLLMProvider={(provider: LLMProviderType) => void selectProvider(provider)}
           onBack={() => setSettingsVisible(false)}
-          onSave={(url: string) => void handleSaveSettings(url)}
-          onTestConnection={(url: string) => void testConnection(url)}
-          testingConnection={testingConnection}
+          onReconnect={() => void reconnectBackend()}
+          reconnecting={testingConnection}
           connectionStatus={connectionStatus}
-          backendUrl={backendUrl}
+          backendUrlLabel={backendUrlLabel}
+          localModelAvailable={localModelAvailable}
           modelpackManifest={modelpackManifest}
+          modelpackInstalls={modelpackInstalls}
+          modelpackCapabilityMessage={
+            localModelAvailable
+              ? 'A local backend/runtime is available. Pick Local or Gemma Local for the next chat request.'
+              : 'The deployed backend is currently Gemini-only. Downloaded model packs stay on-device for the upcoming native runtime bridge, while live chat continues through Gemini.'
+          }
           modelpackError={modelpackError}
           onRefreshModelpacks={() => void loadModelpackManifest()}
+          onInstallModelpack={(pack: ModelpackEntry) => void installModelpack(pack)}
         />
       ) : (
         <>
@@ -729,6 +988,8 @@ function AppContent() {
             onMenuPress={() => setDrawerVisible(true)}
             onSettingsPress={() => setSettingsVisible(true)}
           />
+
+          <NetworkStatusBanner />
 
           {/* Screen content */}
           {activeView === 'chat' && (
@@ -758,14 +1019,29 @@ function AppContent() {
               setMemoryDraft={setMemoryDraft}
               memoryBusy={memoryBusy}
               loadingView={loadingView}
+              lastRetentionTrace={lastMemoryRetention}
+              lastSession={lastMemorySession}
+              lastUploadedDocument={lastMemoryDocument}
               onSearch={searchMemories}
               onAddMemory={addMemory}
+              onUploadDocument={() => void uploadDocument('memory')}
               onDeleteMemory={removeMemory}
               onLoadMore={() => void loadMemories()}
             />
           )}
           {activeView === 'graph' && <GraphScreen graphData={graphData} loadingView={loadingView} />}
-          {activeView === 'dashboard' && <DashboardScreen ragStats={ragStats} loadingView={loadingView} onRefresh={loadDashboard} />}
+          {activeView === 'dashboard' && (
+            <DashboardScreen
+              ragStats={ragStats}
+              graphData={graphData}
+              documentCount={documents.length}
+              apiBaseUrl={apiBase}
+              modelStatus={modelStatus}
+              loadingView={loadingView}
+              onRefresh={loadDashboard}
+              onOpenView={setActiveView}
+            />
+          )}
           {activeView === 'observability' && (
             <ObservabilityScreen
               observabilityMetrics={observabilityMetrics}
@@ -777,50 +1053,30 @@ function AppContent() {
           )}
           {activeView === 'agent' && <AgentScreen api={api} />}
           {activeView === 'wiki' && <WikiScreen api={api} />}
+          {activeView === 'session-forge' && <SessionForgeScreen api={api} />}
+          {activeView === 'chronicle' && <ChronicleScreen api={api} />}
           {activeView === 'ambient' && (
             <AmbientVoiceScreen
               ambientState={ambientState}
               ambientLiveStatus={ambientLiveStatus}
               ambientConfig={ambientConfig}
-              ambientEnrollment={ambientEnrollment}
-              ambientProviders={ambientProviders}
-              ambientTurns={ambientTurns}
-              ambientConversations={ambientConversations}
-              ambientTTSStatus={ambientTTSStatus}
-              ambientBusy={ambientBusy}
-              loadingView={loadingView}
-              ttsDraft={ttsDraft}
-              setTtsDraft={setTtsDraft}
-              ttsBusy={ttsBusy}
-              ttsLastBytes={ttsLastBytes}
-              onAmbientAction={runAmbientAction}
-              onAmbientLiveAction={runAmbientLiveAction}
-              onSetProvider={setAmbientProvider}
-              onStartEnrollment={startAmbientEnrollment}
-              onToggleAutoIngest={toggleAmbientAutoIngest}
-              onRunTTS={runTTSHealthCheck}
+              voiceProviders={ambientProviders}
+              onStartListening={() => runAmbientLiveAction('start')}
+              onStopListening={() => runAmbientLiveAction('stop')}
+              onPauseAmbient={() => runAmbientAction('pause')}
+              onResumeAmbient={() => runAmbientAction('resume')}
+              api={api}
             />
           )}
           {activeView === 'documents' && (
             <DocumentsScreen
               documents={documents}
-              pageIndexUsage={pageIndexUsage}
-              pageIndexEnabled={pageIndexEnabled}
-              documentQuery={documentQuery}
-              setDocumentQuery={setDocumentQuery}
-              documentAnswer={documentAnswer}
-              documentSections={documentSections}
-              documentTreeDocId={documentTreeDocId}
-              documentTreePreview={documentTreePreview}
-              documentsBusy={documentsBusy}
-              documentQueryBusy={documentQueryBusy}
-              loadingView={loadingView}
-              onUpload={uploadDocument}
+              documentUsage={pageIndexUsage}
+              onLoadDocuments={loadDocuments}
               onDeleteDocument={deleteDocument}
-              onToggleTree={toggleDocumentTree}
-              onRunQuery={runDocumentQuery}
-              onClearAnswer={() => { setDocumentAnswer(''); setDocumentSections([]); setDocumentQuery(''); }}
-              onRefresh={loadDocuments}
+              onUploadDocument={() => void uploadDocument('documents')}
+              loadingView={loadingView}
+              api={api}
             />
           )}
 
@@ -855,7 +1111,11 @@ function AppContent() {
 export default function App() {
   return (
     <SafeAreaProvider>
-      <AppContent />
+      <NetworkProvider>
+        <ErrorBoundary>
+          <AppContent />
+        </ErrorBoundary>
+      </NetworkProvider>
     </SafeAreaProvider>
   );
 }
@@ -863,6 +1123,6 @@ export default function App() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: NEURAL.background,
+    backgroundColor: '#f8fafc',
   },
 });

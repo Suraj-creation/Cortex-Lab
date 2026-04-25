@@ -20,7 +20,6 @@ import {
 import Slider from '@react-native-community/slider';
 import { NEURAL, SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT } from '../theme/colors';
 import { Button } from '../components/ui/Button';
-import { TextInput } from '../components/ui/TextInput';
 import { AppIcon } from '../components/ui/AppIcon';
 import { ModelDownloadManager } from '../components/modelpacks/ModelDownloadManager';
 import { ModelRecommendationCard } from '../components/modelpacks/ModelRecommendationCard';
@@ -32,11 +31,10 @@ interface SettingsSheetProps {
   onClose: () => void;
   settings: ChatSettings;
   onUpdateSettings: (s: Partial<ChatSettings>) => void;
-  onSave: (backendUrl: string) => void;
-  onTestConnection: (backendUrl: string) => void;
-  testingConnection: boolean;
+  onReconnect: () => void;
+  reconnecting: boolean;
   connectionStatus: string;
-  backendUrl: string;
+  backendUrlLabel: string;
   modelpackManifest?: ModelpackManifest | null;
   modelpackError?: string;
   onRefreshModelpacks?: () => void;
@@ -143,16 +141,14 @@ export function SettingsSheet({
   onClose,
   settings,
   onUpdateSettings,
-  onSave,
-  onTestConnection,
-  testingConnection,
+  onReconnect,
+  reconnecting,
   connectionStatus,
-  backendUrl,
+  backendUrlLabel,
   modelpackManifest = null,
   modelpackError = '',
   onRefreshModelpacks,
 }: SettingsSheetProps) {
-  const [backendDraft, setBackendDraft] = React.useState(backendUrl);
   const [modelpackLinkError, setModelpackLinkError] = React.useState('');
 
   const normalizedManifest = React.useMemo(
@@ -183,10 +179,9 @@ export function SettingsSheet({
 
   useEffect(() => {
     if (visible) {
-      setBackendDraft(backendUrl);
       setModelpackLinkError('');
     }
-  }, [visible, backendUrl]);
+  }, [visible]);
   const slideAnim = useRef(new Animated.Value(600)).current;
   const opacityAnim = useRef(new Animated.Value(0)).current;
 
@@ -390,50 +385,43 @@ export function SettingsSheet({
             ))}
           </View>
 
-          {/* Backend URL */}
           <View style={styles.section}>
-            <Text style={styles.sectionLabel}>Backend URL</Text>
-            <TextInput
-              placeholder="http://192.168.1.x:8000"
-              value={backendDraft}
-              onChangeText={setBackendDraft}
-              autoCapitalize="none"
-              autoCorrect={false}
-              keyboardType="url"
-              blurOnSubmit={false}
-            />
-          </View>
-
-          {/* Connection test */}
-          <View style={styles.section}>
-            <Button
-              label={testingConnection ? 'Testing…' : 'Test Connection'}
-              variant="outline"
-              onPress={() => onTestConnection(backendDraft)}
-              disabled={testingConnection}
-              loading={testingConnection}
-              fullWidth
-            />
+            <Text style={styles.sectionLabel}>Backend Connection</Text>
+            <View style={styles.connectionCard}>
+              <View style={styles.connectionHeader}>
+                <View style={styles.connectionIconWrap}>
+                  <AppIcon name="cloud-check-outline" size={16} color={NEURAL.primary} />
+                </View>
+                <View style={styles.connectionMeta}>
+                  <Text style={styles.connectionTitle}>Automatic backend discovery</Text>
+                  <Text style={styles.connectionBody}>
+                    Cortex Lab connects to the deployed backend automatically when the app opens.
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.connectionEndpointRow}>
+                <Text style={styles.connectionEndpointLabel}>Live endpoint</Text>
+                <Text style={styles.connectionEndpointValue}>{backendUrlLabel}</Text>
+              </View>
+            </View>
+            <View style={styles.actionRow}>
+              <Button
+                label={reconnecting ? 'Reconnecting...' : 'Re-check Backend'}
+                variant="outline"
+                onPress={onReconnect}
+                disabled={reconnecting}
+                loading={reconnecting}
+                size="sm"
+              />
+            </View>
             {connectionStatus ? (
               <Text style={[
                 styles.connStatus,
-                { color: connectionStatus.startsWith('Connected') ? NEURAL.tertiary : NEURAL.error }
+                { color: connectionStatus.startsWith('Connected') ? NEURAL.tertiary : NEURAL.onSurfaceVariant }
               ]}>
                 {connectionStatus}
               </Text>
             ) : null}
-          </View>
-
-          {/* Save */}
-          <View style={styles.section}>
-            <Button
-              label="Save Settings"
-              onPress={() => {
-                onSave(backendDraft);
-                onClose();
-              }}
-              fullWidth
-            />
           </View>
             </ScrollView>
           </Animated.View>
@@ -558,6 +546,60 @@ const styles = StyleSheet.create({
     borderRadius: RADIUS.lg,
     paddingHorizontal: SPACING.md,
     paddingVertical: SPACING.sm,
+  },
+
+  connectionCard: {
+    backgroundColor: NEURAL.surfaceContainer,
+    borderWidth: 1,
+    borderColor: NEURAL.outlineVariant,
+    borderRadius: RADIUS.xl,
+    padding: SPACING.lg,
+    gap: SPACING.md,
+  },
+  connectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: SPACING.md,
+  },
+  connectionIconWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: RADIUS.lg,
+    backgroundColor: `${NEURAL.primary}14`,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  connectionMeta: {
+    flex: 1,
+    gap: 2,
+  },
+  connectionTitle: {
+    fontSize: FONT_SIZE.base,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: NEURAL.onSurface,
+  },
+  connectionBody: {
+    fontSize: FONT_SIZE.sm,
+    color: NEURAL.onSurfaceVariant,
+    lineHeight: 18,
+  },
+  connectionEndpointRow: {
+    gap: 4,
+    paddingTop: SPACING.sm,
+    borderTopWidth: 1,
+    borderTopColor: `${NEURAL.outlineVariant}50`,
+  },
+  connectionEndpointLabel: {
+    fontSize: FONT_SIZE.xs,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: NEURAL.onSurfaceVariant,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  connectionEndpointValue: {
+    fontSize: FONT_SIZE.sm,
+    color: NEURAL.onSurface,
+    fontWeight: FONT_WEIGHT.medium,
   },
 
   connStatus: { fontSize: FONT_SIZE.sm, fontWeight: FONT_WEIGHT.semibold, marginTop: SPACING.sm, textAlign: 'center' },

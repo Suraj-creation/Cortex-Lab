@@ -80,7 +80,7 @@ const styles = StyleSheet.create({
     zIndex: 40,
     justifyContent: 'center',
     padding: SPACING.lg,
-    backgroundColor: 'rgba(6,14,32,0.9)',
+    backgroundColor: 'rgba(15, 23, 42, 0.5)',
   },
   card: {
     gap: SPACING.lg,

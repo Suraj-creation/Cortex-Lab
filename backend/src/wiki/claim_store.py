@@ -164,6 +164,15 @@ class ClaimStore:
         with self._lock:
             return self._claims.get(claim_id)
 
+    def list_claims(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            claims = sorted(
+                self._claims.values(),
+                key=lambda claim: claim.updated_at or claim.created_at,
+                reverse=True,
+            )
+            return [claim.to_dict() for claim in claims[:limit]]
+
     def flag_contradiction(self, claim_id: str, contradicting_claim_id: str) -> None:
         with self._lock:
             claim = self._claims.get(claim_id)

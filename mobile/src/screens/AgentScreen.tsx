@@ -1,574 +1,933 @@
 /**
- * AgentScreen — Neural Dark autonomous agent operations.
- * Includes session control, query streaming, steering, and live event feed.
+ * AgentScreen — Cortex Aurora Autonomous Agent Chat
+ * Full agent chat with tier classification, steering, tool execution, sessions
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
   View,
   Text,
   ScrollView,
-  StyleSheet,
   TouchableOpacity,
-  ActivityIndicator,
+  StyleSheet,
+  FlatList,
+  KeyboardAvoidingView,
   Platform,
+  TextInput as RNTextInput,
+  Alert,
 } from 'react-native';
-import { NEURAL, SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT } from '../theme/colors';
-import { Card } from '../components/ui/Card';
-import { Badge, type BadgeVariant } from '../components/ui/Badge';
-import { Button } from '../components/ui/Button';
-import { TextInput } from '../components/ui/TextInput';
-import { NeuralPulse } from '../components/ui/NeuralPulse';
+import { LinearGradient } from 'expo-linear-gradient';
+import { SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT, SHADOWS } from '../theme/colors';
 import { AppIcon } from '../components/ui/AppIcon';
-import type { ApiClient } from '../../shared/core/api';
-import type {
-  AgentConfigInfo,
-  AgentSessionInfo,
-  CortexEvent,
-  TierClassification,
-} from '../../shared/core/types';
+import { Card } from '../components/ui/Card';
+import { Badge } from '../components/ui/Badge';
+import { MetricCard } from '../components/ui/MetricCard';
+import { SectionHeader } from '../components/ui/SectionHeader';
+import { LoadingSpinner } from '../components/ui/LoadingSpinner';
+import { EmptyState } from '../components/ui/EmptyState';
+import { Button } from '../components/ui/Button';
+
+type AgentTab = 'chat' | 'sessions' | 'configs' | 'scheduler';
+
+interface AgentMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  timestamp: number;
+  tier?: any;
+  turnCount?: number;
+  isThinking?: boolean;
+}
 
 interface AgentScreenProps {
-  api: ApiClient;
+  api: any;
 }
 
-const TIER_VARIANT: Record<string, BadgeVariant> = {
-  T0: 'success',
-  T1: 'tertiary',
-  T2: 'primary',
-  T3: 'warning',
-  T4: 'error',
+const TIER_COLORS: Record<string, { bg: string; border: string; text: string; label: string }> = {
+  T0: { bg: '#f1f5f9', border: '#e2e8f0', text: '#475569', label: 'T0 · Instant' },
+  T1: { bg: '#eff6ff', border: '#bfdbfe', text: '#1e40af', label: 'T1 · Fast' },
+  T2: { bg: '#eef2ff', border: '#c7d2fe', text: '#4338ca', label: 'T2 · Standard' },
+  T3: { bg: '#f5f3ff', border: '#ddd6fe', text: '#5b21b6', label: 'T3 · Deep' },
+  T4: { bg: '#fdf4ff', border: '#f5d0fe', text: '#86198f', label: 'T4 · Research' },
 };
 
-function formatIsoTime(iso: string | undefined): string {
-  if (!iso) return 'now';
-  const ts = Date.parse(iso);
-  if (Number.isNaN(ts)) return iso;
-  const delta = Date.now() - ts;
-  if (delta < 8000) return 'just now';
-  if (delta < 60000) return `${Math.round(delta / 1000)}s ago`;
-  if (delta < 3600000) return `${Math.round(delta / 60000)}m ago`;
-  return `${Math.round(delta / 3600000)}h ago`;
-}
-
-function safeString(v: unknown): string {
-  return typeof v === 'string' ? v : '';
-}
-
-function extractTier(event: CortexEvent): TierClassification | null {
-  if (event.type !== 'tier_selected') return null;
-  const data = event.data;
-  const tier = safeString(data.tier);
-  if (!tier) return null;
-  return {
-    tier: tier as TierClassification['tier'],
-    complexity: typeof data.complexity === 'number' ? data.complexity : 0,
-    intent: safeString(data.intent) || 'unknown',
-    entities: Array.isArray(data.entities) ? data.entities.filter((x): x is string => typeof x === 'string') : [],
-    topics: Array.isArray(data.topics) ? data.topics.filter((x): x is string => typeof x === 'string') : [],
-    sub_queries: Array.isArray(data.sub_queries) ? data.sub_queries.filter((x): x is string => typeof x === 'string') : [],
-    confidence: typeof data.confidence === 'number' ? data.confidence : 0,
-    cache_key: safeString(data.cache_key),
-    recommended_agents: Array.isArray(data.recommended_agents)
-      ? data.recommended_agents.filter((x): x is string => typeof x === 'string')
-      : [],
-    estimated_latency_ms: typeof data.estimated_latency_ms === 'number' ? data.estimated_latency_ms : 0,
-  };
-}
-
-function extractAnswer(event: CortexEvent): string {
-  if (event.type !== 'agent_end') return '';
-  return safeString(event.data.answer);
-}
-
-function prependUniqueEvent(prev: CortexEvent[], event: CortexEvent): CortexEvent[] {
-  const identity = event.event_id || `${event.type}:${event.timestamp}:${event.session_id}`;
-  const exists = prev.some((existing) => {
-    const existingIdentity = existing.event_id || `${existing.type}:${existing.timestamp}:${existing.session_id}`;
-    return existingIdentity === identity;
-  });
-  if (exists) {
-    return prev;
-  }
-  return [event, ...prev].slice(0, 80);
-}
-
 export function AgentScreen({ api }: AgentScreenProps) {
-  const [sessions, setSessions] = useState<AgentSessionInfo[]>([]);
-  const [configs, setConfigs] = useState<AgentConfigInfo[]>([]);
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<AgentTab>('chat');
+  const [messages, setMessages] = useState<AgentMessage[]>([]);
+  const [input, setInput] = useState('');
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const [currentTier, setCurrentTier] = useState<string | null>(null);
 
-  const [queryDraft, setQueryDraft] = useState('');
   const [steerDraft, setSteerDraft] = useState('');
   const [followUpDraft, setFollowUpDraft] = useState('');
+  const [controlBusy, setControlBusy] = useState(false);
+  const [agentEvents, setAgentEvents] = useState<any[]>([]);
+  const [eventError, setEventError] = useState('');
 
-  const [answer, setAnswer] = useState('');
-  const [tier, setTier] = useState<TierClassification | null>(null);
-  const [events, setEvents] = useState<CortexEvent[]>([]);
-
+  // Sessions / configs / scheduler state
+  const [sessions, setSessions] = useState<any[]>([]);
+  const [configs, setConfigs] = useState<any[]>([]);
+  const [scheduler, setScheduler] = useState<any>(null);
+  const [cacheStats, setCacheStats] = useState<any>(null);
   const [loading, setLoading] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [streaming, setStreaming] = useState(false);
-  const [error, setError] = useState('');
 
-  const activeSession = useMemo(
-    () => sessions.find((s) => s.session_id === activeSessionId) || null,
-    [sessions, activeSessionId],
-  );
+  const flatRef = useRef<FlatList>(null);
 
-  const loadOverview = useCallback(async () => {
-    setLoading(true);
+  const scrollToEnd = useCallback(() => {
+    setTimeout(() => flatRef.current?.scrollToEnd({ animated: true }), 100);
+  }, []);
+
+  // Create session if needed
+  const ensureSession = useCallback(async (): Promise<string> => {
+    if (sessionId) return sessionId;
     try {
-      const [sessionsResponse, configResponse] = await Promise.all([
-        api.listAgentSessions(),
-        api.listAgentConfigs(),
-      ]);
-      setSessions(sessionsResponse.sessions || []);
-      setConfigs(configResponse.agents || []);
-      setActiveSessionId((prev) => {
-        if (prev && sessionsResponse.sessions.some((s) => s.session_id === prev)) {
-          return prev;
-        }
-        return sessionsResponse.sessions[0]?.session_id || null;
-      });
-      setError('');
+      const res = await api.createAgentSession?.('l1_orchestrator');
+      const sid = res?.session_id;
+      if (sid) setSessionId(sid);
+      return sid || '';
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
+      Alert.alert('Error', 'Failed to create agent session');
+      return '';
     }
+  }, [sessionId, api]);
+
+  // Send query
+  const handleSend = useCallback(async () => {
+    if (!input.trim() || sending) return;
+    const query = input.trim();
+    setInput('');
+    setSending(true);
+
+    const userMsg: AgentMessage = { id: `u-${Date.now()}`, role: 'user', content: query, timestamp: Date.now() };
+    const thinkMsg: AgentMessage = { id: `t-${Date.now()}`, role: 'assistant', content: '', timestamp: Date.now(), isThinking: true };
+    setMessages((prev) => [...prev, userMsg, thinkMsg]);
+    scrollToEnd();
+
+    try {
+      const sid = await ensureSession();
+      const res = await api.agentQuery?.(query, sid);
+      const answer = res?.answer || res?.response || res?.content || '[No response]';
+      const tier = res?.tier_classification || res?.tier || null;
+      const turns = res?.turn_count || res?.turns || 0;
+
+      if (tier?.tier) setCurrentTier(tier.tier);
+
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === thinkMsg.id
+            ? { ...m, content: answer, isThinking: false, tier, turnCount: turns }
+            : m,
+        ),
+      );
+    } catch (e) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === thinkMsg.id
+            ? { ...m, content: `Error: ${e instanceof Error ? e.message : 'Failed to query agent'}`, isThinking: false }
+            : m,
+        ),
+      );
+    } finally {
+      setSending(false);
+      scrollToEnd();
+    }
+  }, [input, sending, ensureSession, api, scrollToEnd]);
+
+  // Load sessions/configs/scheduler
+  const loadSessions = useCallback(async () => {
+    try {
+      const res = await api.listAgentSessions?.();
+      setSessions(res?.sessions || []);
+    } catch {}
+  }, [api]);
+
+  const loadConfigs = useCallback(async () => {
+    try {
+      const res = await api.listAgentConfigs?.();
+      setConfigs(res?.agents || []);
+    } catch {}
+  }, [api]);
+
+  const loadScheduler = useCallback(async () => {
+    try {
+      const [sched, cache] = await Promise.allSettled([
+        api.getSchedulerStatus?.(),
+        api.getCacheStats?.(),
+      ]);
+      if (sched.status === 'fulfilled') setScheduler(sched.value);
+      if (cache.status === 'fulfilled') setCacheStats(cache.value);
+    } catch {}
   }, [api]);
 
   useEffect(() => {
-    void loadOverview();
-  }, [loadOverview]);
+    if (activeTab === 'sessions') loadSessions();
+    if (activeTab === 'configs') loadConfigs();
+    if (activeTab === 'scheduler') loadScheduler();
+  }, [activeTab, loadSessions, loadConfigs, loadScheduler]);
+
+  const tabs: { key: AgentTab; label: string; icon: string }[] = [
+    { key: 'chat', label: 'Agent Chat', icon: 'robot-outline' },
+    { key: 'sessions', label: 'Sessions', icon: 'format-list-bulleted' },
+    { key: 'configs', label: 'Agents', icon: 'cog-outline' },
+    { key: 'scheduler', label: 'Scheduler', icon: 'clock-outline' },
+  ];
+
+
+  const handleSteer = useCallback(async () => {
+    const text = steerDraft.trim();
+    if (!text || !sessionId) return;
+    setControlBusy(true);
+    try {
+      await api.steerAgent?.(sessionId, text);
+      setSteerDraft('');
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `sys-steer-${Date.now()}`,
+          role: 'system',
+          content: `Steering queued: ${text}`,
+          timestamp: Date.now(),
+        },
+      ]);
+    } catch (e) {
+      Alert.alert('Steering Failed', e instanceof Error ? e.message : 'Unable to queue steering instruction.');
+    }
+    setControlBusy(false);
+  }, [api, sessionId, steerDraft]);
+
+  const handleFollowUp = useCallback(async () => {
+    const text = followUpDraft.trim();
+    if (!text || !sessionId) return;
+    setControlBusy(true);
+    try {
+      await api.followUpAgent?.(sessionId, text);
+      setFollowUpDraft('');
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `sys-follow-${Date.now()}`,
+          role: 'system',
+          content: `Follow-up queued: ${text}`,
+          timestamp: Date.now(),
+        },
+      ]);
+    } catch (e) {
+      Alert.alert('Follow-up Failed', e instanceof Error ? e.message : 'Unable to queue follow-up message.');
+    }
+    setControlBusy(false);
+  }, [api, followUpDraft, sessionId]);
+
+  const handleAbort = useCallback(async () => {
+    if (!sessionId) return;
+    setControlBusy(true);
+    try {
+      await api.abortAgent?.(sessionId);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `sys-abort-${Date.now()}`,
+          role: 'system',
+          content: 'Abort signal sent to active session.',
+          timestamp: Date.now(),
+        },
+      ]);
+    } catch (e) {
+      Alert.alert('Abort Failed', e instanceof Error ? e.message : 'Unable to abort current run.');
+    }
+    setControlBusy(false);
+  }, [api, sessionId]);
+
+  const renderTierBadge = (tier: any) => {
+    if (!tier) return null;
+    const tierKey = typeof tier === 'string' ? tier : tier.tier || 'T2';
+    const cfg = TIER_COLORS[tierKey] || TIER_COLORS.T2;
+    return (
+      <View style={[styles.tierBadge, { backgroundColor: cfg.bg, borderColor: cfg.border }]}>
+        <Text style={[styles.tierText, { color: cfg.text }]}>{cfg.label}</Text>
+      </View>
+    );
+  };
 
   useEffect(() => {
-    if (Platform.OS !== 'web') {
-      return;
-    }
-
-    const controller = api.subscribeAgentEvents({
-      onEvent: (event) => {
-        setEvents((prev) => prependUniqueEvent(prev, event));
+    const controller = api.subscribeAgentEvents?.({
+      onEvent: (event: any) => {
+        setAgentEvents((prev) => [event, ...prev].slice(0, 80));
+        if (event?.type === 'tier_selected' && event?.data?.tier) {
+          setCurrentTier(String(event.data.tier));
+        }
       },
-      onError: (streamError) => {
-        setError(streamError.message);
+      onError: (error: Error) => {
+        setEventError(error.message);
       },
     });
 
     return () => {
-      controller.abort();
+      controller?.abort?.();
     };
   }, [api]);
 
-  const createSession = useCallback(async () => {
-    setBusy(true);
-    try {
-      const created = await api.createAgentSession();
-      await loadOverview();
-      setActiveSessionId(created.session_id);
-      setError('');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, [api, loadOverview]);
+  const toolEvents = agentEvents
+    .filter((event) => String(event?.type || '').startsWith('tool_execution'))
+    .slice(0, 8);
 
-  const closeSession = useCallback(
-    async (sessionId: string) => {
-      setBusy(true);
-      try {
-        await api.closeAgentSession(sessionId);
-        await loadOverview();
-        if (activeSessionId === sessionId) {
-          setActiveSessionId(null);
-        }
-        setError('');
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setBusy(false);
-      }
-    },
-    [activeSessionId, api, loadOverview],
-  );
-
-  const runQuery = useCallback(async () => {
-    const prompt = queryDraft.trim();
-    if (!prompt || busy) return;
-
-    setBusy(true);
-    setStreaming(true);
-    setAnswer('');
-    setEvents([]);
-
-    try {
-      const streamResult = await api.streamAgentQuery(
-        { query: prompt, sessionId: activeSessionId },
-        {
-          onEvent: (event) => {
-            setEvents((prev) => prependUniqueEvent(prev, event));
-
-            const maybeTier = extractTier(event);
-            if (maybeTier) {
-              setTier(maybeTier);
-            }
-
-            const maybeAnswer = extractAnswer(event);
-            if (maybeAnswer) {
-              setAnswer(maybeAnswer);
-            }
-          },
-          onError: (streamError) => {
-            setError(streamError.message);
-          },
-        },
-      );
-
-      if (streamResult.answer) {
-        setAnswer(streamResult.answer);
-      }
-      if (streamResult.sessionId) {
-        setActiveSessionId(streamResult.sessionId);
-      }
-      setQueryDraft('');
-      setError('');
-    } catch {
-      try {
-        const fallback = await api.agentQuery(prompt, activeSessionId);
-        setAnswer(fallback.answer);
-        setTier(fallback.tier);
-        if (fallback.session_id) {
-          setActiveSessionId(fallback.session_id);
-        }
-        setQueryDraft('');
-        setError('');
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      }
-    } finally {
-      setStreaming(false);
-      setBusy(false);
-      await loadOverview();
-    }
-  }, [activeSessionId, api, busy, loadOverview, queryDraft]);
-
-  const runSteer = useCallback(async () => {
-    const text = steerDraft.trim();
-    if (!activeSessionId || !text || busy) return;
-    setBusy(true);
-    try {
-      await api.steerAgent(activeSessionId, text);
-      setSteerDraft('');
-      await loadOverview();
-      setError('');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, [activeSessionId, api, busy, loadOverview, steerDraft]);
-
-  const runFollowUp = useCallback(async () => {
-    const text = followUpDraft.trim();
-    if (!activeSessionId || !text || busy) return;
-    setBusy(true);
-    try {
-      await api.followUpAgent(activeSessionId, text);
-      setFollowUpDraft('');
-      await loadOverview();
-      setError('');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, [activeSessionId, api, busy, followUpDraft, loadOverview]);
-
-  const runAbort = useCallback(async () => {
-    if (!activeSessionId || busy) return;
-    setBusy(true);
-    try {
-      await api.abortAgent(activeSessionId);
-      await loadOverview();
-      setError('');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-      setStreaming(false);
-    }
-  }, [activeSessionId, api, busy, loadOverview]);
+  const recentEvents = agentEvents.slice(0, 10);
 
   return (
-    <View style={s.container}>
-      <ScrollView contentContainerStyle={s.scroll} showsVerticalScrollIndicator={false}>
-        <View style={s.header}>
-          <View>
-            <Text style={s.title}>Agent Ops</Text>
-            <Text style={s.subtitle}>Autonomous sessions, steering, and streaming traces</Text>
-          </View>
-          <View style={s.headerStatus}>
-            {streaming ? <NeuralPulse active size={6} color={NEURAL.tertiary} /> : null}
-            <Badge label={streaming ? 'Streaming' : 'Idle'} variant={streaming ? 'success' : 'ghost'} small dot={streaming} />
-          </View>
-        </View>
+    <View style={styles.container}>
+      {/* Tab bar */}
+      <View style={styles.tabBar}>
+        {tabs.map((tab) => (
+          <TouchableOpacity
+            key={tab.key}
+            style={[styles.tab, activeTab === tab.key && styles.tabActive]}
+            onPress={() => setActiveTab(tab.key)}
+            activeOpacity={0.7}
+          >
+            <AppIcon name={tab.icon as any} size={14} color={activeTab === tab.key ? '#6366f1' : '#94a3b8'} />
+            <Text style={[styles.tabLabel, activeTab === tab.key && styles.tabLabelActive]}>
+              {tab.label}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
 
-        {error ? (
-          <Card variant="outlined" style={s.errorCard}>
-            <Text style={s.errorText}>{error}</Text>
-          </Card>
-        ) : null}
-
-        <Card variant="outlined" style={s.card}>
-          <View style={s.cardHeader}>
-            <Text style={s.cardTitle}>Session Control</Text>
-            <View style={s.rowBtns}>
-              <Button label="Refresh" variant="ghost" size="xs" onPress={() => void loadOverview()} disabled={busy || loading} />
-              <Button label="New Session" size="xs" onPress={() => void createSession()} disabled={busy} />
+      {/* CHAT TAB */}
+      {activeTab === 'chat' && (
+        <View style={styles.chatContainer}>
+          {/* Session + tier info */}
+          {sessionId && (
+            <View style={styles.sessionBar}>
+              <Text style={styles.sessionId}>Session: {sessionId.slice(0, 12)}...</Text>
+              {currentTier && renderTierBadge(currentTier)}
             </View>
-          </View>
+          )}
 
-          <View style={s.badgeRow}>
-            <Badge label={`Sessions: ${sessions.length}`} variant="info" small />
-            <Badge label={`Agents: ${configs.length}`} variant="secondary" small />
-            {activeSessionId ? <Badge label={`Active: ${activeSessionId.slice(0, 8)}`} variant="primary" small /> : null}
-          </View>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.controlPanelsRow}>
+            <Card variant="outlined" padding="md" style={styles.controlPanel}>
+              <SectionHeader title="Steering" />
+              {sessionId ? (
+                <>
+                  <RNTextInput
+                    style={styles.controlInput}
+                    placeholder="Steer the agent (priority, style, constraints)"
+                    placeholderTextColor="#94a3b8"
+                    value={steerDraft}
+                    onChangeText={setSteerDraft}
+                    editable={!controlBusy}
+                  />
+                  <Button
+                    label="Queue Steering"
+                    size="xs"
+                    onPress={handleSteer}
+                    loading={controlBusy}
+                    disabled={!steerDraft.trim()}
+                    style={styles.controlAction}
+                  />
 
-          {loading ? (
-            <ActivityIndicator color={NEURAL.primary} />
-          ) : sessions.length > 0 ? (
-            <View style={s.sessionList}>
-              {sessions.slice(0, 6).map((session) => {
-                const selected = session.session_id === activeSessionId;
-                return (
-                  <TouchableOpacity
-                    key={session.session_id}
-                    style={[s.sessionRow, selected && s.sessionRowActive]}
-                    onPress={() => setActiveSessionId(session.session_id)}
-                    disabled={busy}
-                    activeOpacity={0.82}
-                  >
-                    <View style={s.sessionInfo}>
-                      <Text style={s.sessionId} numberOfLines={1}>{session.session_id}</Text>
-                      <Text style={s.sessionMeta}>
-                        {session.agent_id} · {session.turn_count} turns · {session.message_count} msgs
-                      </Text>
+                  <RNTextInput
+                    style={styles.controlInput}
+                    placeholder="Queue follow-up message"
+                    placeholderTextColor="#94a3b8"
+                    value={followUpDraft}
+                    onChangeText={setFollowUpDraft}
+                    editable={!controlBusy}
+                  />
+                  <View style={styles.controlActionRow}>
+                    <Button
+                      label="Queue Follow-up"
+                      size="xs"
+                      variant="secondary"
+                      onPress={handleFollowUp}
+                      loading={controlBusy}
+                      disabled={!followUpDraft.trim()}
+                    />
+                    <Button
+                      label="Abort"
+                      size="xs"
+                      variant="error"
+                      onPress={handleAbort}
+                      loading={controlBusy}
+                    />
+                  </View>
+                </>
+              ) : (
+                <Text style={styles.controlHint}>Start a chat turn to create a session and unlock steering controls.</Text>
+              )}
+            </Card>
+
+            <Card variant="outlined" padding="md" style={styles.controlPanel}>
+              <SectionHeader title="Tool Activity" />
+              {toolEvents.length === 0 ? (
+                <Text style={styles.controlHint}>No tool executions captured yet.</Text>
+              ) : (
+                toolEvents.map((event, index) => (
+                  <View key={index} style={styles.eventRow}>
+                    <View style={styles.eventHead}>
+                      <Badge label={String(event.type || 'tool_execution')} variant="violet" size="sm" />
+                      <Text style={styles.eventTime}>{new Date(String(event.timestamp || Date.now())).toLocaleTimeString()}</Text>
                     </View>
-                    <Badge label={session.is_running ? 'Running' : 'Idle'} variant={session.is_running ? 'success' : 'ghost'} small />
-                  </TouchableOpacity>
+                    <Text style={styles.eventDetail} numberOfLines={2}>
+                      {JSON.stringify(event.data || {}).slice(0, 180)}
+                    </Text>
+                  </View>
+                ))
+              )}
+            </Card>
+
+            <Card variant="outlined" padding="md" style={styles.controlPanel}>
+              <SectionHeader title="Event Feed" />
+              {eventError ? <Badge label={eventError} variant="error" size="sm" /> : null}
+              {recentEvents.length === 0 ? (
+                <Text style={styles.controlHint}>Live runtime events will appear while the agent is active.</Text>
+              ) : (
+                recentEvents.map((event, index) => (
+                  <View key={index} style={styles.eventRow}>
+                    <View style={styles.eventHead}>
+                      <Badge label={String(event.type || 'event')} variant="primary" size="sm" />
+                      <Text style={styles.eventTime}>{new Date(String(event.timestamp || Date.now())).toLocaleTimeString()}</Text>
+                    </View>
+                    <Text style={styles.eventDetail} numberOfLines={2}>
+                      {JSON.stringify(event.data || {}).slice(0, 180)}
+                    </Text>
+                  </View>
+                ))
+              )}
+            </Card>
+          </ScrollView>
+
+          {/* Messages */}
+          <FlatList
+            ref={flatRef}
+            data={messages}
+            keyExtractor={(m) => m.id}
+            contentContainerStyle={styles.msgList}
+            showsVerticalScrollIndicator={false}
+            renderItem={({ item }) => {
+              if (item.role === 'user') {
+                return (
+                  <View style={styles.userMsgRow}>
+                    <LinearGradient colors={['#6366f1', '#8b5cf6']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.userBubble}>
+                      <Text style={styles.userMsgText}>{item.content}</Text>
+                    </LinearGradient>
+                  </View>
                 );
-              })}
-            </View>
-          ) : (
-            <Text style={s.empty}>No active sessions yet.</Text>
-          )}
-        </Card>
-
-        <Card variant="outlined" style={s.card}>
-          <Text style={s.cardTitle}>Agent Query</Text>
-          <TextInput
-            placeholder="Ask the orchestrator a complex query..."
-            value={queryDraft}
-            onChangeText={setQueryDraft}
-            multiline
-            style={s.queryInput}
-          />
-          <View style={s.rowBtns}>
-            <Button
-              label={streaming ? 'Streaming…' : 'Run Query'}
-              onPress={() => void runQuery()}
-              loading={streaming}
-              disabled={busy || !queryDraft.trim()}
-              size="sm"
-            />
-            <Button
-              label="Abort"
-              variant="error"
-              size="sm"
-              onPress={() => void runAbort()}
-              disabled={busy || !activeSessionId}
-            />
-          </View>
-        </Card>
-
-        {tier ? (
-          <Card variant="elevated" style={s.card} leftAccent leftAccentColor={NEURAL.secondary}>
-            <View style={s.cardHeader}>
-              <Text style={s.cardTitle}>Tier Routing</Text>
-              <Badge label={tier.tier} variant={TIER_VARIANT[tier.tier] || 'primary'} />
-            </View>
-            <Text style={s.bodyText}>Intent: {tier.intent}</Text>
-            <Text style={s.bodyText}>Complexity: {tier.complexity.toFixed(2)} · Confidence: {Math.round(tier.confidence * 100)}%</Text>
-            <View style={s.badgeRow}>
-              {(tier.recommended_agents || []).slice(0, 4).map((agentId) => (
-                <Badge key={agentId} label={agentId} variant="tertiary" small />
-              ))}
-            </View>
-          </Card>
-        ) : null}
-
-        {answer ? (
-          <Card variant="elevated" style={s.card} leftAccent leftAccentColor={NEURAL.tertiary}>
-            <Text style={s.answerLabel}>Agent Answer</Text>
-            <Text style={s.answerText}>{answer}</Text>
-          </Card>
-        ) : null}
-
-        <Card variant="outlined" style={s.card}>
-          <Text style={s.cardTitle}>Steering Queue</Text>
-          <TextInput
-            placeholder="Steering instruction for current session"
-            value={steerDraft}
-            onChangeText={setSteerDraft}
-            multiline
-            style={s.queryInput}
-          />
-          <Button
-            label="Inject Steering"
-            size="sm"
-            variant="secondary"
-            onPress={() => void runSteer()}
-            disabled={busy || !activeSessionId || !steerDraft.trim()}
-          />
-
-          <TextInput
-            placeholder="Follow-up to run when idle"
-            value={followUpDraft}
-            onChangeText={setFollowUpDraft}
-            multiline
-            style={s.followInput}
-          />
-          <Button
-            label="Queue Follow-Up"
-            size="sm"
-            variant="outline"
-            onPress={() => void runFollowUp()}
-            disabled={busy || !activeSessionId || !followUpDraft.trim()}
-          />
-
-          {activeSession ? (
-            <View style={s.queueState}>
-              <Text style={s.queueTitle}>Current Queue</Text>
-              <Text style={s.queueText} numberOfLines={2}>
-                Steer: {activeSession.steering.steering.length} · Follow-up: {activeSession.steering.followUp.length}
-              </Text>
-              <Button
-                label="Close Session"
-                size="xs"
-                variant="ghost"
-                onPress={() => void closeSession(activeSession.session_id)}
-                disabled={busy}
-              />
-            </View>
-          ) : null}
-        </Card>
-
-        <Card variant="outlined" style={s.card}>
-          <View style={s.cardHeader}>
-            <Text style={s.cardTitle}>Event Feed</Text>
-            <Badge label={`${events.length} events`} variant="info" small />
-          </View>
-          {events.length > 0 ? (
-            events.slice(0, 14).map((event, index) => (
-              <View key={`${event.type}-${event.timestamp}-${index}`} style={s.eventRow}>
-                <AppIcon name="timeline-clock-outline" size={16} color={NEURAL.onSurfaceVariant} style={s.eventIcon} />
-                <View style={s.eventBody}>
-                  <Text style={s.eventType}>{event.type}</Text>
-                  <Text style={s.eventMeta}>
-                    {event.agent_id || 'agent'} · {formatIsoTime(event.timestamp)}
-                  </Text>
+              }
+              if (item.role === 'system') {
+                return (
+                  <View style={styles.systemMsgRow}>
+                    <Badge label="System" variant="info" size="sm" />
+                    <Text style={styles.systemMsgText}>{item.content}</Text>
+                  </View>
+                );
+              }
+              return (
+                <View style={styles.assistantMsgRow}>
+                  <View style={styles.agentAvatar}>
+                    <AppIcon name="robot-outline" size={14} color="#6366f1" />
+                  </View>
+                  <View style={styles.assistantBubble}>
+                    {item.isThinking ? (
+                      <View style={styles.thinkingRow}>
+                        <LoadingSpinner size={16} />
+                        <Text style={styles.thinkingText}>Agent processing...</Text>
+                      </View>
+                    ) : (
+                      <>
+                        <Text style={styles.assistantMsgText}>{item.content}</Text>
+                        {(item.tier || item.turnCount) && (
+                          <View style={styles.msgMeta}>
+                            {item.tier && renderTierBadge(item.tier)}
+                            {item.turnCount ? (
+                              <Text style={styles.turnCount}>{item.turnCount} turn{item.turnCount !== 1 ? 's' : ''}</Text>
+                            ) : null}
+                          </View>
+                        )}
+                      </>
+                    )}
+                  </View>
                 </View>
-              </View>
-            ))
+              );
+            }}
+            ListEmptyComponent={
+              <EmptyState
+                icon="robot-outline"
+                title="Cortex Autonomous Agent"
+                message="Ask anything. The agent classifies queries (T0-T4), selects specialist agents, retrieves evidence, and synthesizes grounded answers."
+              />
+            }
+          />
+
+          {/* Input */}
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={16}>
+            <View style={styles.inputBar}>
+              <RNTextInput
+                style={styles.chatInput}
+                placeholder="Ask Cortex Agent..."
+                placeholderTextColor="#94a3b8"
+                value={input}
+                onChangeText={setInput}
+                onSubmitEditing={handleSend}
+                editable={!sending}
+                selectionColor="#6366f1"
+              />
+              <TouchableOpacity
+                onPress={handleSend}
+                disabled={!input.trim() || sending}
+                style={[styles.sendBtn, (!input.trim() || sending) && { opacity: 0.4 }]}
+              >
+                <LinearGradient colors={['#6366f1', '#4f46e5']} style={styles.sendBtnGrad}>
+                  <AppIcon name="arrow-up" size={16} color="#ffffff" />
+                </LinearGradient>
+              </TouchableOpacity>
+            </View>
+          </KeyboardAvoidingView>
+        </View>
+      )}
+
+      {/* SESSIONS TAB */}
+      {activeTab === 'sessions' && (
+        <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
+          <SectionHeader
+            title="Agent Sessions"
+            subtitle={`${sessions.length} sessions`}
+            action={{ label: 'Refresh', onPress: loadSessions }}
+          />
+          {sessions.length === 0 ? (
+            <EmptyState icon="format-list-bulleted" title="No Sessions" message="Start a conversation in the Agent Chat to create a session." />
           ) : (
-            <Text style={s.empty}>No events yet. Run a query to populate live traces.</Text>
+            sessions.map((s, i) => (
+              <Card key={s.session_id || i} variant="default" padding="md" style={styles.sessionCard}>
+                <View style={styles.sessionHeader}>
+                  <Text style={styles.sessionIdText} numberOfLines={1}>{s.session_id}</Text>
+                  <Badge label={s.status || 'active'} variant={s.status === 'active' ? 'success' : 'default'} size="sm" />
+                </View>
+                <Text style={styles.sessionAgent}>{s.agent_id || 'l1_orchestrator'}</Text>
+                {s.created_at && <Text style={styles.sessionTime}>{new Date(s.created_at).toLocaleString()}</Text>}
+              </Card>
+            ))
           )}
-        </Card>
-      </ScrollView>
+        </ScrollView>
+      )}
+
+      {/* CONFIGS TAB */}
+      {activeTab === 'configs' && (
+        <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
+          <SectionHeader title="Registered Agents" subtitle={`${configs.length} agents`} action={{ label: 'Refresh', onPress: loadConfigs }} />
+          {configs.length === 0 ? (
+            <EmptyState icon="cog-outline" title="No Agent Configs" message="Agent configurations will appear when loaded from the backend." />
+          ) : (
+            configs.map((cfg, i) => (
+              <Card key={cfg.agent_id || i} variant="default" padding="md" style={styles.configCard}>
+                <View style={styles.configHeader}>
+                  <AppIcon name="robot-outline" size={16} color="#6366f1" />
+                  <Text style={styles.configId}>{cfg.agent_id}</Text>
+                </View>
+                {cfg.tools && (
+                  <View style={styles.toolChips}>
+                    {(cfg.tools || []).slice(0, 6).map((t: any, j: number) => (
+                      <Badge key={j} label={typeof t === 'string' ? t : t.name || `tool-${j}`} variant="primary" size="sm" />
+                    ))}
+                    {cfg.tools.length > 6 && <Badge label={`+${cfg.tools.length - 6}`} variant="default" size="sm" />}
+                  </View>
+                )}
+                <View style={styles.configMeta}>
+                  {cfg.max_turns && <Text style={styles.configMetaText}>Max turns: {cfg.max_turns}</Text>}
+                  {cfg.context_window && <Text style={styles.configMetaText}>Context: {cfg.context_window}</Text>}
+                </View>
+              </Card>
+            ))
+          )}
+        </ScrollView>
+      )}
+
+      {/* SCHEDULER TAB */}
+      {activeTab === 'scheduler' && (
+        <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
+          <SectionHeader title="Agent Scheduler" action={{ label: 'Refresh', onPress: loadScheduler }} />
+
+          <View style={styles.metricsGrid}>
+            <MetricCard
+              label="Status"
+              value={scheduler?.running ? 'Running' : 'Stopped'}
+              tone={scheduler?.running ? 'emerald' : 'rose'}
+              compact
+              style={styles.metricHalf}
+            />
+            <MetricCard
+              label="Cache Hit Rate"
+              value={cacheStats?.hit_rate ? `${(cacheStats.hit_rate * 100).toFixed(1)}%` : 'N/A'}
+              tone="indigo"
+              compact
+              style={styles.metricHalf}
+            />
+          </View>
+
+          {scheduler?.tasks && Object.keys(scheduler.tasks).length > 0 ? (
+            <Card variant="outlined" padding="lg">
+              <SectionHeader title="Scheduled Tasks" />
+              {Object.entries(scheduler.tasks).map(([taskId, task]: [string, any]) => (
+                <View key={taskId} style={styles.schedTask}>
+                  <View style={styles.schedTaskHeader}>
+                    <Text style={styles.schedTaskId}>{taskId}</Text>
+                    <Badge
+                      label={task.enabled ? 'Enabled' : 'Disabled'}
+                      variant={task.enabled ? 'success' : 'default'}
+                      size="sm"
+                    />
+                  </View>
+                  <View style={styles.schedTaskMeta}>
+                    <Text style={styles.schedMetaText}>Interval: {task.interval_seconds}s</Text>
+                    <Text style={styles.schedMetaText}>Runs: {task.run_count}</Text>
+                    <Text style={styles.schedMetaText}>Errors: {task.error_count}</Text>
+                  </View>
+                </View>
+              ))}
+            </Card>
+          ) : (
+            <EmptyState icon="clock-outline" title="No Scheduled Tasks" message="Scheduled agent tasks will appear here." />
+          )}
+        </ScrollView>
+      )}
     </View>
   );
 }
 
-const s = StyleSheet.create({
-  container: { flex: 1, backgroundColor: NEURAL.background },
-  scroll: { paddingBottom: SPACING['5xl'] },
-  header: {
-    paddingHorizontal: SPACING.lg,
-    paddingTop: SPACING.lg,
-    paddingBottom: SPACING.md,
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#f8fafc' },
+
+  // Tab bar
+  tabBar: {
     flexDirection: 'row',
+    backgroundColor: '#ffffff',
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.xs,
+    gap: SPACING.xs,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  tab: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    paddingVertical: SPACING.sm,
+    borderRadius: RADIUS.lg,
+  },
+  tabActive: {
+    backgroundColor: '#eef2ff',
+  },
+  tabLabel: {
+    fontSize: 11,
+    fontWeight: FONT_WEIGHT.medium,
+    color: '#94a3b8',
+  },
+  tabLabelActive: {
+    color: '#6366f1',
+    fontWeight: FONT_WEIGHT.semibold,
+  },
+
+  // Chat
+  chatContainer: { flex: 1 },
+  sessionBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'space-between',
-    alignItems: 'flex-start',
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: SPACING.sm,
+    backgroundColor: '#fefce8',
+    borderBottomWidth: 1,
+    borderBottomColor: '#fef08a',
+  },
+  controlPanelsRow: {
+    paddingHorizontal: SPACING.lg,
+    paddingTop: SPACING.md,
     gap: SPACING.sm,
   },
-  title: { fontSize: FONT_SIZE['2xl'], fontWeight: FONT_WEIGHT.bold, color: NEURAL.onSurface },
-  subtitle: { marginTop: 4, fontSize: FONT_SIZE.sm, color: NEURAL.onSurfaceVariant },
-  headerStatus: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-
-  card: { marginHorizontal: SPACING.lg, marginBottom: SPACING.md, gap: SPACING.sm },
-  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: SPACING.sm },
-  cardTitle: { fontSize: FONT_SIZE.base, fontWeight: FONT_WEIGHT.bold, color: NEURAL.onSurface },
-
-  badgeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING.xs },
-  rowBtns: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING.xs },
-
-  sessionList: { gap: SPACING.xs },
-  sessionRow: {
-    borderRadius: RADIUS.md,
+  controlPanel: {
+    width: 320,
+  },
+  controlInput: {
+    backgroundColor: '#f8fafc',
     borderWidth: 1,
-    borderColor: `${NEURAL.outlineVariant}70`,
-    backgroundColor: NEURAL.surfaceContainerLow,
-    padding: SPACING.sm,
+    borderColor: '#e2e8f0',
+    borderRadius: RADIUS.lg,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    fontSize: FONT_SIZE.sm,
+    color: '#0f172a',
+    marginBottom: SPACING.xs,
+  },
+  controlAction: {
+    alignSelf: 'flex-start',
+    marginBottom: SPACING.sm,
+  },
+  controlActionRow: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+    marginTop: SPACING.xs,
+  },
+  controlHint: {
+    fontSize: FONT_SIZE.xs,
+    color: '#94a3b8',
+    lineHeight: 16,
+  },
+  eventRow: {
+    paddingVertical: SPACING.xs,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f8fafc',
+    gap: 4,
+  },
+  eventHead: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  eventTime: {
+    fontSize: 10,
+    color: '#94a3b8',
+  },
+  eventDetail: {
+    fontSize: 10,
+    color: '#475569',
+    lineHeight: 14,
+  },
+  sessionId: {
+    fontSize: 10,
+    color: '#92400e',
+    fontFamily: 'monospace',
+    fontWeight: FONT_WEIGHT.medium,
+  },
+  tierBadge: {
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  tierText: {
+    fontSize: 10,
+    fontWeight: FONT_WEIGHT.bold,
+  },
+  msgList: {
+    padding: SPACING.lg,
+    paddingBottom: SPACING['3xl'],
+    gap: SPACING.sm,
+  },
+  userMsgRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+  },
+  systemMsgRow: {
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xs,
+    backgroundColor: '#f8fafc',
+    borderRadius: RADIUS.full,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  systemMsgText: {
+    fontSize: FONT_SIZE.xs,
+    color: '#475569',
+    maxWidth: 260,
+  },
+  userBubble: {
+    maxWidth: '80%',
+    borderRadius: RADIUS.xl,
+    borderBottomRightRadius: RADIUS.sm,
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: SPACING.md,
+    ...SHADOWS.md,
+  },
+  userMsgText: {
+    fontSize: FONT_SIZE.base,
+    color: '#ffffff',
+    lineHeight: 20,
+  },
+  assistantMsgRow: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+  },
+  agentAvatar: {
+    width: 28,
+    height: 28,
+    borderRadius: RADIUS.md,
+    backgroundColor: '#eef2ff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 2,
+  },
+  assistantBubble: {
+    flex: 1,
+    maxWidth: '85%',
+    backgroundColor: '#ffffff',
+    borderRadius: RADIUS.xl,
+    borderTopLeftRadius: RADIUS.sm,
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: SPACING.md,
+    borderWidth: 1,
+    borderColor: '#f1f5f9',
+    ...SHADOWS.sm,
+  },
+  assistantMsgText: {
+    fontSize: FONT_SIZE.base,
+    color: '#1e293b',
+    lineHeight: 22,
+  },
+  thinkingRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: SPACING.sm,
+    paddingVertical: SPACING.xs,
   },
-  sessionRowActive: {
-    borderColor: `${NEURAL.primary}80`,
-    backgroundColor: `${NEURAL.primary}18`,
+  thinkingText: {
+    fontSize: FONT_SIZE.sm,
+    color: '#94a3b8',
   },
-  sessionInfo: { flex: 1, gap: 2 },
-  sessionId: { fontSize: FONT_SIZE.sm, fontWeight: FONT_WEIGHT.semibold, color: NEURAL.onSurface },
-  sessionMeta: { fontSize: FONT_SIZE.xs, color: NEURAL.onSurfaceVariant },
-
-  queryInput: { marginBottom: 2 },
-  followInput: { marginTop: SPACING.sm, marginBottom: 2 },
-
-  answerLabel: {
-    fontSize: FONT_SIZE.xs,
-    fontWeight: FONT_WEIGHT.bold,
-    textTransform: 'uppercase',
-    color: NEURAL.tertiary,
-    letterSpacing: 0.4,
-  },
-  answerText: { fontSize: FONT_SIZE.base, color: NEURAL.onSurface, lineHeight: FONT_SIZE.base * 1.6 },
-  bodyText: { fontSize: FONT_SIZE.sm, color: NEURAL.onSurfaceVariant },
-
-  queueState: {
-    borderTopWidth: 1,
-    borderTopColor: `${NEURAL.outlineVariant}40`,
-    paddingTop: SPACING.sm,
-    gap: SPACING.xs,
-  },
-  queueTitle: { fontSize: FONT_SIZE.sm, color: NEURAL.onSurface, fontWeight: FONT_WEIGHT.semibold },
-  queueText: { fontSize: FONT_SIZE.xs, color: NEURAL.onSurfaceVariant },
-
-  eventRow: {
+  msgMeta: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     gap: SPACING.sm,
-    borderTopWidth: 1,
-    borderTopColor: `${NEURAL.outlineVariant}30`,
+    marginTop: SPACING.sm,
     paddingTop: SPACING.sm,
+    borderTopWidth: 1,
+    borderTopColor: '#f8fafc',
   },
-  eventIcon: { marginTop: 1 },
-  eventBody: { flex: 1 },
-  eventType: { fontSize: FONT_SIZE.sm, color: NEURAL.onSurface, fontWeight: FONT_WEIGHT.medium },
-  eventMeta: { marginTop: 2, fontSize: FONT_SIZE.xs, color: NEURAL.onSurfaceVariant },
+  turnCount: {
+    fontSize: 10,
+    color: '#94a3b8',
+    fontWeight: FONT_WEIGHT.medium,
+  },
 
-  errorCard: { marginHorizontal: SPACING.lg, marginBottom: SPACING.md },
-  errorText: { fontSize: FONT_SIZE.sm, color: NEURAL.error },
-  empty: { fontSize: FONT_SIZE.sm, color: NEURAL.onSurfaceVariant },
+  // Input
+  inputBar: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: SPACING.sm,
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: SPACING.md,
+    backgroundColor: '#ffffff',
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+  },
+  chatInput: {
+    flex: 1,
+    backgroundColor: '#f8fafc',
+    borderRadius: RADIUS.xl,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: SPACING.md,
+    fontSize: FONT_SIZE.base,
+    color: '#0f172a',
+  },
+  sendBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    overflow: 'hidden',
+  },
+  sendBtnGrad: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  // Scrollable tabs
+  scrollView: { flex: 1 },
+  scrollContent: {
+    padding: SPACING.lg,
+    paddingBottom: SPACING['5xl'],
+    gap: SPACING.md,
+  },
+  metricsGrid: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+  },
+  metricHalf: { flex: 1 },
+
+  // Sessions
+  sessionCard: { marginBottom: 0 },
+  sessionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: SPACING.xs,
+  },
+  sessionIdText: {
+    fontSize: FONT_SIZE.sm,
+    color: '#334155',
+    fontFamily: 'monospace',
+    flex: 1,
+    marginRight: SPACING.sm,
+  },
+  sessionAgent: {
+    fontSize: FONT_SIZE.xs,
+    color: '#64748b',
+  },
+  sessionTime: {
+    fontSize: 10,
+    color: '#94a3b8',
+    marginTop: 2,
+  },
+
+  // Configs
+  configCard: { marginBottom: 0 },
+  configHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+    marginBottom: SPACING.sm,
+  },
+  configId: {
+    fontSize: FONT_SIZE.base,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: '#0f172a',
+  },
+  toolChips: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 4,
+    marginBottom: SPACING.sm,
+  },
+  configMeta: {
+    flexDirection: 'row',
+    gap: SPACING.lg,
+  },
+  configMetaText: {
+    fontSize: 10,
+    color: '#94a3b8',
+  },
+
+  // Scheduler
+  schedTask: {
+    paddingVertical: SPACING.md,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f8fafc',
+  },
+  schedTaskHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: SPACING.xs,
+  },
+  schedTaskId: {
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: '#334155',
+    flex: 1,
+  },
+  schedTaskMeta: {
+    flexDirection: 'row',
+    gap: SPACING.md,
+  },
+  schedMetaText: {
+    fontSize: 10,
+    color: '#64748b',
+  },
 });

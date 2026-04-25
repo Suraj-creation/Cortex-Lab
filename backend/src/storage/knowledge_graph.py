@@ -34,6 +34,15 @@ class KnowledgeGraph:
         os.makedirs(data_dir, exist_ok=True)
         self._nx_graph_path = os.path.join(self.data_dir, "knowledge_graph.json")
         self._fallback_graph_path = os.path.join(self.data_dir, "knowledge_graph_fallback.json")
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        backend_root = os.path.abspath(os.path.join(module_dir, "..", ".."))
+        repo_root = os.path.abspath(os.path.join(module_dir, "..", "..", ".."))
+        candidate_dirs = [
+            os.path.abspath(self.data_dir),
+            os.path.join(backend_root, "data", "graph"),
+            os.path.join(repo_root, "data", "graph"),
+        ]
+        self._graph_search_dirs = list(dict.fromkeys(candidate_dirs))
 
         # Inverted name/alias index for O(1) entity lookups (§3.5)
         self._name_index: Dict[str, str] = {}   # lowercase_name -> entity_id
@@ -54,6 +63,9 @@ class KnowledgeGraph:
 
         self._load()
         self._rebuild_name_index()
+
+    def _candidate_graph_paths(self, filename: str) -> List[str]:
+        return [os.path.join(directory, filename) for directory in self._graph_search_dirs]
 
     def add_entity(self, entity: EntityNode):
         """Add or update an entity node."""
@@ -411,11 +423,15 @@ class KnowledgeGraph:
         if self.graph is not None:
             nodes = []
             for nid, data in self.graph.nodes(data=True):
+                memory_ids = data.get("memory_ids", []) or []
                 nodes.append({
                     "id": nid,
                     "label": data.get("canonical_name", nid[:8]),
                     "type": data.get("entity_type", "unknown"),
-                    "memory_count": len(data.get("memory_ids", [])),
+                    "memory_count": len(memory_ids),
+                    "mentions": len(memory_ids),
+                    "firstSeen": data.get("first_seen"),
+                    "lastSeen": data.get("last_seen"),
                 })
             edges = []
             for src, tgt, data in self.graph.edges(data=True):
@@ -426,7 +442,29 @@ class KnowledgeGraph:
                     "weight": data.get("weight", 1.0),
                 })
             return {"nodes": nodes, "edges": edges}
-        return {"nodes": [], "edges": []}
+        nodes = []
+        for nid, data in self._nodes.items():
+            memory_ids = data.get("memory_ids", []) or []
+            nodes.append({
+                "id": nid,
+                "label": data.get("canonical_name", nid[:8]),
+                "type": data.get("entity_type", "unknown"),
+                "memory_count": len(memory_ids),
+                "mentions": len(memory_ids),
+                "firstSeen": data.get("first_seen"),
+                "lastSeen": data.get("last_seen"),
+            })
+
+        edges = []
+        for edge in self._edges:
+            edges.append({
+                "source": edge.get("source_id", ""),
+                "target": edge.get("target_id", ""),
+                "relation": edge.get("relation", "related"),
+                "weight": edge.get("weight", 1.0),
+            })
+
+        return {"nodes": nodes, "edges": edges}
 
     def get_stats(self) -> Dict:
         if self.graph is not None:
@@ -467,9 +505,11 @@ class KnowledgeGraph:
 
     def _load(self):
         if self.graph is not None:
-            if os.path.exists(self._nx_graph_path):
+            for graph_path in self._candidate_graph_paths("knowledge_graph.json"):
+                if not os.path.exists(graph_path):
+                    continue
                 try:
-                    with open(self._nx_graph_path) as f:
+                    with open(graph_path) as f:
                         data = json.load(f)
                     # Force multigraph=False so we always get a plain DiGraph
                     data["multigraph"] = False
@@ -479,15 +519,17 @@ class KnowledgeGraph:
                         self.graph = nx.DiGraph(loaded)
                     else:
                         self.graph = loaded
-                    print(f"  ✓ Knowledge graph loaded ({self.graph.number_of_nodes()} nodes)")
+                    print(f"  ✓ Knowledge graph loaded ({self.graph.number_of_nodes()} nodes) from {graph_path}")
                     return
                 except Exception as e:
-                    print(f"  ⚠ Failed to load graph: {e}")
+                    print(f"  ⚠ Failed to load graph from {graph_path}: {e}")
 
             # Fallback migration path: load snapshot produced by no-NetworkX mode.
-            if os.path.exists(self._fallback_graph_path):
+            for fallback_path in self._candidate_graph_paths("knowledge_graph_fallback.json"):
+                if not os.path.exists(fallback_path):
+                    continue
                 try:
-                    with open(self._fallback_graph_path) as f:
+                    with open(fallback_path) as f:
                         data = json.load(f) or {}
                     nodes = data.get("nodes", {}) or {}
                     edges = data.get("edges", []) or []
@@ -505,27 +547,38 @@ class KnowledgeGraph:
                         attrs.pop("source", None)
                         attrs.pop("target", None)
                         self.graph.add_edge(source, target, **attrs)
-                    print(f"  ✓ Knowledge graph loaded from fallback snapshot ({self.graph.number_of_nodes()} nodes)")
+                    print(
+                        f"  ✓ Knowledge graph loaded from fallback snapshot "
+                        f"({self.graph.number_of_nodes()} nodes) from {fallback_path}"
+                    )
+                    return
                 except Exception as e:
-                    print(f"  ⚠ Failed to load fallback graph snapshot: {e}")
+                    print(f"  ⚠ Failed to load fallback graph snapshot from {fallback_path}: {e}")
             return
 
         # No-NetworkX fallback mode
-        if os.path.exists(self._fallback_graph_path):
+        for fallback_path in self._candidate_graph_paths("knowledge_graph_fallback.json"):
+            if not os.path.exists(fallback_path):
+                continue
             try:
-                with open(self._fallback_graph_path) as f:
+                with open(fallback_path) as f:
                     data = json.load(f) or {}
                 self._nodes = data.get("nodes", {}) or {}
                 self._edges = data.get("edges", []) or []
-                print(f"  ✓ Knowledge graph fallback loaded ({len(self._nodes)} nodes, {len(self._edges)} edges)")
+                print(
+                    f"  ✓ Knowledge graph fallback loaded "
+                    f"({len(self._nodes)} nodes, {len(self._edges)} edges) from {fallback_path}"
+                )
                 return
             except Exception as e:
-                print(f"  ⚠ Failed to load fallback graph: {e}")
+                print(f"  ⚠ Failed to load fallback graph from {fallback_path}: {e}")
 
         # Legacy compatibility: parse NetworkX node-link JSON without NetworkX.
-        if os.path.exists(self._nx_graph_path):
+        for graph_path in self._candidate_graph_paths("knowledge_graph.json"):
+            if not os.path.exists(graph_path):
+                continue
             try:
-                with open(self._nx_graph_path) as f:
+                with open(graph_path) as f:
                     data = json.load(f) or {}
 
                 self._nodes = {}
@@ -552,6 +605,10 @@ class KnowledgeGraph:
                     payload.pop("target", None)
                     self._edges.append(payload)
 
-                print(f"  ✓ Knowledge graph loaded from legacy node-link ({len(self._nodes)} nodes, {len(self._edges)} edges)")
+                print(
+                    f"  ✓ Knowledge graph loaded from legacy node-link "
+                    f"({len(self._nodes)} nodes, {len(self._edges)} edges) from {graph_path}"
+                )
+                return
             except Exception as e:
-                print(f"  ⚠ Failed to parse legacy graph file: {e}")
+                print(f"  ⚠ Failed to parse legacy graph file from {graph_path}: {e}")

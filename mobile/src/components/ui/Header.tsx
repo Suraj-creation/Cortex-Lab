@@ -1,10 +1,10 @@
 /**
- * Header — Neural Dark top bar
- * Stitch Chat Screen: model status, title, hamburger → drawer, gear → settings
+ * Header — Cortex Aurora light top bar
+ * Clean white glass header with subtle shadow, indigo accents
  */
 import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
-import { NEURAL, RADIUS, FONT_SIZE, FONT_WEIGHT, SPACING } from '../../theme/colors';
+import { View, Text, TouchableOpacity, StyleSheet, Platform } from 'react-native';
+import { NEURAL, RADIUS, FONT_SIZE, FONT_WEIGHT, SPACING, SHADOWS } from '../../theme/colors';
 import { NeuralPulse } from './NeuralPulse';
 import { AppIcon } from './AppIcon';
 import type { ModelStatus } from '../../../shared/core/types';
@@ -24,11 +24,10 @@ export function Header({
   onMenuPress,
   onSettingsPress,
 }: HeaderProps) {
-  const isOnline =
-    modelStatus?.status === 'ready' ||
-    modelStatus?.status === 'gemini' ||
-    (modelStatus?.model_loaded ?? false);
   const isLoading = modelStatus?.status === 'loading';
+  const isOnline = Boolean(modelStatus?.status) && modelStatus?.status !== 'offline';
+  const statusLabel = isLoading ? 'Syncing' : isOnline ? 'Connected' : 'Offline';
+  const statusColor = isLoading ? '#6366f1' : isOnline ? '#059669' : '#64748b';
 
   return (
     <View style={styles.container}>
@@ -46,9 +45,14 @@ export function Header({
         </View>
       </TouchableOpacity>
 
-      {/* Center: title + subtitle */}
+      {/* Center: logo + title */}
       <View style={styles.center}>
-        <Text style={styles.title} numberOfLines={1}>{title}</Text>
+        <View style={styles.titleRow}>
+          <View style={styles.logoContainer}>
+            <View style={styles.logoDot} />
+          </View>
+          <Text style={styles.title} numberOfLines={1}>{title}</Text>
+        </View>
         {subtitle ? (
           <Text style={styles.subtitle} numberOfLines={1}>{subtitle}</Text>
         ) : null}
@@ -56,23 +60,30 @@ export function Header({
 
       {/* Right: status + settings */}
       <View style={styles.right}>
-        <View style={styles.statusPill}>
+        <View style={[
+          styles.statusPill,
+          isOnline && !isLoading && styles.statusPillOnline,
+          !isOnline && !isLoading && styles.statusPillOffline,
+        ]}>
           <NeuralPulse
             active={!isLoading}
-            color={isOnline ? NEURAL.tertiary : NEURAL.onSurfaceVariant}
-            size={6}
+            color={isLoading ? '#6366f1' : isOnline ? '#10b981' : '#94a3b8'}
+            size={5}
           />
-          <Text style={[styles.statusText, { color: isOnline ? NEURAL.tertiary : NEURAL.onSurfaceVariant }]}>
-            {isLoading ? 'Loading' : isOnline ? 'Online' : 'Offline'}
+          <Text style={[
+            styles.statusText,
+            { color: statusColor },
+          ]}>
+            {statusLabel}
           </Text>
         </View>
         <TouchableOpacity
-          style={styles.iconButton}
+          style={styles.settingsButton}
           onPress={onSettingsPress}
           activeOpacity={0.7}
           accessibilityLabel="Open settings"
         >
-          <AppIcon name="cog-outline" size={18} color={NEURAL.onSurfaceVariant} style={styles.settingsIcon} />
+          <AppIcon name="cog-outline" size={18} color="#475569" />
         </TouchableOpacity>
       </View>
     </View>
@@ -83,10 +94,12 @@ const styles = StyleSheet.create({
   container: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: NEURAL.surfaceContainerLow,
+    backgroundColor: 'rgba(255, 255, 255, 0.92)',
     paddingHorizontal: SPACING.lg,
     paddingVertical: SPACING.md,
-    borderBottomWidth: 0, // No-line rule — color shift defines edge
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+    ...SHADOWS.sm,
   },
   iconButton: {
     padding: SPACING.sm,
@@ -99,7 +112,7 @@ const styles = StyleSheet.create({
   hamburgerLine: {
     width: 20,
     height: 2,
-    backgroundColor: NEURAL.onSurfaceVariant,
+    backgroundColor: '#334155',
     borderRadius: 1,
   },
   center: {
@@ -107,36 +120,68 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: SPACING.sm,
   },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  logoContainer: {
+    width: 22,
+    height: 22,
+    borderRadius: 8,
+    backgroundColor: '#6366f1',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  logoDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#ffffff',
+  },
   title: {
     fontSize: FONT_SIZE.lg,
     fontWeight: FONT_WEIGHT.bold,
-    color: NEURAL.onSurface,
+    color: '#0f172a',
     letterSpacing: -0.3,
   },
   subtitle: {
     fontSize: FONT_SIZE.xs,
-    color: NEURAL.onSurfaceVariant,
+    color: '#64748b',
     marginTop: 1,
+    fontWeight: FONT_WEIGHT.medium,
   },
   right: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: 6,
   },
   statusPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: NEURAL.surfaceContainerHighest,
+    backgroundColor: '#f1f5f9',
     borderRadius: RADIUS.full,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    gap: 2,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    gap: 4,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  statusPillOnline: {
+    backgroundColor: '#f0fdf4',
+    borderColor: '#bbf7d0',
+  },
+  statusPillOffline: {
+    backgroundColor: '#f8fafc',
+    borderColor: '#e2e8f0',
   },
   statusText: {
     fontSize: FONT_SIZE.xs,
     fontWeight: FONT_WEIGHT.semibold,
   },
-  settingsIcon: {
-    marginVertical: 1,
+  settingsButton: {
+    padding: SPACING.sm,
+    borderRadius: RADIUS.md,
+    backgroundColor: '#f1f5f9',
   },
 });

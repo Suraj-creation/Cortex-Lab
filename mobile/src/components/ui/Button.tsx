@@ -1,7 +1,6 @@
 /**
- * Button — Neural Dark gradient CTA
- * Primary: gradient indigo → primaryDim at 135°
- * Design: "Glass & Gradient Rule" from Cortex Neural Dark
+ * Button — Cortex Aurora gradient CTA
+ * Primary: indigo gradient, light secondary, clean outline/ghost
  */
 import React from 'react';
 import {
@@ -14,7 +13,7 @@ import {
   View,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { NEURAL, RADIUS, FONT_SIZE, FONT_WEIGHT } from '../../theme/colors';
+import { RADIUS, FONT_SIZE, FONT_WEIGHT, SHADOWS } from '../../theme/colors';
 
 export type ButtonVariant = 'primary' | 'secondary' | 'outline' | 'ghost' | 'error' | 'success';
 export type ButtonSize = 'xs' | 'sm' | 'md' | 'lg';
@@ -33,10 +32,10 @@ interface ButtonProps {
 }
 
 const SIZE_CONFIG: Record<ButtonSize, { px: number; py: number; fontSize: number; radius: number }> = {
-  xs: { px: 10, py: 4,  fontSize: FONT_SIZE.xs,   radius: RADIUS.md },
+  xs: { px: 10, py: 5,  fontSize: FONT_SIZE.xs,   radius: RADIUS.md },
   sm: { px: 14, py: 7,  fontSize: FONT_SIZE.sm,   radius: RADIUS.lg },
   md: { px: 18, py: 10, fontSize: FONT_SIZE.base, radius: RADIUS.xl },
-  lg: { px: 24, py: 14, fontSize: FONT_SIZE.lg,   radius: RADIUS.full },
+  lg: { px: 24, py: 14, fontSize: FONT_SIZE.lg,   radius: RADIUS['2xl'] },
 };
 
 export function Button({
@@ -59,13 +58,12 @@ export function Button({
       style={[
         styles.inner,
         { paddingHorizontal: cfg.px, paddingVertical: cfg.py, borderRadius: cfg.radius },
-        !isPrimary && styles.nonGradient,
         !isPrimary && variantStyles[variant],
         (disabled || loading) && styles.disabled,
       ]}
     >
       {loading ? (
-        <ActivityIndicator size="small" color={isPrimary ? NEURAL.onPrimary : NEURAL.primary} />
+        <ActivityIndicator size="small" color={isPrimary ? '#ffffff' : '#6366f1'} />
       ) : (
         <>
           {icon && <View style={styles.iconWrap}>{icon}</View>}
@@ -94,13 +92,14 @@ export function Button({
       >
         {({ pressed }) => (
           <LinearGradient
-            colors={[NEURAL.primary, NEURAL.primaryDim]}
+            colors={['#6366f1', '#4f46e5']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
             style={[
               styles.inner,
               { paddingHorizontal: cfg.px, paddingVertical: cfg.py, borderRadius: cfg.radius },
               pressed && styles.pressed,
+              SHADOWS.glow,
             ]}
           >
             {icon && <View style={styles.iconWrap}>{icon}</View>}
@@ -135,33 +134,32 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderRadius: RADIUS.xl,
   },
-  nonGradient: {},
   label: {
     fontWeight: FONT_WEIGHT.semibold,
-    color: NEURAL.onSurface,
+    color: '#0f172a',
     letterSpacing: 0.2,
   },
   iconWrap: { marginRight: 6 },
   disabled: { opacity: 0.45 },
-  disabledText: { color: NEURAL.onSurfaceVariant },
+  disabledText: { color: '#94a3b8' },
   fullWidth: { width: '100%' },
-  pressed: { opacity: 0.82 },
+  pressed: { opacity: 0.82, transform: [{ scale: 0.98 }] },
 });
 
 const variantStyles: Record<ButtonVariant, ViewStyle> = {
-  primary:   { backgroundColor: NEURAL.primary },
-  secondary: { backgroundColor: NEURAL.surfaceContainerHigh },
-  outline:   { backgroundColor: 'transparent', borderWidth: 1, borderColor: NEURAL.outlineVariant },
+  primary:   { backgroundColor: '#6366f1' },
+  secondary: { backgroundColor: '#f1f5f9', borderWidth: 1, borderColor: '#e2e8f0' },
+  outline:   { backgroundColor: 'transparent', borderWidth: 1, borderColor: '#e2e8f0' },
   ghost:     { backgroundColor: 'transparent' },
-  error:     { backgroundColor: `${NEURAL.error}22`, borderWidth: 1, borderColor: NEURAL.error },
-  success:   { backgroundColor: `${NEURAL.tertiary}22`, borderWidth: 1, borderColor: NEURAL.tertiary },
+  error:     { backgroundColor: '#fff1f2', borderWidth: 1, borderColor: '#fecdd3' },
+  success:   { backgroundColor: '#f0fdf4', borderWidth: 1, borderColor: '#bbf7d0' },
 };
 
 const variantTextStyles: Record<ButtonVariant, TextStyle> = {
   primary:   { color: '#ffffff' },
-  secondary: { color: NEURAL.onSurface },
-  outline:   { color: NEURAL.onSurfaceVariant },
-  ghost:     { color: NEURAL.primary },
-  error:     { color: NEURAL.error },
-  success:   { color: NEURAL.tertiary },
+  secondary: { color: '#334155' },
+  outline:   { color: '#475569' },
+  ghost:     { color: '#6366f1' },
+  error:     { color: '#e11d48' },
+  success:   { color: '#059669' },
 };

@@ -1,6 +1,6 @@
 /**
- * TextInput — Neural Dark command-line input
- * "The Command Line" — surface-container-highest pill, no border, primary glow on focus
+ * TextInput — Cortex Aurora light input
+ * Clean borders, indigo focus ring, clear button support
  */
 import React, { useState } from 'react';
 import {
@@ -10,8 +10,9 @@ import {
   TextInputProps as RNTextInputProps,
   ViewStyle,
   Text,
+  TouchableOpacity,
 } from 'react-native';
-import { NEURAL, RADIUS, FONT_SIZE, FONT_WEIGHT } from '../../theme/colors';
+import { RADIUS, FONT_SIZE, FONT_WEIGHT, SHADOWS } from '../../theme/colors';
 
 interface TextInputProps extends RNTextInputProps {
   label?: string;
@@ -19,6 +20,9 @@ interface TextInputProps extends RNTextInputProps {
   inputStyle?: object;
   pill?: boolean;
   icon?: React.ReactNode;
+  rightIcon?: React.ReactNode;
+  error?: string;
+  onClear?: () => void;
 }
 
 export function TextInput({
@@ -27,7 +31,11 @@ export function TextInput({
   inputStyle,
   pill = false,
   icon,
+  rightIcon,
+  error,
+  onClear,
   multiline,
+  value,
   ...rest
 }: TextInputProps) {
   const [focused, setFocused] = useState(false);
@@ -41,11 +49,13 @@ export function TextInput({
           pill && styles.pill,
           multiline && styles.multiline,
           focused && styles.focused,
+          error ? styles.errorBorder : undefined,
         ]}
       >
         {icon && <View style={styles.icon}>{icon}</View>}
         <RNTextInput
           {...rest}
+          value={value}
           multiline={multiline}
           onFocus={(e) => {
             setFocused(true);
@@ -56,10 +66,18 @@ export function TextInput({
             rest.onBlur?.(e);
           }}
           style={[styles.input, multiline && styles.inputMultiline, inputStyle]}
-          placeholderTextColor={NEURAL.outline}
-          selectionColor={NEURAL.primary}
+          placeholderTextColor="#94a3b8"
+          selectionColor="#6366f1"
         />
+        {onClear && value ? (
+          <TouchableOpacity onPress={onClear} style={styles.clearButton}>
+            <Text style={styles.clearText}>✕</Text>
+          </TouchableOpacity>
+        ) : rightIcon ? (
+          <View style={styles.rightIcon}>{rightIcon}</View>
+        ) : null}
       </View>
+      {error && <Text style={styles.errorText}>{error}</Text>}
     </View>
   );
 }
@@ -68,19 +86,19 @@ const styles = StyleSheet.create({
   wrapper: {},
   label: {
     fontSize: FONT_SIZE.sm,
-    color: NEURAL.onSurfaceVariant,
+    color: '#475569',
     fontWeight: FONT_WEIGHT.medium,
     marginBottom: 6,
   },
   container: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: NEURAL.surfaceContainerHighest,
+    backgroundColor: '#f8fafc',
     borderRadius: RADIUS.xl,
     paddingHorizontal: 14,
     paddingVertical: 10,
     borderWidth: 1,
-    borderColor: NEURAL.outlineVariant,
+    borderColor: '#e2e8f0',
   },
   pill: {
     borderRadius: RADIUS.full,
@@ -90,17 +108,17 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   focused: {
-    borderColor: NEURAL.primary,
-    shadowColor: NEURAL.primary,
-    shadowOpacity: 0.25,
-    shadowRadius: 4,
-    shadowOffset: { width: 0, height: 0 },
-    elevation: 4,
+    borderColor: '#6366f1',
+    backgroundColor: '#ffffff',
+    ...SHADOWS.glow,
+  },
+  errorBorder: {
+    borderColor: '#f43f5e',
   },
   input: {
     flex: 1,
     fontSize: FONT_SIZE.base,
-    color: NEURAL.onSurface,
+    color: '#0f172a',
     padding: 0,
     margin: 0,
   },
@@ -110,5 +128,29 @@ const styles = StyleSheet.create({
   },
   icon: {
     marginRight: 8,
+  },
+  rightIcon: {
+    marginLeft: 8,
+  },
+  clearButton: {
+    marginLeft: 8,
+    padding: 4,
+    backgroundColor: '#e2e8f0',
+    borderRadius: 10,
+    width: 20,
+    height: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  clearText: {
+    fontSize: 10,
+    color: '#64748b',
+    fontWeight: '600',
+  },
+  errorText: {
+    fontSize: FONT_SIZE.xs,
+    color: '#e11d48',
+    marginTop: 4,
+    marginLeft: 4,
   },
 });

@@ -1,14 +1,25 @@
 /**
- * BottomNav — Neural Dark 7-tab navigation
- * Background: surfaceContainer (#0f1930), active: primary with underline
- * No border — color shift creates separation from content
+ * BottomNav — Cortex Aurora 5-tab navigation with "More" overflow
+ * White background, indigo active pill, clean typography
  */
-import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ScrollView } from 'react-native';
-import { NEURAL, FONT_SIZE, FONT_WEIGHT, SPACING } from '../../theme/colors';
+import React, { useCallback, useState } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  Modal,
+  ScrollView,
+  Pressable,
+  Platform,
+} from 'react-native';
+import { NEURAL, FONT_SIZE, FONT_WEIGHT, SPACING, RADIUS, SHADOWS } from '../../theme/colors';
 import { AppIcon, type AppIconName } from './AppIcon';
 
-export type NavKey = 'chat' | 'memories' | 'graph' | 'dashboard' | 'observability' | 'agent' | 'wiki' | 'ambient' | 'documents';
+export type NavKey =
+  | 'chat' | 'memories' | 'graph' | 'dashboard' | 'observability'
+  | 'agent' | 'wiki' | 'ambient' | 'documents'
+  | 'session-forge' | 'chronicle';
 
 interface NavItem {
   key: NavKey;
@@ -22,31 +33,41 @@ interface BottomNavProps {
   onSelect: (key: NavKey) => void;
 }
 
+// Primary launch surfaces + More
+const PRIMARY_KEYS: NavKey[] = ['dashboard', 'chat', 'agent', 'memories'];
+
 export function BottomNav({ items, activeKey, onSelect }: BottomNavProps) {
+  const [moreVisible, setMoreVisible] = useState(false);
+
+  const primaryItems = PRIMARY_KEYS
+    .map((key) => items.find((item) => item.key === key))
+    .filter((item): item is NavItem => Boolean(item));
+  const moreItems = items.filter((i) => !PRIMARY_KEYS.includes(i.key));
+  const isMoreActive = moreItems.some((i) => i.key === activeKey);
+
+  const handleMoreSelect = useCallback((key: NavKey) => {
+    setMoreVisible(false);
+    onSelect(key);
+  }, [onSelect]);
+
   return (
-    <View style={styles.container}>
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.scrollContent}
-        bounces={false}
-      >
-        {items.map((item) => {
+    <>
+      <View style={styles.container}>
+        {primaryItems.map((item) => {
           const isActive = item.key === activeKey;
           return (
             <TouchableOpacity
               key={item.key}
               style={[styles.tab, isActive && styles.tabActive]}
               onPress={() => onSelect(item.key)}
-              activeOpacity={0.75}
+              activeOpacity={0.7}
               accessibilityRole="button"
               accessibilityLabel={item.label}
             >
               <AppIcon
                 name={item.iconName}
-                size={18}
-                color={isActive ? NEURAL.primary : NEURAL.onSurfaceVariant}
-                style={styles.icon}
+                size={20}
+                color={isActive ? '#6366f1' : '#94a3b8'}
               />
               <Text style={[styles.label, isActive && styles.labelActive]}>
                 {item.label}
@@ -55,52 +76,183 @@ export function BottomNav({ items, activeKey, onSelect }: BottomNavProps) {
             </TouchableOpacity>
           );
         })}
-      </ScrollView>
-    </View>
+
+        {/* More button */}
+        <TouchableOpacity
+          style={[styles.tab, isMoreActive && styles.tabActive]}
+          onPress={() => setMoreVisible(true)}
+          activeOpacity={0.7}
+          accessibilityRole="button"
+          accessibilityLabel="More options"
+        >
+          <AppIcon
+            name="dots-horizontal"
+            size={20}
+            color={isMoreActive ? '#6366f1' : '#94a3b8'}
+          />
+          <Text style={[styles.label, isMoreActive && styles.labelActive]}>
+            More
+          </Text>
+          {isMoreActive && <View style={styles.indicator} />}
+        </TouchableOpacity>
+      </View>
+
+      {/* More drawer */}
+      <Modal
+        visible={moreVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setMoreVisible(false)}
+      >
+        <Pressable style={styles.overlay} onPress={() => setMoreVisible(false)}>
+          <Pressable style={styles.moreSheet} onPress={(e) => e.stopPropagation()}>
+            <View style={styles.sheetHandle} />
+            <Text style={styles.sheetTitle}>All Screens</Text>
+            <ScrollView style={styles.moreList} showsVerticalScrollIndicator={false}>
+              {items.map((item) => {
+                const isActive = item.key === activeKey;
+                return (
+                  <TouchableOpacity
+                    key={item.key}
+                    style={[styles.moreItem, isActive && styles.moreItemActive]}
+                    onPress={() => handleMoreSelect(item.key)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={[
+                      styles.moreIconContainer,
+                      isActive && styles.moreIconContainerActive,
+                    ]}>
+                      <AppIcon
+                        name={item.iconName}
+                        size={20}
+                        color={isActive ? '#6366f1' : '#64748b'}
+                      />
+                    </View>
+                    <Text style={[styles.moreLabel, isActive && styles.moreLabelActive]}>
+                      {item.label}
+                    </Text>
+                    {isActive && (
+                      <View style={styles.moreActiveDot} />
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: NEURAL.surfaceContainerLow,
-    paddingBottom: SPACING.sm,
+    flexDirection: 'row',
+    backgroundColor: '#ffffff',
+    paddingBottom: Platform.OS === 'ios' ? 0 : SPACING.sm,
     paddingTop: SPACING.xs,
-  },
-  scrollContent: {
-    paddingHorizontal: SPACING.sm,
-    gap: 2,
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+    ...SHADOWS.sm,
   },
   tab: {
+    flex: 1,
     alignItems: 'center',
-    paddingHorizontal: SPACING.md,
     paddingVertical: SPACING.sm,
-    borderRadius: 12,
-    minWidth: 60,
     position: 'relative',
   },
-  tabActive: {
-    backgroundColor: `${NEURAL.primary}18`,
-  },
-  icon: {
-    marginBottom: 2,
-  },
+  tabActive: {},
   label: {
-    fontSize: FONT_SIZE.xs,
-    color: NEURAL.onSurfaceVariant,
+    fontSize: 10,
+    color: '#94a3b8',
     fontWeight: FONT_WEIGHT.medium,
+    marginTop: 2,
   },
   labelActive: {
-    color: NEURAL.primary,
+    color: '#6366f1',
     fontWeight: FONT_WEIGHT.bold,
   },
   indicator: {
     position: 'absolute',
-    top: 0,
-    left: '20%',
-    right: '20%',
-    height: 2,
-    backgroundColor: NEURAL.primary,
-    borderBottomLeftRadius: 2,
-    borderBottomRightRadius: 2,
+    bottom: 0,
+    left: '25%',
+    right: '25%',
+    height: 2.5,
+    backgroundColor: '#6366f1',
+    borderTopLeftRadius: 2,
+    borderTopRightRadius: 2,
+  },
+
+  // More sheet
+  overlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.3)',
+    justifyContent: 'flex-end',
+  },
+  moreSheet: {
+    backgroundColor: '#ffffff',
+    borderTopLeftRadius: RADIUS['3xl'],
+    borderTopRightRadius: RADIUS['3xl'],
+    paddingTop: SPACING.md,
+    paddingBottom: SPACING['4xl'],
+    maxHeight: '70%',
+    ...SHADOWS.xl,
+  },
+  sheetHandle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#e2e8f0',
+    alignSelf: 'center',
+    marginBottom: SPACING.lg,
+  },
+  sheetTitle: {
+    fontSize: FONT_SIZE.lg,
+    fontWeight: FONT_WEIGHT.bold,
+    color: '#0f172a',
+    paddingHorizontal: SPACING['2xl'],
+    marginBottom: SPACING.lg,
+  },
+  moreList: {
+    paddingHorizontal: SPACING.lg,
+  },
+  moreItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.lg,
+    borderRadius: RADIUS.xl,
+    marginBottom: SPACING.xs,
+  },
+  moreItemActive: {
+    backgroundColor: '#eef2ff',
+  },
+  moreIconContainer: {
+    width: 40,
+    height: 40,
+    borderRadius: RADIUS.lg,
+    backgroundColor: '#f1f5f9',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: SPACING.md,
+  },
+  moreIconContainerActive: {
+    backgroundColor: '#e0e7ff',
+  },
+  moreLabel: {
+    fontSize: FONT_SIZE.md,
+    fontWeight: FONT_WEIGHT.medium,
+    color: '#334155',
+    flex: 1,
+  },
+  moreLabelActive: {
+    color: '#6366f1',
+    fontWeight: FONT_WEIGHT.semibold,
+  },
+  moreActiveDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#6366f1',
   },
 });

@@ -1,338 +1,218 @@
 /**
- * DocumentsScreen — Neural Dark PageIndex Documents
- * Stitch ref: fe0b1a2ad2f44225b54dfb5339f9598c
+ * DocumentsScreen — Cortex Aurora PageIndex Documents
+ * Upload, query, browse documents with light theme
  */
-import React from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View,
   Text,
   ScrollView,
-  StyleSheet,
   TouchableOpacity,
-  ActivityIndicator,
+  StyleSheet,
+  FlatList,
+  Alert,
 } from 'react-native';
-import { NEURAL, SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT } from '../theme/colors';
+import { SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT, SHADOWS } from '../theme/colors';
+import { AppIcon } from '../components/ui/AppIcon';
 import { Card } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
+import { SearchBar } from '../components/ui/SearchBar';
+import { SectionHeader } from '../components/ui/SectionHeader';
 import { Button } from '../components/ui/Button';
-import { TextInput } from '../components/ui/TextInput';
-import { ProgressBar } from '../components/ui/ProgressBar';
-import { AppIcon } from '../components/ui/AppIcon';
+import { EmptyState } from '../components/ui/EmptyState';
+import { LoadingSpinner } from '../components/ui/LoadingSpinner';
 import type { PageIndexDocument, PageIndexUsage } from '../../shared/core/api';
-
-const DOC_STATUS_VARIANT: Record<string, 'success' | 'warning' | 'error' | 'primary'> = {
-  ready:      'success',
-  processing: 'warning',
-  failed:     'error',
-  pending:    'primary',
-};
 
 interface DocumentsScreenProps {
   documents: PageIndexDocument[];
-  pageIndexUsage: PageIndexUsage | null;
-  pageIndexEnabled: boolean | null;
-  documentQuery: string;
-  setDocumentQuery: (v: string) => void;
-  documentAnswer: string;
-  documentSections: { page: number; content: string; doc_id: string; score: number }[];
-  documentTreeDocId: string | null;
-  documentTreePreview: string[];
-  documentsBusy: boolean;
-  documentQueryBusy: boolean;
+  documentUsage: PageIndexUsage | null;
+  onLoadDocuments: () => void;
+  onDeleteDocument: (docId: string) => void;
+  onUploadDocument: () => void;
   loadingView: boolean;
-  onUpload: () => void;
-  onDeleteDocument: (id: string) => void;
-  onToggleTree: (id: string) => void;
-  onRunQuery: () => void;
-  onClearAnswer: () => void;
-  onRefresh: () => void;
+  api: any;
 }
 
 export function DocumentsScreen({
   documents,
-  pageIndexUsage,
-  pageIndexEnabled,
-  documentQuery,
-  setDocumentQuery,
-  documentAnswer,
-  documentSections,
-  documentTreeDocId,
-  documentTreePreview,
-  documentsBusy,
-  documentQueryBusy,
-  loadingView,
-  onUpload,
+  documentUsage,
+  onLoadDocuments,
   onDeleteDocument,
-  onToggleTree,
-  onRunQuery,
-  onClearAnswer,
-  onRefresh,
+  onUploadDocument,
+  loadingView,
+  api,
 }: DocumentsScreenProps) {
+  const [query, setQuery] = useState('');
+  const [queryResults, setQueryResults] = useState<any[]>([]);
+  const [querying, setQuerying] = useState(false);
+  const [selectedDoc, setSelectedDoc] = useState<any>(null);
+
+  const handleQuery = useCallback(async () => {
+    if (!query.trim()) return;
+    setQuerying(true);
+    try {
+      const res = await api.queryDocuments?.(query);
+      setQueryResults(res?.sections || res?.results || []);
+    } catch {
+      Alert.alert('Error', 'Document query failed');
+    }
+    setQuerying(false);
+  }, [api, query]);
+
+  const loadDocDetail = useCallback(async (docId: string) => {
+    try {
+      const res = await api.getDocumentTree?.(docId);
+      setSelectedDoc(res || { doc_id: docId });
+    } catch {
+      Alert.alert('Error', 'Failed to load document');
+    }
+  }, [api]);
+
+  const confirmDelete = (docId: string) => {
+    Alert.alert('Delete Document', 'This will permanently remove the document and its embeddings.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: () => onDeleteDocument(docId) },
+    ]);
+  };
+
   return (
-    <View style={s.container}>
-      <ScrollView contentContainerStyle={s.scroll} showsVerticalScrollIndicator={false}>
-        {/* Header */}
-        <View style={s.header}>
-          <View style={s.headerLeft}>
-            <Text style={s.title}>Documents</Text>
-            {pageIndexEnabled != null && (
-              <Badge label={pageIndexEnabled ? 'PageIndex Active' : 'PageIndex Off'} variant={pageIndexEnabled ? 'success' : 'ghost'} small />
-            )}
-          </View>
-            <TouchableOpacity onPress={onRefresh} disabled={loadingView || documentsBusy} style={s.refreshButton}>
-              <AppIcon name="refresh" size={22} color={NEURAL.primary} style={s.refreshIcon} />
-            </TouchableOpacity>
-        </View>
-
-        {/* Usage Meter */}
-        {pageIndexUsage && (
-          <Card variant="outlined" style={s.usageCard}>
-            <Text style={s.cardTitle}>PageIndex Usage — {pageIndexUsage.month}</Text>
-            <ProgressBar
-              value={pageIndexUsage.queries_used / Math.max(1, pageIndexUsage.queries_limit)}
-              label="Queries"
-              total={pageIndexUsage.queries_limit}
-              style={s.progressBar}
-            />
-            <ProgressBar
-              value={pageIndexUsage.pages_used / Math.max(1, pageIndexUsage.pages_limit)}
-              label="Pages"
-              total={pageIndexUsage.pages_limit}
-              style={s.progressBar}
-            />
-          </Card>
-        )}
-
-        {/* Upload zone */}
-        <TouchableOpacity
-          onPress={onUpload}
-          disabled={documentsBusy}
-          style={[s.uploadZone, documentsBusy && s.uploadZoneBusy]}
-          activeOpacity={0.8}
-        >
-          <AppIcon name="cloud-upload-outline" size={36} color={NEURAL.primary} style={s.uploadIcon} />
-          <Text style={s.uploadTitle}>{documentsBusy ? 'Uploading…' : 'Tap to Upload PDF'}</Text>
-          <Text style={s.uploadHint}>PDF documents • Max 50MB</Text>
-        </TouchableOpacity>
-
-        {/* Document Query */}
-        <Card variant="outlined" style={s.queryCard}>
-          <Text style={s.cardTitle}>Ask Your Documents</Text>
-          <TextInput
-            placeholder="Ask a question across indexed documents…"
-            value={documentQuery}
-            onChangeText={setDocumentQuery}
-            multiline
-            style={s.queryInput}
+    <View style={styles.container}>
+      {/* Upload + stats area */}
+      <View style={styles.topSection}>
+        <View style={styles.topRow}>
+          <Button
+            label="Upload Document"
+            onPress={onUploadDocument}
+            size="sm"
+            icon={<AppIcon name="cloud-upload-outline" size={14} color="#ffffff" />}
           />
-          <View style={s.queryBtns}>
-            <Button
-              label={documentQueryBusy ? 'Querying…' : 'Run Query'}
-              onPress={onRunQuery}
-              disabled={documentQueryBusy || !documentQuery.trim()}
-              loading={documentQueryBusy}
-              size="sm"
-            />
-            <Button
-              label="Clear"
-              variant="secondary"
-              size="sm"
-              onPress={onClearAnswer}
-              disabled={documentQueryBusy}
-            />
-          </View>
-        </Card>
-
-        {/* Query Answer */}
-        {documentAnswer ? (
-          <Card variant="elevated" style={s.answerCard} leftAccent leftAccentColor={NEURAL.tertiary}>
-            <Text style={s.answerTitle}>Answer</Text>
-            <Text style={s.answerText}>{documentAnswer}</Text>
-            {documentSections.length > 0 && (
-              <View style={s.sourcesList}>
-                <Text style={s.sourcesLabel}>Sources</Text>
-                {documentSections.slice(0, 5).map((sec, i) => (
-                  <View key={`${sec.doc_id}-${sec.page}-${i}`} style={s.sourceRow}>
-                    <Text style={s.sourceMeta}>p.{sec.page} · {(sec.score * 100).toFixed(0)}%</Text>
-                    <Text style={s.sourceText} numberOfLines={3}>{sec.content}</Text>
-                  </View>
-                ))}
-              </View>
-            )}
-          </Card>
-        ) : null}
-
-        {/* Document list */}
-        {loadingView ? (
-          <ActivityIndicator color={NEURAL.primary} size="large" style={s.loader} />
-        ) : documents.length === 0 ? (
-          <View style={s.empty}>
-            <AppIcon name="file-document-outline" size={42} color={NEURAL.onSurfaceVariant} style={s.emptyIcon} />
-            <Text style={s.emptyTitle}>No documents yet</Text>
-            <Text style={s.emptyBody}>Upload a PDF to enable document retrieval.</Text>
-          </View>
-        ) : (
-          <View style={s.docList}>
-            {documents.map((doc) => (
-              <DocumentCard
-                key={doc.doc_id}
-                doc={doc}
-                isTreeOpen={documentTreeDocId === doc.doc_id}
-                treePreview={documentTreeDocId === doc.doc_id ? documentTreePreview : []}
-                onDelete={onDeleteDocument}
-                onToggleTree={onToggleTree}
-                busy={documentsBusy}
-              />
-            ))}
-          </View>
-        )}
-      </ScrollView>
-    </View>
-  );
-}
-
-function DocumentCard({
-  doc,
-  isTreeOpen,
-  treePreview,
-  onDelete,
-  onToggleTree,
-  busy,
-}: {
-  doc: PageIndexDocument;
-  isTreeOpen: boolean;
-  treePreview: string[];
-  onDelete: (id: string) => void;
-  onToggleTree: (id: string) => void;
-  busy: boolean;
-}) {
-  const variant = DOC_STATUS_VARIANT[doc.status] || 'primary';
-  return (
-    <Card variant="default" style={s.docCard}>
-      {/* Header row */}
-      <View style={s.docHeader}>
-        <AppIcon name="file-document-outline" size={28} color={NEURAL.onSurfaceVariant} style={s.docIcon} />
-        <View style={s.docInfo}>
-          <Text style={s.docName} numberOfLines={2}>{doc.filename}</Text>
-          <View style={s.docMeta}>
-            <Badge label={doc.status} variant={variant} small />
-            <Badge label={`${doc.estimated_pages} pages`} variant="ghost" small />
-          </View>
+          {documentUsage && (
+            <View style={styles.usageRow}>
+              <Text style={styles.usageText}>
+                {documentUsage.pages_used ?? 0} pages · {documentUsage.queries_used ?? 0} queries
+              </Text>
+            </View>
+          )}
         </View>
       </View>
 
-      {/* Tree toggle */}
-      <TouchableOpacity
-        onPress={() => onToggleTree(doc.doc_id)}
-        disabled={busy}
-        style={s.treeToggle}
-      >
-        <Text style={s.treeToggleText}>
-          {isTreeOpen ? 'Hide Document Tree' : 'View Document Tree'}
-        </Text>
-      </TouchableOpacity>
+      {/* Query section */}
+      <View style={styles.querySection}>
+        <SearchBar value={query} onChangeText={setQuery} onSubmit={handleQuery} placeholder="Query across all documents..." />
+      </View>
 
-      {/* Tree preview */}
-      {isTreeOpen && treePreview.length > 0 && (
-        <View style={s.treePreview}>
-          {treePreview.slice(0, 8).map((line, i) => (
-            <Text key={i} style={s.treePreviewLine} numberOfLines={2}>{line}</Text>
+      {/* Query Results */}
+      {queryResults.length > 0 && (
+        <View style={styles.queryResults}>
+          <SectionHeader title="Query Results" subtitle={`${queryResults.length} matches`} />
+          {queryResults.map((item, i) => (
+            <Card key={`qr-${i}`} variant="accent" padding="md" style={styles.resultCard}>
+              <Text style={styles.resultText} numberOfLines={4}>
+                {item.content || item.text || JSON.stringify(item).slice(0, 200)}
+              </Text>
+              <View style={styles.resultMeta}>
+                {item.page != null && <Badge label={`Page ${item.page}`} variant="primary" size="sm" />}
+                {item.score != null && <Badge label={`${(item.score * 100).toFixed(0)}%`} variant="success" size="sm" />}
+                {item.doc_id && <Text style={styles.resultDocName} numberOfLines={1}>{item.doc_id.slice(0, 12)}</Text>}
+              </View>
+            </Card>
           ))}
         </View>
       )}
 
-      {/* Actions */}
-      <View style={s.docActions}>
-        <Button
-          label="Delete"
-          size="xs"
-          variant="error"
-          onPress={() => onDelete(doc.doc_id)}
-          disabled={busy}
-        />
-      </View>
-    </Card>
+      {/* Document detail overlay */}
+      {selectedDoc && (
+        <View style={styles.detailOverlay}>
+          <View style={styles.detailSheet}>
+            <View style={styles.detailHeader}>
+              <Text style={styles.detailTitle} numberOfLines={1}>
+                {selectedDoc.filename || selectedDoc.doc_id || 'Document'}
+              </Text>
+              <TouchableOpacity onPress={() => setSelectedDoc(null)} style={styles.closeBtn}>
+                <AppIcon name="close" size={18} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={styles.detailContent}>
+              <View style={styles.detailMeta}>
+                <Badge label={selectedDoc.status || 'ready'} variant="success" />
+                {selectedDoc.estimated_pages != null && (
+                  <Badge label={`${selectedDoc.estimated_pages} pages`} variant="primary" />
+                )}
+              </View>
+              <Text style={styles.detailJson}>{JSON.stringify(selectedDoc, null, 2)}</Text>
+            </ScrollView>
+          </View>
+        </View>
+      )}
+
+      {/* Document list */}
+      <FlatList
+        data={documents}
+        keyExtractor={(d) => d.doc_id}
+        contentContainerStyle={styles.listContent}
+        showsVerticalScrollIndicator={false}
+        ListEmptyComponent={
+          loadingView ? <LoadingSpinner message="Loading documents..." /> :
+          <EmptyState icon="file-document-outline" title="No Documents" message="Upload a PDF, Markdown, or text document to get started." />
+        }
+        renderItem={({ item }) => (
+          <TouchableOpacity onPress={() => loadDocDetail(item.doc_id)} activeOpacity={0.7}>
+            <Card variant="default" padding="md" style={styles.docCard}>
+              <View style={styles.docHeader}>
+                <AppIcon name="file-document-outline" size={18} color="#6366f1" />
+                <Text style={styles.docTitle} numberOfLines={1}>{item.filename || 'Untitled'}</Text>
+                <TouchableOpacity onPress={() => confirmDelete(item.doc_id)} style={styles.deleteBtn}>
+                  <AppIcon name="delete-outline" size={16} color="#f43f5e" />
+                </TouchableOpacity>
+              </View>
+              <View style={styles.docMeta}>
+                <Badge label={item.status || 'ready'} variant={item.status === 'ready' ? 'success' : 'warning'} size="sm" />
+                {item.estimated_pages > 0 && (
+                  <Badge label={`${item.estimated_pages} pages`} variant="primary" size="sm" />
+                )}
+              </View>
+              {item.uploaded_at && (
+                <Text style={styles.docTime}>{new Date(item.uploaded_at).toLocaleDateString()}</Text>
+              )}
+            </Card>
+          </TouchableOpacity>
+        )}
+      />
+    </View>
   );
 }
 
-const s = StyleSheet.create({
-  container: { flex: 1, backgroundColor: NEURAL.background },
-  scroll: { paddingBottom: SPACING['5xl'] },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: SPACING.lg,
-    paddingTop: SPACING.lg,
-    paddingBottom: SPACING.md,
-  },
-  headerLeft: { gap: 6 },
-  title: { fontSize: FONT_SIZE['2xl'], fontWeight: FONT_WEIGHT.bold, color: NEURAL.onSurface },
-  refreshButton: { padding: SPACING.xs },
-  refreshIcon: { marginVertical: 1 },
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#f8fafc' },
 
-  usageCard: { marginHorizontal: SPACING.lg, marginBottom: SPACING.md, gap: SPACING.sm },
-  cardTitle: { fontSize: FONT_SIZE.base, fontWeight: FONT_WEIGHT.bold, color: NEURAL.onSurface },
-  progressBar: { marginBottom: SPACING.xs },
+  topSection: { paddingHorizontal: SPACING.lg, paddingVertical: SPACING.md, backgroundColor: '#ffffff', borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
+  topRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  usageRow: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm },
+  usageText: { fontSize: FONT_SIZE.xs, color: '#64748b', fontWeight: FONT_WEIGHT.medium },
 
-  uploadZone: {
-    marginHorizontal: SPACING.lg,
-    marginBottom: SPACING.md,
-    borderWidth: 2,
-    borderColor: `${NEURAL.primary}60`,
-    borderStyle: 'dashed',
-    borderRadius: RADIUS.xl,
-    backgroundColor: `${NEURAL.primary}10`,
-    alignItems: 'center',
-    paddingVertical: SPACING['3xl'],
-    gap: SPACING.sm,
-  },
-  uploadZoneBusy: { opacity: 0.6 },
-  uploadIcon: { marginBottom: 1 },
-  uploadTitle: { fontSize: FONT_SIZE.lg, fontWeight: FONT_WEIGHT.semibold, color: NEURAL.onSurface },
-  uploadHint: { fontSize: FONT_SIZE.sm, color: NEURAL.onSurfaceVariant },
+  querySection: { paddingHorizontal: SPACING.lg, paddingVertical: SPACING.sm, backgroundColor: '#ffffff', borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
 
-  queryCard: { marginHorizontal: SPACING.lg, marginBottom: SPACING.md, gap: SPACING.sm },
-  queryInput: { marginBottom: 0 },
-  queryBtns: { flexDirection: 'row', gap: SPACING.sm },
+  queryResults: { paddingHorizontal: SPACING.lg, paddingVertical: SPACING.md, backgroundColor: '#fefce8', borderBottomWidth: 1, borderBottomColor: '#fef08a' },
+  resultCard: { marginBottom: SPACING.sm },
+  resultText: { fontSize: FONT_SIZE.sm, color: '#334155', lineHeight: 18 },
+  resultMeta: { flexDirection: 'row', gap: SPACING.sm, marginTop: SPACING.sm, alignItems: 'center' },
+  resultDocName: { fontSize: 10, color: '#94a3b8', flex: 1, fontFamily: 'monospace' },
 
-  answerCard: { marginHorizontal: SPACING.lg, marginBottom: SPACING.md, gap: SPACING.sm },
-  answerTitle: { fontSize: FONT_SIZE.sm, fontWeight: FONT_WEIGHT.bold, color: NEURAL.tertiary, textTransform: 'uppercase', letterSpacing: 0.5 },
-  answerText: { fontSize: FONT_SIZE.base, color: NEURAL.onSurface, lineHeight: FONT_SIZE.base * 1.65 },
-  sourcesList: { gap: SPACING.sm, marginTop: SPACING.sm },
-  sourcesLabel: { fontSize: FONT_SIZE.xs, color: NEURAL.onSurfaceVariant, textTransform: 'uppercase', letterSpacing: 0.5 },
-  sourceRow: {
-    padding: SPACING.sm,
-    backgroundColor: NEURAL.surfaceContainerLow,
-    borderRadius: RADIUS.md,
-    gap: 3,
-  },
-  sourceMeta: { fontSize: FONT_SIZE.xs, color: NEURAL.primary },
-  sourceText: { fontSize: FONT_SIZE.sm, color: NEURAL.onSurface },
+  listContent: { padding: SPACING.lg, paddingBottom: SPACING['5xl'], gap: SPACING.md },
 
-  loader: { marginVertical: SPACING['4xl'] },
-  empty: { alignItems: 'center', paddingVertical: SPACING['3xl'] },
-  emptyIcon: { marginBottom: SPACING.md },
-  emptyTitle: { fontSize: FONT_SIZE.xl, fontWeight: FONT_WEIGHT.bold, color: NEURAL.onSurface, marginBottom: SPACING.sm },
-  emptyBody: { fontSize: FONT_SIZE.base, color: NEURAL.onSurfaceVariant, textAlign: 'center', paddingHorizontal: SPACING.xl },
+  docCard: { marginBottom: 0 },
+  docHeader: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm, marginBottom: SPACING.sm },
+  docTitle: { flex: 1, fontSize: FONT_SIZE.md, fontWeight: FONT_WEIGHT.semibold, color: '#0f172a' },
+  deleteBtn: { padding: SPACING.xs },
+  docMeta: { flexDirection: 'row', gap: SPACING.sm, flexWrap: 'wrap', marginBottom: SPACING.xs },
+  docTime: { fontSize: 10, color: '#94a3b8' },
 
-  docList: { paddingHorizontal: SPACING.lg, gap: SPACING.md },
-  docCard: { gap: SPACING.sm },
-  docHeader: { flexDirection: 'row', gap: SPACING.sm, alignItems: 'flex-start' },
-  docIcon: { marginTop: 2 },
-  docInfo: { flex: 1, gap: 4 },
-  docName: { fontSize: FONT_SIZE.base, fontWeight: FONT_WEIGHT.semibold, color: NEURAL.onSurface },
-  docMeta: { flexDirection: 'row', gap: SPACING.sm },
-  treeToggle: { paddingVertical: SPACING.xs },
-  treeToggleText: { fontSize: FONT_SIZE.sm, color: NEURAL.primary, fontWeight: FONT_WEIGHT.medium },
-  treePreview: {
-    backgroundColor: NEURAL.surfaceContainerLow,
-    borderRadius: RADIUS.md,
-    padding: SPACING.sm,
-    gap: 4,
-    borderWidth: 1,
-    borderColor: NEURAL.outlineVariant,
-  },
-  treePreviewLine: { fontSize: FONT_SIZE.xs, color: NEURAL.onSurfaceVariant, lineHeight: FONT_SIZE.xs * 1.5 },
-  docActions: { flexDirection: 'row', justifyContent: 'flex-end' },
+  detailOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(15, 23, 42, 0.4)', justifyContent: 'flex-end', zIndex: 10 },
+  detailSheet: { backgroundColor: '#ffffff', borderTopLeftRadius: RADIUS['3xl'], borderTopRightRadius: RADIUS['3xl'], maxHeight: '80%', ...SHADOWS.xl },
+  detailHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: SPACING.xl, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
+  detailTitle: { fontSize: FONT_SIZE.lg, fontWeight: FONT_WEIGHT.bold, color: '#0f172a', flex: 1 },
+  closeBtn: { padding: SPACING.sm, backgroundColor: '#f1f5f9', borderRadius: RADIUS.lg },
+  detailContent: { padding: SPACING.xl },
+  detailMeta: { flexDirection: 'row', gap: SPACING.sm, marginBottom: SPACING.md },
+  detailJson: { fontSize: 11, color: '#64748b', fontFamily: 'monospace', lineHeight: 16 },
 });

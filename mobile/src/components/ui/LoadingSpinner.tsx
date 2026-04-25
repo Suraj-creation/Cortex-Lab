@@ -1,104 +1,88 @@
-import React, { useEffect, useRef } from "react";
-import { View, Animated, StyleSheet, Text } from "react-native";
-import { NEURAL, SEMANTIC_COLORS, SPACING, TYPOGRAPHY } from "../../theme/colors";
+/**
+ * LoadingSpinner — Cortex Aurora indigo spinner
+ */
+import React, { useEffect, useRef } from 'react';
+import { Animated, View, StyleSheet, Text } from 'react-native';
+import { FONT_SIZE, FONT_WEIGHT, SPACING } from '../../theme/colors';
 
 interface LoadingSpinnerProps {
-  size?: "sm" | "md" | "lg";
+  size?: number;
+  color?: string;
   message?: string;
-  fullscreen?: boolean;
+  fullScreen?: boolean;
 }
 
 export function LoadingSpinner({
-  size = "md",
+  size = 36,
+  color = '#6366f1',
   message,
-  fullscreen = false,
+  fullScreen = false,
 }: LoadingSpinnerProps) {
-  const spinValue = useRef(new Animated.Value(0)).current;
+  const rotation = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    Animated.loop(
-      Animated.timing(spinValue, {
+    const loop = Animated.loop(
+      Animated.timing(rotation, {
         toValue: 1,
-        duration: 1500,
+        duration: 900,
         useNativeDriver: true,
-      })
-    ).start();
-  }, [spinValue]);
+      }),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [rotation]);
 
-  const spin = spinValue.interpolate({
+  const spin = rotation.interpolate({
     inputRange: [0, 1],
-    outputRange: ["0deg", "360deg"],
+    outputRange: ['0deg', '360deg'],
   });
 
-  const sizeMap = {
-    sm: { width: 24, height: 24, borderWidth: 2 },
-    md: { width: 40, height: 40, borderWidth: 3 },
-    lg: { width: 56, height: 56, borderWidth: 4 },
-  };
-
-  const spinnerSize = sizeMap[size];
-
-  if (fullscreen) {
-    return (
-      <View style={styles.fullscreenContainer}>
-        <Animated.View
-          style={[
-            styles.spinner,
-            spinnerSize,
-            {
-              borderColor: NEURAL.primary,
-              borderTopColor: NEURAL.primaryDim,
-              borderRightColor: NEURAL.primaryDim,
-              borderBottomColor: NEURAL.primaryDim,
-              transform: [{ rotate: spin }],
-            },
-          ]}
-        />
-        {message ? <Text style={styles.message}>{message}</Text> : null}
-      </View>
-    );
-  }
-
-  return (
-    <View style={styles.container}>
+  const content = (
+    <View style={styles.inner}>
       <Animated.View
         style={[
           styles.spinner,
-          spinnerSize,
           {
-            borderColor: NEURAL.primary,
-            borderTopColor: NEURAL.primaryDim,
-            borderRightColor: NEURAL.primaryDim,
-            borderBottomColor: NEURAL.primaryDim,
+            width: size,
+            height: size,
+            borderRadius: size / 2,
+            borderColor: `${color}20`,
+            borderTopColor: color,
+            borderWidth: size > 24 ? 3 : 2,
             transform: [{ rotate: spin }],
           },
         ]}
       />
-      {message ? <Text style={styles.message}>{message}</Text> : null}
+      {message && <Text style={styles.message}>{message}</Text>}
     </View>
   );
+
+  if (fullScreen) {
+    return <View style={styles.fullScreen}>{content}</View>;
+  }
+
+  return content;
 }
 
 const styles = StyleSheet.create({
-  container: {
-    justifyContent: "center",
-    alignItems: "center",
-    paddingVertical: SPACING["4xl"],
+  inner: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: SPACING.lg,
   },
-  fullscreenContainer: {
+  fullScreen: {
     flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: NEURAL.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f8fafc',
   },
   spinner: {
-    borderRadius: 999,
-    borderStyle: "solid",
+    borderStyle: 'solid',
   },
   message: {
-    fontSize: TYPOGRAPHY.fontSize.md,
-    color: SEMANTIC_COLORS.textSecondary,
-    marginTop: SPACING.lg,
-    fontWeight: TYPOGRAPHY.fontWeight.medium,
+    marginTop: SPACING.md,
+    fontSize: FONT_SIZE.sm,
+    color: '#64748b',
+    fontWeight: FONT_WEIGHT.medium,
   },
 });

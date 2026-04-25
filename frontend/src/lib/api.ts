@@ -11,6 +11,8 @@ import {
   AmbientState,
   AmbientLiveStatus,
   AmbientConfig,
+  AmbientClientAudioResponse,
+  AmbientClientSessionInfo,
   ConversationRecord,
   VoiceQueryResult,
   ConversationTurn,
@@ -48,6 +50,25 @@ const BACKEND_DIRECT = (() => {
 
   return "http://localhost:8000/api";
 })();
+
+export function getAmbientWebSocketUrl(): string {
+  try {
+    const direct = new URL(BACKEND_DIRECT, typeof window !== "undefined" ? window.location.origin : "http://localhost:8000");
+    direct.protocol = direct.protocol === "https:" ? "wss:" : "ws:";
+    const pathname = direct.pathname.replace(/\/+$/, "");
+    direct.pathname = pathname.endsWith("/api")
+      ? `${pathname.slice(0, -4)}/ws/ambient`
+      : `${pathname}/ws/ambient`;
+    direct.search = "";
+    return direct.toString();
+  } catch {
+    if (typeof window !== "undefined") {
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      return `${protocol}//${window.location.host}/ws/ambient`;
+    }
+    return "ws://localhost:8000/ws/ambient";
+  }
+}
 
 // ── Non-streaming chat ──────────────────────────────────────────
 
@@ -655,6 +676,85 @@ export async function getAmbientStatus(): Promise<AmbientState> {
 export async function getAmbientLiveStatus(): Promise<AmbientLiveStatus> {
   const res = await fetch(`${API_BASE}/ambient/live/status`);
   if (!res.ok) throw new Error(`Failed to fetch ambient live status: ${res.status}`);
+  return res.json();
+}
+
+export async function startAmbientClientSession(body?: {
+  platform?: string;
+  metadata?: Record<string, unknown>;
+}): Promise<{
+  success: boolean;
+  session_id: string;
+  platform: string;
+  metadata: Record<string, unknown>;
+  session: AmbientClientSessionInfo;
+}> {
+  const res = await fetch(`${API_BASE}/ambient/client/session/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      platform: body?.platform || "web",
+      metadata: body?.metadata || {},
+    }),
+  });
+  if (!res.ok) throw new Error(`Failed to start client companion session: ${res.status}`);
+  return res.json();
+}
+
+export async function stopAmbientClientSession(body: {
+  sessionId: string;
+  reason?: string;
+}): Promise<{
+  success: boolean;
+  session: AmbientClientSessionInfo;
+  triggered_agents?: string[];
+}> {
+  const res = await fetch(`${API_BASE}/ambient/client/session/stop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: body.sessionId,
+      reason: body.reason || "user_request",
+    }),
+  });
+  if (!res.ok) throw new Error(`Failed to stop client companion session: ${res.status}`);
+  return res.json();
+}
+
+export async function getAmbientClientSessions(): Promise<{
+  active_session_id: string;
+  followup_until: number;
+  active_sessions: AmbientClientSessionInfo[];
+  sessions: AmbientClientSessionInfo[];
+}> {
+  const res = await fetch(`${API_BASE}/ambient/client/sessions`);
+  if (!res.ok) throw new Error(`Failed to fetch client companion sessions: ${res.status}`);
+  return res.json();
+}
+
+export async function processAmbientClientAudio(body: {
+  sessionId?: string;
+  audioBase64: string;
+  mimeType: string;
+  platform?: string;
+  language?: string;
+  estimatedDurationS?: number;
+  metadata?: Record<string, unknown>;
+}): Promise<AmbientClientAudioResponse> {
+  const res = await fetch(`${API_BASE}/ambient/client/process-audio`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: body.sessionId || "",
+      audio_base64: body.audioBase64,
+      mime_type: body.mimeType,
+      platform: body.platform || "web",
+      language: body.language,
+      estimated_duration_s: body.estimatedDurationS || 0,
+      metadata: body.metadata || {},
+    }),
+  });
+  if (!res.ok) throw new Error(`Failed to process client companion audio: ${res.status}`);
   return res.json();
 }
 

@@ -5,8 +5,9 @@ import { NEURAL, SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT } from "../../theme/col
 
 interface ModelDownloadManagerProps {
   packName: string;
-  status: "not_installed" | "downloading" | "installed" | "error";
+  status: "not_installed" | "queued" | "downloading" | "installed" | "error";
   progress?: number;
+  detail?: string;
   onInstall?: () => void;
   onRetry?: () => void;
   actionLabel?: string;
@@ -17,6 +18,7 @@ export function ModelDownloadManager({
   packName,
   status,
   progress = 0,
+  detail,
   onInstall,
   onRetry,
   actionLabel,
@@ -24,14 +26,27 @@ export function ModelDownloadManager({
 }: ModelDownloadManagerProps) {
   const computedActionLabel = actionLabel || (status === "error" ? "Retry" : "Install");
   const action = status === "error" ? onRetry : onInstall;
+  const statusLabel = status.replace(/_/g, " ");
 
   return (
     <View style={styles.card}>
       <Text style={styles.title}>{packName}</Text>
-      <Text style={styles.status}>Status: {status.replace("_", " ")}</Text>
+      <Text style={styles.status}>Status: {statusLabel}</Text>
+      {detail ? <Text style={styles.detail}>{detail}</Text> : null}
+      {status === "queued" ? (
+        <Text style={styles.progressText}>Preparing secure download…</Text>
+      ) : null}
       {status === "downloading" ? (
-        <View style={styles.progressTrack}>
-          <View style={[styles.progressFill, { width: `${Math.max(0, Math.min(progress, 100))}%` }]} />
+        <>
+          <View style={styles.progressTrack}>
+            <View style={[styles.progressFill, { width: `${Math.max(0, Math.min(progress, 100))}%` }]} />
+          </View>
+          <Text style={styles.progressText}>{Math.round(progress)}%</Text>
+        </>
+      ) : null}
+      {status === "installed" ? (
+        <View style={styles.installedBadge}>
+          <Text style={styles.installedBadgeText}>Installed on device</Text>
         </View>
       ) : null}
       {(status === "not_installed" || status === "error") && (action || actionDisabled) ? (
@@ -65,6 +80,10 @@ const styles = StyleSheet.create({
     color: NEURAL.onSurfaceVariant,
     fontSize: FONT_SIZE.sm,
   },
+  detail: {
+    color: NEURAL.onSurfaceVariant,
+    fontSize: FONT_SIZE.xs,
+  },
   progressTrack: {
     height: 8,
     borderRadius: 4,
@@ -75,6 +94,23 @@ const styles = StyleSheet.create({
     height: 8,
     borderRadius: 4,
     backgroundColor: NEURAL.primary,
+  },
+  progressText: {
+    color: NEURAL.onSurfaceVariant,
+    fontSize: FONT_SIZE.xs,
+    fontWeight: FONT_WEIGHT.medium,
+  },
+  installedBadge: {
+    alignSelf: "flex-start",
+    borderRadius: RADIUS.full,
+    backgroundColor: `${NEURAL.tertiary}20`,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.xs,
+  },
+  installedBadgeText: {
+    color: NEURAL.tertiary,
+    fontSize: FONT_SIZE.xs,
+    fontWeight: FONT_WEIGHT.semibold,
   },
   button: {
     alignSelf: "flex-start",

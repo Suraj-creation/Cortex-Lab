@@ -1,90 +1,104 @@
 /**
- * NeuralPulse — Animated status indicator
- * 8px circle (secondary color) with scaled outer ring animation
- * Design: "The Neural Pulse" from Cortex Neural Dark design system
+ * NeuralPulse — Cortex Aurora activity indicator
+ * Animated pulsing dot for streaming/processing states
  */
 import React, { useEffect, useRef } from 'react';
-import { Animated, View, StyleSheet } from 'react-native';
-import { NEURAL } from '../../theme/colors';
+import { Animated, StyleSheet, View, ViewStyle } from 'react-native';
 
 interface NeuralPulseProps {
-  color?: string;
-  size?: number;
   active?: boolean;
-  style?: object;
+  size?: number;
+  color?: string;
+  style?: ViewStyle;
 }
 
 export function NeuralPulse({
-  color = NEURAL.secondary,
-  size = 8,
   active = true,
+  size = 10,
+  color = '#6366f1',
   style,
 }: NeuralPulseProps) {
   const scaleAnim = useRef(new Animated.Value(1)).current;
-  const opacityAnim = useRef(new Animated.Value(0.5)).current;
+  const opacityAnim = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
     if (!active) {
       scaleAnim.setValue(1);
-      opacityAnim.setValue(0.3);
+      opacityAnim.setValue(0.5);
       return;
     }
 
-    const loop = Animated.loop(
-      Animated.parallel([
-        Animated.sequence([
+    const pulse = Animated.loop(
+      Animated.sequence([
+        Animated.parallel([
           Animated.timing(scaleAnim, {
-            toValue: 2.2,
-            duration: 1100,
+            toValue: 1.6,
+            duration: 800,
             useNativeDriver: true,
           }),
-          Animated.timing(scaleAnim, {
-            toValue: 1,
-            duration: 0,
+          Animated.timing(opacityAnim, {
+            toValue: 0.3,
+            duration: 800,
             useNativeDriver: true,
           }),
         ]),
-        Animated.sequence([
-          Animated.timing(opacityAnim, {
-            toValue: 0,
-            duration: 1100,
+        Animated.parallel([
+          Animated.timing(scaleAnim, {
+            toValue: 1,
+            duration: 600,
             useNativeDriver: true,
           }),
           Animated.timing(opacityAnim, {
-            toValue: 0.5,
-            duration: 0,
+            toValue: 1,
+            duration: 600,
             useNativeDriver: true,
           }),
         ]),
       ]),
     );
-    loop.start();
-    return () => loop.stop();
+    pulse.start();
+    return () => pulse.stop();
   }, [active, scaleAnim, opacityAnim]);
 
   return (
-    <View style={[{ width: size * 3, height: size * 3, alignItems: 'center', justifyContent: 'center' }, style]}>
-      {/* Outer ring */}
+    <View style={[styles.container, { width: size * 2, height: size * 2 }, style]}>
       <Animated.View
-        style={{
-          position: 'absolute',
-          width: size,
-          height: size,
-          borderRadius: size / 2,
-          backgroundColor: color,
-          opacity: opacityAnim,
-          transform: [{ scale: scaleAnim }],
-        }}
+        style={[
+          styles.outerRing,
+          {
+            width: size * 2,
+            height: size * 2,
+            borderRadius: size,
+            borderColor: `${color}40`,
+            transform: [{ scale: scaleAnim }],
+            opacity: opacityAnim,
+          },
+        ]}
       />
-      {/* Core dot */}
       <View
-        style={{
-          width: size,
-          height: size,
-          borderRadius: size / 2,
-          backgroundColor: color,
-        }}
+        style={[
+          styles.core,
+          {
+            width: size,
+            height: size,
+            borderRadius: size / 2,
+            backgroundColor: color,
+          },
+        ]}
       />
     </View>
   );
 }
+
+const styles = StyleSheet.create({
+  container: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  outerRing: {
+    position: 'absolute',
+    borderWidth: 1.5,
+    borderStyle: 'solid',
+  },
+  core: {},
+});

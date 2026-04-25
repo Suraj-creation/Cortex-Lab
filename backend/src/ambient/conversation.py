@@ -33,6 +33,8 @@ class ConversationTurn:
     confidence: float = 0.0   # STT confidence
     speaker_confidence: float = 0.0  # Speaker-match confidence (voice ID)
     live_turn_id: str = ""          # Live session turn identifier
+    session_id: str = ""
+    source_platform: str = "ambient"
     retention_trace: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -40,6 +42,8 @@ class ConversationTurn:
 class ConversationRecord:
     id: str = field(default_factory=lambda: f"conv_{uuid.uuid4().hex[:12]}")
     turns: List[ConversationTurn] = field(default_factory=list)
+    session_id: str = ""
+    source_platform: str = "ambient"
     participants: List[str] = field(default_factory=list)
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
@@ -56,6 +60,8 @@ class ConversationRecord:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
+            "session_id": self.session_id,
+            "source_platform": self.source_platform,
             "turns": [
                 {
                     "speaker_label": t.speaker_label,
@@ -65,6 +71,8 @@ class ConversationRecord:
                     "confidence": t.confidence,
                     "speaker_confidence": t.speaker_confidence,
                     "live_turn_id": t.live_turn_id,
+                    "session_id": t.session_id,
+                    "source_platform": t.source_platform,
                     "retention_trace": t.retention_trace,
                 }
                 for t in self.turns
@@ -159,6 +167,8 @@ class ConversationSegmenter:
             self._db.execute("""
                 CREATE TABLE IF NOT EXISTS ambient_conversations (
                     id VARCHAR PRIMARY KEY,
+                    session_id VARCHAR,
+                    source_platform VARCHAR,
                     started_at TIMESTAMP,
                     ended_at TIMESTAMP,
                     duration_seconds FLOAT,
@@ -175,6 +185,8 @@ class ConversationSegmenter:
                 CREATE TABLE IF NOT EXISTS ambient_conversation_turns (
                     id VARCHAR PRIMARY KEY,
                     conversation_id VARCHAR,
+                    session_id VARCHAR,
+                    source_platform VARCHAR,
                     turn_index INTEGER,
                     speaker VARCHAR,
                     speaker_name VARCHAR,
@@ -189,12 +201,35 @@ class ConversationSegmenter:
             """)
 
             # Ensure newer metadata columns exist for older databases.
+            conv_schema = {
+                row[1]
+                for row in self._db.execute(
+                    "PRAGMA table_info('ambient_conversations')"
+                ).fetchall()
+            }
+            if "session_id" not in conv_schema:
+                self._db.execute(
+                    "ALTER TABLE ambient_conversations ADD COLUMN session_id VARCHAR"
+                )
+            if "source_platform" not in conv_schema:
+                self._db.execute(
+                    "ALTER TABLE ambient_conversations ADD COLUMN source_platform VARCHAR"
+                )
+
             turn_schema = {
                 row[1]
                 for row in self._db.execute(
                     "PRAGMA table_info('ambient_conversation_turns')"
                 ).fetchall()
             }
+            if "session_id" not in turn_schema:
+                self._db.execute(
+                    "ALTER TABLE ambient_conversation_turns ADD COLUMN session_id VARCHAR"
+                )
+            if "source_platform" not in turn_schema:
+                self._db.execute(
+                    "ALTER TABLE ambient_conversation_turns ADD COLUMN source_platform VARCHAR"
+                )
             if "speaker_confidence" not in turn_schema:
                 self._db.execute(
                     "ALTER TABLE ambient_conversation_turns ADD COLUMN speaker_confidence FLOAT DEFAULT 0"
@@ -218,10 +253,10 @@ class ConversationSegmenter:
                 if {"started_at", "raw_transcript", "turn_count"}.issubset(conv_cols):
                     self._db.execute("""
                         INSERT OR IGNORE INTO ambient_conversations
-                        (id, started_at, ended_at, duration_seconds, participants,
+                        (id, session_id, source_platform, started_at, ended_at, duration_seconds, participants,
                          turn_count, topic_labels, importance_score, gemini_summary,
                          raw_transcript, ingested)
-                        SELECT id, started_at, ended_at, duration_seconds, participants,
+                        SELECT id, '', 'ambient', started_at, ended_at, duration_seconds, participants,
                                turn_count, topic_labels, importance_score, gemini_summary,
                                raw_transcript, ingested
                         FROM conversations
@@ -234,9 +269,9 @@ class ConversationSegmenter:
                 if {"conversation_id", "turn_index", "speaker", "text"}.issubset(turn_cols):
                     self._db.execute("""
                         INSERT OR IGNORE INTO ambient_conversation_turns
-                        (id, conversation_id, turn_index, speaker, speaker_name,
+                        (id, conversation_id, session_id, source_platform, turn_index, speaker, speaker_name,
                          timestamp_s, text, confidence)
-                        SELECT id, conversation_id, turn_index, speaker, speaker_name,
+                        SELECT id, conversation_id, '', 'ambient', turn_index, speaker, speaker_name,
                                timestamp_s, text, confidence
                         FROM conversation_turns
                     """)
@@ -258,6 +293,8 @@ class ConversationSegmenter:
             self._db.execute("""
                 CREATE TABLE IF NOT EXISTS ambient_conversations (
                     id TEXT PRIMARY KEY,
+                    session_id TEXT,
+                    source_platform TEXT,
                     started_at TEXT,
                     ended_at TEXT,
                     duration_seconds REAL,
@@ -274,6 +311,8 @@ class ConversationSegmenter:
                 CREATE TABLE IF NOT EXISTS ambient_conversation_turns (
                     id TEXT PRIMARY KEY,
                     conversation_id TEXT,
+                    session_id TEXT,
+                    source_platform TEXT,
                     turn_index INTEGER,
                     speaker TEXT,
                     speaker_name TEXT,
@@ -285,6 +324,23 @@ class ConversationSegmenter:
                     retention_trace TEXT
                 )
             """)
+            conv_schema = {
+                row[1]
+                for row in self._db.execute("PRAGMA table_info('ambient_conversations')").fetchall()
+            }
+            if "session_id" not in conv_schema:
+                self._db.execute("ALTER TABLE ambient_conversations ADD COLUMN session_id TEXT")
+            if "source_platform" not in conv_schema:
+                self._db.execute("ALTER TABLE ambient_conversations ADD COLUMN source_platform TEXT")
+
+            turn_schema = {
+                row[1]
+                for row in self._db.execute("PRAGMA table_info('ambient_conversation_turns')").fetchall()
+            }
+            if "session_id" not in turn_schema:
+                self._db.execute("ALTER TABLE ambient_conversation_turns ADD COLUMN session_id TEXT")
+            if "source_platform" not in turn_schema:
+                self._db.execute("ALTER TABLE ambient_conversation_turns ADD COLUMN source_platform TEXT")
             self._db.commit()
             print("  💾 SQLite fallback initialized for ambient conversations")
         except Exception as sqlite_exc:
@@ -298,6 +354,8 @@ class ConversationSegmenter:
                        text: str, timestamp: float, confidence: float = 0.0,
                        speaker_confidence: float = 0.0,
                        live_turn_id: str = "",
+                       session_id: str = "",
+                       source_platform: str = "ambient",
                        retention_trace: Optional[Dict[str, Any]] = None):
         """
         Add a transcribed turn. Automatically segments and ingests.
@@ -323,12 +381,15 @@ class ConversationSegmenter:
             confidence=confidence,
             speaker_confidence=speaker_confidence,
             live_turn_id=live_turn_id,
+            session_id=session_id,
+            source_platform=source_platform,
             retention_trace=dict(retention_trace or {}),
         )
 
         # Merge with previous turn if same speaker and close in time
         if (self._current_turns and
                 self._current_turns[-1].speaker_label == speaker_label and
+                self._current_turns[-1].session_id == session_id and
                 (timestamp - self._current_turns[-1].timestamp) < self.MERGE_THRESHOLD_S):
             self._current_turns[-1].text += " " + text.strip()
             self._current_turns[-1].confidence = max(
@@ -411,6 +472,8 @@ class ConversationSegmenter:
 
         record = ConversationRecord(
             turns=list(self._current_turns),
+            session_id=self._current_turns[0].session_id if self._current_turns else "",
+            source_platform=self._current_turns[0].source_platform if self._current_turns else "ambient",
             participants=participants,
             start_time=start_time,
             end_time=end_time,
@@ -644,13 +707,15 @@ Return ONLY valid JSON:
                 self._db.execute(
                     """
                     INSERT OR REPLACE INTO ambient_conversations
-                    (id, started_at, ended_at, duration_seconds, participants,
+                    (id, session_id, source_platform, started_at, ended_at, duration_seconds, participants,
                      turn_count, topic_labels, importance_score, gemini_summary,
                      raw_transcript, ingested)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         record.id,
+                        record.session_id,
+                        record.source_platform,
                         record.start_time.isoformat() if record.start_time else None,
                         record.end_time.isoformat() if record.end_time else None,
                         record.duration_seconds,
@@ -669,14 +734,16 @@ Return ONLY valid JSON:
                     self._db.execute(
                         """
                         INSERT OR REPLACE INTO ambient_conversation_turns
-                        (id, conversation_id, turn_index, speaker, speaker_name,
+                        (id, conversation_id, session_id, source_platform, turn_index, speaker, speaker_name,
                          timestamp_s, text, confidence, speaker_confidence,
                          live_turn_id, retention_trace)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             turn_id,
                             record.id,
+                            turn.session_id or record.session_id,
+                            turn.source_platform or record.source_platform,
                             i,
                             turn.speaker_label,
                             turn.speaker_name,
@@ -694,12 +761,14 @@ Return ONLY valid JSON:
 
             self._db.execute("""
                 INSERT OR REPLACE INTO ambient_conversations
-                (id, started_at, ended_at, duration_seconds, participants,
+                (id, session_id, source_platform, started_at, ended_at, duration_seconds, participants,
                  turn_count, topic_labels, importance_score, gemini_summary,
                  raw_transcript, ingested)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, [
                 record.id,
+                record.session_id,
+                record.source_platform,
                 record.start_time,
                 record.end_time,
                 record.duration_seconds,
@@ -716,12 +785,17 @@ Return ONLY valid JSON:
                 turn_id = f"{record.id}_t{i:03d}"
                 self._db.execute("""
                     INSERT OR REPLACE INTO ambient_conversation_turns
-                    (id, conversation_id, turn_index, speaker, speaker_name,
+                    (id, conversation_id, session_id, source_platform, turn_index, speaker, speaker_name,
                      timestamp_s, text, confidence, speaker_confidence,
                      live_turn_id, retention_trace)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, [
-                    turn_id, record.id, i, turn.speaker_label,
+                    turn_id,
+                    record.id,
+                    turn.session_id or record.session_id,
+                    turn.source_platform or record.source_platform,
+                    i,
+                    turn.speaker_label,
                     turn.speaker_name, turn.timestamp, turn.text,
                     turn.confidence,
                     turn.speaker_confidence,
@@ -783,6 +857,7 @@ Return ONLY valid JSON:
                 try:
                     memory = await self.pipeline.ingest(
                         content=structured_content,
+                        session_id=record.session_id,
                         source="voice",
                         session_context=(
                             f"Structured knowledge extracted from voice conversation. "
@@ -805,6 +880,7 @@ Return ONLY valid JSON:
                         try:
                             mem = await self.pipeline.ingest(
                                 content=seg_content,
+                                session_id=record.session_id,
                                 source="voice",
                                 session_context=f"Topic segment from conversation: {seg.get('topic', '')}",
                             )
@@ -843,6 +919,7 @@ Return ONLY valid JSON:
         try:
             memory = await self.pipeline.ingest(
                 content=raw_transcript,
+                session_id=record.session_id,
                 source="voice",
                 session_context=f"Voice conversation captured via ambient listening. "
                                 f"Participants: {', '.join(unique_participants)}. "
@@ -863,6 +940,7 @@ Return ONLY valid JSON:
             try:
                 mem = await self.pipeline.ingest(
                     content=user_content,
+                    session_id=record.session_id,
                     source="voice",
                     session_context=user_context,
                 )
@@ -911,6 +989,8 @@ Return ONLY valid JSON:
                 "confidence": t.confidence,
                 "speaker_confidence": t.speaker_confidence,
                 "live_turn_id": t.live_turn_id,
+                "session_id": t.session_id,
+                "source_platform": t.source_platform,
                 "retention_trace": t.retention_trace,
             }
             for t in self._current_turns
@@ -940,12 +1020,18 @@ Return ONLY valid JSON:
                 record = ConversationRecord(
                     id=data["id"],
                     turns=turns,
+                    session_id=data.get("session_id", ""),
+                    source_platform=data.get("source_platform", "ambient"),
                     participants=data.get("participants", []),
                     start_time=datetime.fromisoformat(data["start_time"]) if data.get("start_time") else None,
                     end_time=datetime.fromisoformat(data["end_time"]) if data.get("end_time") else None,
                     duration_seconds=data.get("duration_seconds", 0),
                     memory_ids=data.get("memory_ids", []),
                     auto_ingested=data.get("auto_ingested", False),
+                    gemini_summary=data.get("gemini_summary"),
+                    topic_labels=data.get("topic_labels", []),
+                    importance_score=data.get("importance_score", 0.0),
+                    topic_segments=data.get("topic_segments", []),
                 )
                 self._conversations.append(record)
             except Exception:

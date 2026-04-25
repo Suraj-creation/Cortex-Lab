@@ -52,6 +52,13 @@ class AmbientConfig:
     # Gemini voice settings
     gemini_tts_voice: str = "Kore"     # Gemini voice: Aoede, Charon, Fenrir, Kore, Puck, etc.
 
+    # Conversational companion identity
+    assistant_name: str = "Eva"
+    assistant_aliases: list[str] = field(
+        default_factory=lambda: ["eva", "ava", "cortex", "assistant"]
+    )
+    companion_followup_window_s: int = 45
+
     # Wake word detection (Phase 4)
     wake_word_enabled: bool = False    # Enable wake word detection
     wake_word_model: str = "hey_jarvis"  # openwakeword model name

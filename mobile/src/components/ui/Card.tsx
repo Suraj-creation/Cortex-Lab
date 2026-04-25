@@ -1,13 +1,12 @@
 /**
- * Card — Neural Dark surface component
- * No borders — uses background color shifts for depth
- * Design: "Tonal Layering" from Cortex Neural Dark
+ * Card — Cortex Aurora light surface component
+ * White cards with subtle borders, shadows, and variants
  */
 import React from 'react';
 import { View, StyleSheet, ViewStyle } from 'react-native';
-import { NEURAL, RADIUS, FONT_SIZE } from '../../theme/colors';
+import { RADIUS, SHADOWS } from '../../theme/colors';
 
-export type CardVariant = 'default' | 'elevated' | 'outlined' | 'glass';
+export type CardVariant = 'default' | 'elevated' | 'outlined' | 'glass' | 'accent';
 export type CardPadding = 'none' | 'sm' | 'md' | 'lg';
 
 interface CardProps {
@@ -27,7 +26,7 @@ export function Card({
   padding = 'md',
   style,
   leftAccent = false,
-  leftAccentColor = NEURAL.primary,
+  leftAccentColor = '#6366f1',
 }: CardProps) {
   return (
     <View
@@ -51,25 +50,30 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   default: {
-    backgroundColor: NEURAL.surfaceContainer,  // #0f1930
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#f1f5f9',
+    ...SHADOWS.sm,
   },
   elevated: {
-    backgroundColor: NEURAL.surfaceContainerHigh,    // #141f38
-    shadowColor: NEURAL.primary,
-    shadowOpacity: 0.10,
-    shadowRadius: 20,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 5,
+    backgroundColor: '#ffffff',
+    ...SHADOWS.lg,
   },
   outlined: {
-    backgroundColor: NEURAL.surfaceContainer,
+    backgroundColor: '#ffffff',
     borderWidth: 1,
-    borderColor: NEURAL.outlineVariant,  // #40485d ghost border
+    borderColor: '#e2e8f0',
   },
   glass: {
-    backgroundColor: `${NEURAL.surfaceVariant}99`, // 60% opacity
+    backgroundColor: 'rgba(255, 255, 255, 0.75)',
     borderWidth: 1,
-    borderColor: `${NEURAL.outlineVariant}26`,     // 15% opacity
+    borderColor: 'rgba(241, 245, 249, 0.8)',
+    ...SHADOWS.sm,
+  },
+  accent: {
+    backgroundColor: '#eef2ff',
+    borderWidth: 1,
+    borderColor: '#c7d2fe',
   },
   leftAccentBase: {
     paddingLeft: 14,

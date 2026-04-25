@@ -3,9 +3,6 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   Mic,
-  Play,
-  Pause,
-  Square,
   Settings2,
   ArrowLeft,
   Activity,
@@ -20,12 +17,6 @@ import {
   Cpu,
 } from "lucide-react";
 import {
-  startAmbient,
-  startAmbientLive,
-  stopAmbient,
-  stopAmbientLive,
-  pauseAmbient,
-  resumeAmbient,
   getAmbientStatus,
   getConversations,
   getAmbientConfig,
@@ -38,6 +29,7 @@ import { AmbientState, AmbientStatusType, AmbientConfig, ConversationRecord, Voi
 import { LiveTranscript } from "./LiveTranscript";
 import { ConversationHistory } from "./ConversationHistory";
 import { VoiceEnrollment } from "./VoiceEnrollment";
+import { ClientAmbientCompanion } from "./voice/ClientAmbientCompanion";
 
 interface Props {
   onBack: () => void;
@@ -67,9 +59,9 @@ const STATUS_LABELS: Record<AmbientStatusType, string> = {
 
 export function AmbientPanel({ onBack }: Props) {
   const [status, setStatus] = useState<AmbientState | null>(null);
+  const [ambientConfig, setAmbientConfig] = useState<AmbientConfig | null>(null);
   const [activeTab, setActiveTab] = useState<AmbientTab>("live");
   const [conversations, setConversations] = useState<ConversationRecord[]>([]);
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Poll ambient status
@@ -91,6 +83,12 @@ export function AmbientPanel({ onBack }: Props) {
     return () => clearInterval(interval);
   }, [fetchStatus]);
 
+  useEffect(() => {
+    getAmbientConfig()
+      .then((config) => setAmbientConfig(config))
+      .catch(() => {});
+  }, []);
+
   // Load conversations when tab is active
   useEffect(() => {
     if (activeTab === "conversations") {
@@ -99,58 +97,6 @@ export function AmbientPanel({ onBack }: Props) {
         .catch(() => {});
     }
   }, [activeTab]);
-
-  const handleStart = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const useLiveMode =
-        status?.operating_mode === "gemini_live" ||
-        (status?.stt_provider === "gemini" && status?.tts_provider === "gemini");
-      const result = useLiveMode ? await startAmbientLive() : await startAmbient();
-      if (!result.success) setError(result.error || "Failed to start");
-      await fetchStatus();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Start failed");
-    }
-    setLoading(false);
-  };
-
-  const handleStop = async () => {
-    setLoading(true);
-    try {
-      if (status?.live?.running) {
-        await stopAmbientLive();
-      } else {
-        await stopAmbient();
-      }
-      await fetchStatus();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Stop failed");
-    }
-    setLoading(false);
-  };
-
-  const handlePauseResume = async () => {
-    setLoading(true);
-    try {
-      if (status?.status === "paused") {
-        await resumeAmbient();
-      } else {
-        await pauseAmbient();
-      }
-      await fetchStatus();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Action failed");
-    }
-    setLoading(false);
-  };
-
-  const isActive =
-    status?.status === "listening" ||
-    status?.status === "speech_detected" ||
-    status?.status === "transcribing";
-  const isPaused = status?.status === "paused";
   const isLiveMode = status?.operating_mode === "gemini_live";
 
   const tabs: { id: AmbientTab; label: string; icon: typeof Mic }[] = [
@@ -199,39 +145,17 @@ export function AmbientPanel({ onBack }: Props) {
             </div>
           </div>
 
-          {/* Control Buttons */}
           <div className="flex items-center gap-2">
-            {(isActive || isPaused) && (
-              <button
-                onClick={handlePauseResume}
-                disabled={loading}
-                className="flex items-center gap-1.5 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 hover:bg-amber-100 transition-all disabled:opacity-50"
-              >
-                {isPaused ? <Play size={14} /> : <Pause size={14} />}
-                {isPaused ? "Resume" : "Pause"}
-              </button>
-            )}
-            {isActive || isPaused ? (
-              <button
-                onClick={handleStop}
-                disabled={loading}
-                className="flex items-center gap-1.5 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-100 transition-all disabled:opacity-50"
-              >
-                <Square size={14} />
-                Stop
-              </button>
-            ) : (
-              <button
-                onClick={handleStart}
-                disabled={loading || status?.status === "loading"}
-                className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-500 px-4 py-2 text-xs font-medium text-white hover:from-indigo-600 hover:to-violet-600 transition-all disabled:opacity-50 shadow-sm"
-              >
-                <Mic size={14} />
-                {loading || status?.status === "loading"
-                  ? "Starting..."
-                  : "Start Listening"}
-              </button>
-            )}
+            <div className="rounded-2xl border border-slate-200 bg-white px-3 py-2 text-right shadow-sm">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.22em] text-slate-400">
+                Companion
+              </div>
+              <div className="mt-1 text-xs font-medium text-slate-700">
+                {status?.client_session?.active_session_id
+                  ? "Client listening active"
+                  : "Ready for browser capture"}
+              </div>
+            </div>
           </div>
         </div>
 
@@ -242,7 +166,7 @@ export function AmbientPanel({ onBack }: Props) {
         )}
 
         {/* Stats Bar */}
-        {status && status.status !== "idle" && (
+        {status && (
           <div className="flex items-center gap-6 mt-3 text-xs text-slate-500">
             <div className="flex items-center gap-1.5">
               <Activity size={12} className="text-emerald-500" />
@@ -289,6 +213,11 @@ export function AmbientPanel({ onBack }: Props) {
                 Turns: {status.live.user_turns}/{status.live.assistant_turns || 0}
               </span>
             )}
+            {status.client_session?.active_session_id && (
+              <span className="text-[10px] font-medium text-slate-500">
+                Session: {status.client_session.active_session_id.slice(0, 18)}
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -315,7 +244,18 @@ export function AmbientPanel({ onBack }: Props) {
 
       {/* Tab Content */}
       <div className="flex-1 overflow-y-auto">
-        {activeTab === "live" && <LiveTranscript status={status} />}
+        {activeTab === "live" && (
+          <div className="space-y-6 p-6">
+            <ClientAmbientCompanion
+              ambientState={status}
+              ambientConfig={ambientConfig}
+              onSessionUpdate={fetchStatus}
+            />
+            <div className="overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_18px_48px_-38px_rgba(15,23,42,0.45)]">
+              <LiveTranscript status={status} />
+            </div>
+          </div>
+        )}
         {activeTab === "conversations" && (
           <ConversationHistory
             conversations={conversations}
@@ -327,7 +267,13 @@ export function AmbientPanel({ onBack }: Props) {
           />
         )}
         {activeTab === "enrollment" && <VoiceEnrollment status={status} />}
-        {activeTab === "settings" && <AmbientSettings status={status} />}
+        {activeTab === "settings" && (
+          <AmbientSettings
+            status={status}
+            ambientConfig={ambientConfig}
+            onConfigSaved={setAmbientConfig}
+          />
+        )}
       </div>
     </div>
   );
@@ -355,9 +301,20 @@ const DEFAULT_CONFIG: AmbientConfig = {
   energy_gate_threshold: 700,
   energy_min_speech_ms: 320,
   energy_silence_ms: 420,
+  assistant_name: "Eva",
+  assistant_aliases: ["eva", "ava", "cortex", "assistant"],
+  companion_followup_window_s: 45,
 };
 
-function AmbientSettings({ status }: { status: AmbientState | null }) {
+function AmbientSettings({
+  status,
+  ambientConfig,
+  onConfigSaved,
+}: {
+  status: AmbientState | null;
+  ambientConfig: AmbientConfig | null;
+  onConfigSaved?: (config: AmbientConfig) => void;
+}) {
   const [config, setConfig] = useState<AmbientConfig>(DEFAULT_CONFIG);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -369,18 +326,33 @@ function AmbientSettings({ status }: { status: AmbientState | null }) {
 
   // Load config on mount
   useEffect(() => {
-    getAmbientConfig()
-      .then((c) => {
-        setConfig(c);
-        setDirty(false);
-      })
-      .catch(() => {
-        // Use defaults if ambient not initialized yet
-      });
     getVoiceProviders()
       .then(setProviders)
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!ambientConfig || dirty) {
+      return;
+    }
+    setConfig(ambientConfig);
+  }, [ambientConfig, dirty]);
+
+  useEffect(() => {
+    if (ambientConfig) {
+      setConfig(ambientConfig);
+      return;
+    }
+    getAmbientConfig()
+      .then((c) => {
+        setConfig(c);
+        setDirty(false);
+        onConfigSaved?.(c);
+      })
+      .catch(() => {
+        // Use defaults if ambient not initialized yet
+      });
+  }, [ambientConfig, onConfigSaved]);
 
   const updateField = <K extends keyof AmbientConfig>(
     key: K,
@@ -398,6 +370,7 @@ function AmbientSettings({ status }: { status: AmbientState | null }) {
       const updated = await updateAmbientConfig(config);
       setConfig(updated);
       setDirty(false);
+      onConfigSaved?.(updated);
       setSaveMsg("Settings saved");
       setTimeout(() => setSaveMsg(null), 2000);
     } catch (e: unknown) {
@@ -417,7 +390,9 @@ function AmbientSettings({ status }: { status: AmbientState | null }) {
     try {
       const res = await setSTTProvider(provider);
       if (res.success) {
-        setConfig((prev) => ({ ...prev, stt_provider: provider }));
+        const nextConfig = { ...config, stt_provider: provider };
+        setConfig(nextConfig);
+        onConfigSaved?.(nextConfig);
         setProviders((prev) => prev ? { ...prev, stt_provider: provider } : prev);
       }
     } catch {
@@ -431,7 +406,9 @@ function AmbientSettings({ status }: { status: AmbientState | null }) {
     try {
       const res = await setTTSProvider(provider);
       if (res.success) {
-        setConfig((prev) => ({ ...prev, tts_provider: provider }));
+        const nextConfig = { ...config, tts_provider: provider };
+        setConfig(nextConfig);
+        onConfigSaved?.(nextConfig);
         setProviders((prev) => prev ? { ...prev, tts_provider: provider } : prev);
       }
     } catch {
@@ -641,6 +618,76 @@ function AmbientSettings({ status }: { status: AmbientState | null }) {
                 Gemini Ready
               </span>
             )}
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h3 className="text-sm font-semibold text-slate-700 mb-3">
+          Companion Identity
+        </h3>
+        <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-4">
+          <div className="grid gap-4 md:grid-cols-2">
+            <label className="block">
+              <span className="text-xs text-slate-600 font-medium">
+                Assistant Name
+              </span>
+              <input
+                type="text"
+                value={config.assistant_name || ""}
+                onChange={(e) => updateField("assistant_name", e.target.value)}
+                className="mt-2 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700 outline-none transition focus:border-indigo-300 focus:bg-white"
+                placeholder="Eva"
+              />
+            </label>
+            <label className="block">
+              <span className="text-xs text-slate-600 font-medium">
+                Wake Aliases
+              </span>
+              <input
+                type="text"
+                value={(config.assistant_aliases || []).join(", ")}
+                onChange={(e) =>
+                  updateField(
+                    "assistant_aliases",
+                    e.target.value
+                      .split(",")
+                      .map((value) => value.trim().toLowerCase())
+                      .filter(Boolean)
+                  )
+                }
+                className="mt-2 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700 outline-none transition focus:border-indigo-300 focus:bg-white"
+                placeholder="eva, ava, cortex"
+              />
+            </label>
+          </div>
+          <div>
+            <div className="mb-1.5 flex items-center justify-between">
+              <span className="text-xs text-slate-500">
+                Follow-up Reply Window
+              </span>
+              <span className="text-xs font-mono text-slate-700">
+                {config.companion_followup_window_s || 45}s
+              </span>
+            </div>
+            <input
+              type="range"
+              min={10}
+              max={120}
+              step={5}
+              value={config.companion_followup_window_s || 45}
+              onChange={(e) =>
+                updateField(
+                  "companion_followup_window_s",
+                  parseInt(e.target.value, 10)
+                )
+              }
+              className="w-full"
+            />
+            <p className="mt-1.5 text-[10px] text-slate-400">
+              After you say the assistant name, turns inside this window stay
+              in spoken conversation mode without repeating the wake word.
+            </p>
           </div>
         </div>
       </div>

@@ -105,6 +105,39 @@ class RuntimeSessionManager:
         with self._lock:
             return self._sessions.get(session_id)
 
+    def update_metadata(self, session_id: str, metadata: Dict[str, Any]) -> RuntimeSession:
+        with self._lock:
+            if session_id not in self._sessions:
+                raise KeyError(f"session_not_found:{session_id}")
+            session = self._sessions[session_id]
+            session.metadata.update(dict(metadata or {}))
+            return session
+
+    def merge_retention_summary(self, session_id: str, updates: Dict[str, int]) -> RuntimeSession:
+        with self._lock:
+            if session_id not in self._sessions:
+                raise KeyError(f"session_not_found:{session_id}")
+            session = self._sessions[session_id]
+            for key, value in dict(updates or {}).items():
+                try:
+                    session.retention_summary[key] = int(session.retention_summary.get(key, 0)) + int(value)
+                except Exception:
+                    continue
+            return session
+
+    def append_agent_tags(self, session_id: str, tags: List[str]) -> RuntimeSession:
+        with self._lock:
+            if session_id not in self._sessions:
+                raise KeyError(f"session_not_found:{session_id}")
+            session = self._sessions[session_id]
+            merged = list(session.agent_tags)
+            for tag in list(tags or []):
+                normalized = str(tag or "").strip()
+                if normalized and normalized not in merged:
+                    merged.append(normalized)
+            session.agent_tags = merged
+            return session
+
     def list_sessions(self, limit: int = 100) -> List[Dict[str, Any]]:
         with self._lock:
             sessions = list(self._sessions.values())

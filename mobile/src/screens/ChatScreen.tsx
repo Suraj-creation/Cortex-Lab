@@ -1,6 +1,5 @@
 /**
- * ChatScreen — Neural Dark AI Chat
- * Stitch ref: a7edacc10a204e7dae4dcd52d1057123
+ * ChatScreen — Cortex Aurora AI Chat
  * Features: Provider pills, quick prompts, message list, streaming input bar
  */
 import React, { useCallback, useRef, useEffect } from 'react';
@@ -16,7 +15,7 @@ import {
   TextInput as RNTextInput,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { NEURAL, SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT } from '../theme/colors';
+import { SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT, SHADOWS } from '../theme/colors';
 import { MessageBubble } from '../components/MessageBubble';
 import { NeuralPulse } from '../components/ui/NeuralPulse';
 import { AppIcon } from '../components/ui/AppIcon';
@@ -90,38 +89,65 @@ export function ChatScreen({
           <TouchableOpacity
             onPress={onToggleProvider}
             disabled={providerBusy}
-            style={[styles.pill, settings.llmProvider === 'gemini' ? styles.pillBlue : styles.pillViolet]}
+            style={[
+              styles.pill,
+              settings.llmProvider === 'gemini' ? styles.pillBlue : styles.pillViolet,
+            ]}
           >
-            <Text style={styles.pillText}>{providerLabel}</Text>
+            <AppIcon
+              name={settings.llmProvider === 'gemini' ? 'cloud-outline' : 'chip'}
+              size={12}
+              color={settings.llmProvider === 'gemini' ? '#3b82f6' : '#8b5cf6'}
+            />
+            <Text style={[
+              styles.pillText,
+              { color: settings.llmProvider === 'gemini' ? '#2563eb' : '#7c3aed' },
+            ]}>
+              {providerLabel}
+            </Text>
           </TouchableOpacity>
 
           <TouchableOpacity
             onPress={onToggleRAG}
             style={[styles.pill, settings.useRAG ? styles.pillGreen : styles.pillNeutral]}
           >
-            <Text style={styles.pillText}>{settings.useRAG ? 'RAG On' : 'RAG Off'}</Text>
+            <View style={[styles.pillDot, { backgroundColor: settings.useRAG ? '#10b981' : '#94a3b8' }]} />
+            <Text style={[
+              styles.pillText,
+              { color: settings.useRAG ? '#065f46' : '#64748b' },
+            ]}>
+              {settings.useRAG ? 'RAG On' : 'RAG Off'}
+            </Text>
           </TouchableOpacity>
 
           <TouchableOpacity
             onPress={onToggleStream}
             style={[styles.pill, settings.stream ? styles.pillAmber : styles.pillNeutral]}
           >
-            <Text style={styles.pillText}>{settings.stream ? 'Stream' : 'Batch'}</Text>
+            <Text style={[
+              styles.pillText,
+              { color: settings.stream ? '#92400e' : '#64748b' },
+            ]}>
+              {settings.stream ? '⚡ Stream' : 'Batch'}
+            </Text>
           </TouchableOpacity>
         </ScrollView>
 
         {/* Quick prompts */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.quickRow}
-        >
-          {QUICK_PROMPTS.map((p) => (
-            <TouchableOpacity key={p} onPress={() => setInput(p.replace(/^[^\s]+\s/, ''))} style={styles.quickChip}>
-              <Text style={styles.quickText} numberOfLines={1}>{p}</Text>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
+        {messages.length <= 1 && (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.quickRow}
+          >
+            {QUICK_PROMPTS.map((p) => (
+              <TouchableOpacity key={p} onPress={() => setInput(p)} style={styles.quickChip}>
+                <AppIcon name="lightning-bolt-outline" size={12} color="#6366f1" />
+                <Text style={styles.quickText} numberOfLines={1}>{p}</Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        )}
       </View>
 
       {/* ── Messages ─ */}
@@ -146,8 +172,11 @@ export function ChatScreen({
         )}
         ListEmptyComponent={
           <View style={styles.empty}>
+            <View style={styles.emptyIconContainer}>
+              <AppIcon name="chat-processing-outline" size={36} color="#a5b4fc" />
+            </View>
             <Text style={styles.emptyTitle}>Start a conversation</Text>
-            <Text style={styles.emptyBody}>Ask Cortex Lab anything…</Text>
+            <Text style={styles.emptyBody}>Ask Cortex Lab anything about your memories, knowledge, and experiences…</Text>
           </View>
         }
       />
@@ -155,7 +184,8 @@ export function ChatScreen({
       {/* ── Error banner ─ */}
       {globalError ? (
         <View style={styles.errorBanner}>
-          <Text style={styles.errorText}>{globalError}</Text>
+          <AppIcon name="alert-circle-outline" size={14} color="#e11d48" />
+          <Text style={styles.errorText} numberOfLines={2}>{globalError}</Text>
         </View>
       ) : null}
 
@@ -163,28 +193,20 @@ export function ChatScreen({
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={16}>
         <View style={styles.inputBar}>
           <View style={styles.inputWrap}>
-            {/* Mic icon */}
-            <View style={styles.inputIcon}>
-              <AppIcon name="microphone-outline" size={16} color={NEURAL.onSurfaceVariant} />
-            </View>
-
+            <AppIcon name="microphone-outline" size={16} color="#94a3b8" style={{ paddingBottom: 2 }} />
             <RNTextInput
               ref={inputRef}
               style={styles.input}
               placeholder="Message Cortex Lab…"
-              placeholderTextColor={NEURAL.outline}
+              placeholderTextColor="#94a3b8"
               value={input}
               onChangeText={setInput}
               multiline
               maxLength={4000}
               editable={!sending}
-              selectionColor={NEURAL.primary}
+              selectionColor="#6366f1"
             />
-
-            {/* Attach icon */}
-            <View style={styles.inputIcon}>
-              <AppIcon name="paperclip" size={16} color={NEURAL.onSurfaceVariant} />
-            </View>
+            <AppIcon name="paperclip" size={16} color="#94a3b8" style={{ paddingBottom: 2 }} />
           </View>
 
           {/* Send button */}
@@ -194,15 +216,17 @@ export function ChatScreen({
             style={[styles.sendBtn, (!input.trim() || sending) && styles.sendBtnDisabled]}
           >
             {sending && streamingMessageId ? (
-              <NeuralPulse active size={8} color="#ffffff" />
+              <View style={styles.sendBtnLoading}>
+                <NeuralPulse active size={8} color="#6366f1" />
+              </View>
             ) : (
               <LinearGradient
-                colors={[NEURAL.primary, NEURAL.primaryDim]}
+                colors={['#6366f1', '#4f46e5']}
                 start={{ x: 0, y: 0 }}
                 end={{ x: 1, y: 1 }}
                 style={styles.sendBtnGradient}
               >
-                <AppIcon name="arrow-up" size={16} color="#ffffff" style={styles.sendIcon} />
+                <AppIcon name="arrow-up" size={18} color="#ffffff" />
               </LinearGradient>
             )}
           </TouchableOpacity>
@@ -220,13 +244,15 @@ export function ChatScreen({
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: NEURAL.background },
+  container: { flex: 1, backgroundColor: '#f8fafc' },
 
   // Top control bar
   topBar: {
-    backgroundColor: NEURAL.surfaceContainerLow,
+    backgroundColor: '#ffffff',
     paddingTop: SPACING.sm,
     paddingBottom: SPACING.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
   },
   pillRow: {
     paddingHorizontal: SPACING.lg,
@@ -234,20 +260,28 @@ const styles = StyleSheet.create({
     paddingBottom: SPACING.sm,
   },
   pill: {
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingHorizontal: SPACING.md,
     paddingVertical: 5,
     borderRadius: RADIUS.full,
     borderWidth: 1,
+    gap: 4,
   },
-  pillBlue:    { backgroundColor: `${NEURAL.primary}22`,    borderColor: `${NEURAL.primary}60` },
-  pillViolet:  { backgroundColor: `${NEURAL.secondary}22`,  borderColor: `${NEURAL.secondary}60` },
-  pillGreen:   { backgroundColor: `${NEURAL.tertiary}22`,   borderColor: `${NEURAL.tertiary}60` },
-  pillAmber:   { backgroundColor: '#f59e0b22',               borderColor: '#f59e0b60' },
-  pillNeutral: { backgroundColor: NEURAL.surfaceContainerHigh, borderColor: NEURAL.outlineVariant },
+  pillDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  pillBlue:    { backgroundColor: '#eff6ff',   borderColor: '#bfdbfe' },
+  pillViolet:  { backgroundColor: '#f5f3ff',   borderColor: '#ddd6fe' },
+  pillGreen:   { backgroundColor: '#f0fdf4',   borderColor: '#bbf7d0' },
+  pillAmber:   { backgroundColor: '#fffbeb',   borderColor: '#fde68a' },
+  pillNeutral: { backgroundColor: '#f1f5f9',   borderColor: '#e2e8f0' },
   pillText: {
     fontSize: FONT_SIZE.xs,
     fontWeight: FONT_WEIGHT.semibold,
-    color: NEURAL.onSurfaceVariant,
+    color: '#475569',
   },
 
   // Quick prompts
@@ -256,17 +290,20 @@ const styles = StyleSheet.create({
     gap: SPACING.sm,
   },
   quickChip: {
-    backgroundColor: NEURAL.surfaceContainerHighest,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#eef2ff',
     borderRadius: RADIUS.full,
     borderWidth: 1,
-    borderColor: NEURAL.outlineVariant,
+    borderColor: '#c7d2fe',
     paddingHorizontal: SPACING.md,
-    paddingVertical: 5,
-    maxWidth: 220,
+    paddingVertical: 6,
+    maxWidth: 240,
+    gap: 4,
   },
   quickText: {
     fontSize: FONT_SIZE.xs,
-    color: NEURAL.onSurfaceVariant,
+    color: '#4338ca',
     fontWeight: FONT_WEIGHT.medium,
   },
 
@@ -278,33 +315,47 @@ const styles = StyleSheet.create({
   empty: {
     alignItems: 'center',
     paddingVertical: SPACING['5xl'],
-    paddingHorizontal: SPACING.lg,
+    paddingHorizontal: SPACING['2xl'],
+  },
+  emptyIconContainer: {
+    width: 72,
+    height: 72,
+    borderRadius: RADIUS['2xl'],
+    backgroundColor: '#eef2ff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: SPACING.lg,
   },
   emptyTitle: {
     fontSize: FONT_SIZE.xl,
     fontWeight: FONT_WEIGHT.bold,
-    color: NEURAL.onSurface,
+    color: '#0f172a',
     marginBottom: SPACING.sm,
   },
   emptyBody: {
     fontSize: FONT_SIZE.base,
-    color: NEURAL.onSurfaceVariant,
+    color: '#64748b',
     textAlign: 'center',
+    lineHeight: 20,
   },
 
   // Error
   errorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
     marginHorizontal: SPACING.lg,
     marginBottom: SPACING.sm,
-    backgroundColor: `${NEURAL.error}22`,
+    backgroundColor: '#fff1f2',
     borderWidth: 1,
-    borderColor: `${NEURAL.error}60`,
+    borderColor: '#fecdd3',
     borderRadius: RADIUS.lg,
     padding: SPACING.md,
+    gap: SPACING.sm,
   },
   errorText: {
+    flex: 1,
     fontSize: FONT_SIZE.sm,
-    color: NEURAL.error,
+    color: '#e11d48',
   },
 
   // Input
@@ -314,59 +365,69 @@ const styles = StyleSheet.create({
     gap: SPACING.sm,
     paddingHorizontal: SPACING.lg,
     paddingTop: SPACING.md,
-    paddingBottom: SPACING.md,
-    backgroundColor: NEURAL.surfaceContainerLow,
+    paddingBottom: SPACING.sm,
+    backgroundColor: '#ffffff',
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
   },
   inputWrap: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'flex-end',
-    backgroundColor: NEURAL.surfaceContainerHighest,
-    borderRadius: RADIUS.full,
+    backgroundColor: '#f8fafc',
+    borderRadius: RADIUS['2xl'],
     borderWidth: 1,
-    borderColor: NEURAL.outlineVariant,
+    borderColor: '#e2e8f0',
     paddingHorizontal: SPACING.md,
     paddingVertical: SPACING.sm,
     gap: SPACING.sm,
     minHeight: 46,
   },
-  inputIcon: { paddingBottom: 2 },
   input: {
     flex: 1,
     fontSize: FONT_SIZE.base,
-    color: NEURAL.onSurface,
+    color: '#0f172a',
     maxHeight: 120,
     padding: 0,
     margin: 0,
     paddingVertical: 2,
   },
   sendBtn: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
   },
-  sendBtnDisabled: { opacity: 0.45 },
-  sendBtnGradient: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
+  sendBtnDisabled: { opacity: 0.4 },
+  sendBtnLoading: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#eef2ff',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  sendIcon: { marginBottom: 1 },
+  sendBtnGradient: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...SHADOWS.glow,
+  },
 
   // Meta row
   metaRow: {
-    backgroundColor: NEURAL.surfaceContainerLow,
+    backgroundColor: '#ffffff',
     paddingHorizontal: SPACING.lg,
     paddingBottom: SPACING.sm,
   },
   metaText: {
-    fontSize: FONT_SIZE.xs,
-    color: NEURAL.outline,
+    fontSize: 10,
+    color: '#94a3b8',
     textAlign: 'right',
+    letterSpacing: 0.3,
   },
 });

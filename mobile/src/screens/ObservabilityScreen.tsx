@@ -1,99 +1,49 @@
 /**
- * ObservabilityScreen — Neural Dark pipeline + runtime operations center.
+ * ObservabilityScreen — Cortex Aurora Pipeline Observability + Runtime Operations
+ * Full metrics dashboard, pipeline traces, runtime tasks, and agent events
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View,
   Text,
   ScrollView,
   StyleSheet,
-  ActivityIndicator,
   TouchableOpacity,
-  Platform,
+  RefreshControl,
+  FlatList,
+  Alert,
 } from 'react-native';
-import { NEURAL, SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT } from '../theme/colors';
+import { SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT, SHADOWS } from '../theme/colors';
+import { AppIcon } from '../components/ui/AppIcon';
 import { Card } from '../components/ui/Card';
-import { Badge, type BadgeVariant } from '../components/ui/Badge';
+import { MetricCard } from '../components/ui/MetricCard';
+import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
-import { NeuralPulse } from '../components/ui/NeuralPulse';
-import { AppIcon, type AppIconName } from '../components/ui/AppIcon';
-import PipelineTracesList from '../components/PipelineTracesList';
-import type { ApiClient } from '../../shared/core/api';
-import type {
-  LivePipelineEvent,
-  RuntimeExecutorStatus,
-  RuntimePermissionRequest,
-  RuntimeTaskEvent,
-  RuntimeTaskSnapshot,
-} from '../../shared/core/types';
+import { SectionHeader } from '../components/ui/SectionHeader';
+import { LoadingSpinner } from '../components/ui/LoadingSpinner';
+import { EmptyState } from '../components/ui/EmptyState';
+import type { LivePipelineEvent, RAGStats, PipelineTrace, TracesResponse } from '../../shared/core/types';
 
-function shortNum(v: unknown): string {
-  if (typeof v !== 'number') return String(v ?? '-');
-  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
-  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`;
-  return Number.isInteger(v) ? `${v}` : v.toFixed(2);
-}
-
-function formatRelativeTime(ts: number | null): string {
-  if (!ts) return 'never';
-  const d = Date.now() - ts;
-  if (d < 5000) return 'just now';
-  if (d < 60000) return `${Math.round(d / 1000)}s ago`;
-  if (d < 3600000) return `${Math.round(d / 60000)}m ago`;
-  return `${Math.round(d / 3600000)}h ago`;
-}
-
-function formatIsoRelative(iso: string): string {
-  const ts = Date.parse(iso);
-  if (Number.isNaN(ts)) return iso;
-  return formatRelativeTime(ts);
-}
-
-const STATUS_CONFIG: Record<string, { color: string; pulse: boolean }> = {
-  running: { color: NEURAL.primary, pulse: true },
-  complete: { color: NEURAL.tertiary, pulse: false },
-  completed: { color: NEURAL.tertiary, pulse: false },
-  success: { color: NEURAL.tertiary, pulse: false },
-  error: { color: NEURAL.error, pulse: false },
-  failed: { color: NEURAL.error, pulse: false },
-};
-
-const TASK_VARIANT: Record<string, BadgeVariant> = {
-  queued: 'info',
-  running: 'primary',
-  waiting_approval: 'warning',
-  blocked: 'error',
-  completed: 'success',
-  failed: 'error',
-  cancelled: 'ghost',
-};
-
-const PERMISSION_VARIANT: Record<string, BadgeVariant> = {
-  pending: 'warning',
-  approved: 'success',
-  denied: 'error',
-  expired: 'ghost',
-};
+type ObsTab = 'metrics' | 'traces' | 'events' | 'runtime';
 
 interface ObservabilityScreenProps {
   observabilityMetrics: Record<string, unknown> | null;
   pipelineEvents: LivePipelineEvent[];
   loadingView: boolean;
   apiBaseUrl: string;
-  api: ApiClient;
+  api: any;
 }
 
-const METRIC_KEYS = [
-  { key: 'total_queries', label: 'Queries', iconName: 'database-search-outline' as AppIconName },
-  { key: 'cache_hits', label: 'Cache Hits', iconName: 'lightning-bolt-outline' as AppIconName },
-  { key: 'total_embeddings', label: 'Embeddings', iconName: 'vector-link' as AppIconName },
-  { key: 'total_memories', label: 'Memories', iconName: 'brain' as AppIconName },
-  { key: 'avg_response_ms', label: 'Avg Latency', iconName: 'timer-outline' as AppIconName },
-  { key: 'error_count', label: 'Errors', iconName: 'alert-circle-outline' as AppIconName },
-];
-
-function sortTasks(tasks: RuntimeTaskSnapshot[]): RuntimeTaskSnapshot[] {
-  return [...tasks].sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at));
+function compact(value: unknown, maxLen: number = 200): string {
+  if (typeof value === 'string') {
+    return value.length > maxLen ? `${value.slice(0, maxLen)}...` : value;
+  }
+  try {
+    const text = JSON.stringify(value);
+    return text.length > maxLen ? `${text.slice(0, maxLen)}...` : text;
+  } catch {
+    return 'No details';
+  }
 }
 
 export function ObservabilityScreen({
@@ -103,473 +53,1016 @@ export function ObservabilityScreen({
   apiBaseUrl,
   api,
 }: ObservabilityScreenProps) {
-  const [expandedMetrics, setExpandedMetrics] = useState(false);
+  const [activeTab, setActiveTab] = useState<ObsTab>('metrics');
+  const [traces, setTraces] = useState<PipelineTrace[]>([]);
+  const [tracesLoading, setTracesLoading] = useState(false);
+  const [selectedTrace, setSelectedTrace] = useState<PipelineTrace | null>(null);
 
-  const [runtimePermissions, setRuntimePermissions] = useState<RuntimePermissionRequest[]>([]);
-  const [runtimeExecutorStatus, setRuntimeExecutorStatus] = useState<RuntimeExecutorStatus | null>(null);
-  const [runtimeTasks, setRuntimeTasks] = useState<RuntimeTaskSnapshot[]>([]);
-  const [runtimeTaskEvents, setRuntimeTaskEvents] = useState<RuntimeTaskEvent[]>([]);
+  const [runtimeLoading, setRuntimeLoading] = useState(false);
+  const [runtimeHealth, setRuntimeHealth] = useState<Record<string, any> | null>(null);
+  const [runtimePermissions, setRuntimePermissions] = useState<any[]>([]);
+  const [runtimeTasks, setRuntimeTasks] = useState<any[]>([]);
+  const [runtimeAudit, setRuntimeAudit] = useState<any[]>([]);
+  const [runtimeExecutor, setRuntimeExecutor] = useState<Record<string, any> | null>(null);
+  const [runtimeContracts, setRuntimeContracts] = useState<Record<string, any> | null>(null);
+  const [runtimeInterfaces, setRuntimeInterfaces] = useState<Record<string, any> | null>(null);
+  const [memoryQualityHistory, setMemoryQualityHistory] = useState<any[]>([]);
+  const [memoryEvalBusy, setMemoryEvalBusy] = useState(false);
 
-  const [runtimeBusy, setRuntimeBusy] = useState(false);
-  const [runtimeError, setRuntimeError] = useState('');
-  const [actionBusyId, setActionBusyId] = useState<string | null>(null);
-
-  const loadRuntimeOps = useCallback(async (silent = false) => {
-    if (!silent) setRuntimeBusy(true);
+  const loadTraces = useCallback(async () => {
+    setTracesLoading(true);
     try {
-      const [permissionsResponse, executorResponse, tasksResponse] = await Promise.all([
-        api.getRuntimeSafetyPermissions(),
-        api.getRuntimeSafetyExecutorStatus(),
-        api.getRuntimeTasks(),
-      ]);
-      setRuntimePermissions(permissionsResponse.pending || []);
-      setRuntimeExecutorStatus(executorResponse);
-      setRuntimeTasks(sortTasks(tasksResponse.tasks || []).slice(0, 40));
-      setRuntimeError('');
+      const data: TracesResponse = await api.getPipelineTraces?.(30);
+      setTraces(data?.traces || []);
+    } catch {}
+    setTracesLoading(false);
+  }, [api]);
+
+  const loadTraceDetail = useCallback(async (traceId: string) => {
+    try {
+      const detail: PipelineTrace = await api.getPipelineTraceById?.(traceId);
+      setSelectedTrace(detail);
     } catch (e) {
-      setRuntimeError(e instanceof Error ? e.message : String(e));
-    } finally {
-      if (!silent) setRuntimeBusy(false);
+      Alert.alert('Error', 'Failed to load trace details');
     }
+  }, [api]);
+
+  const loadRuntimeCenter = useCallback(async () => {
+    setRuntimeLoading(true);
+    try {
+      const [
+        healthRes,
+        permsRes,
+        tasksRes,
+        auditRes,
+        executorRes,
+        contractsRes,
+        interfacesRes,
+        memoryHistoryRes,
+      ] = await Promise.allSettled([
+        api.getRuntimeHealth?.(),
+        api.getRuntimeSafetyPermissions?.(),
+        api.getRuntimeTasks?.(),
+        api.getRuntimeSafetyAudit?.(80),
+        api.getRuntimeSafetyExecutorStatus?.(),
+        api.getRuntimeToolContracts?.(),
+        api.getRuntimeInterfaces?.(),
+        api.getMemoryQualityHistory?.(20),
+      ]);
+
+      setRuntimeHealth(healthRes.status === 'fulfilled' ? (healthRes.value || null) : null);
+      setRuntimePermissions(
+        permsRes.status === 'fulfilled' && Array.isArray(permsRes.value?.pending)
+          ? permsRes.value.pending
+          : [],
+      );
+      setRuntimeTasks(
+        tasksRes.status === 'fulfilled' && Array.isArray(tasksRes.value?.tasks)
+          ? tasksRes.value.tasks
+          : [],
+      );
+      setRuntimeAudit(
+        auditRes.status === 'fulfilled' && Array.isArray(auditRes.value?.events)
+          ? auditRes.value.events
+          : [],
+      );
+      setRuntimeExecutor(executorRes.status === 'fulfilled' ? (executorRes.value || null) : null);
+      setRuntimeContracts(contractsRes.status === 'fulfilled' ? (contractsRes.value || null) : null);
+      setRuntimeInterfaces(interfacesRes.status === 'fulfilled' ? (interfacesRes.value || null) : null);
+      setMemoryQualityHistory(
+        memoryHistoryRes.status === 'fulfilled' && Array.isArray(memoryHistoryRes.value?.history)
+          ? memoryHistoryRes.value.history
+          : [],
+      );
+    } catch {
+      setRuntimeHealth(null);
+      setRuntimePermissions([]);
+      setRuntimeTasks([]);
+      setRuntimeAudit([]);
+      setRuntimeExecutor(null);
+      setRuntimeContracts(null);
+      setRuntimeInterfaces(null);
+      setMemoryQualityHistory([]);
+    }
+    setRuntimeLoading(false);
   }, [api]);
 
   const resolvePermission = useCallback(
     async (permissionId: string, approve: boolean) => {
-      setActionBusyId(permissionId);
       try {
-        await api.resolveRuntimeSafetyPermission(permissionId, approve);
-        await loadRuntimeOps(true);
-        setRuntimeError('');
-      } catch (e) {
-        setRuntimeError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setActionBusyId(null);
+        await api.resolveRuntimeSafetyPermission?.(
+          permissionId,
+          approve,
+          'mobile-operator',
+          approve ? 'Approved from runtime operations center' : 'Denied from runtime operations center',
+        );
+        await loadRuntimeCenter();
+      } catch {
+        Alert.alert('Action Failed', 'Unable to resolve runtime permission request.');
       }
     },
-    [api, loadRuntimeOps],
+    [api, loadRuntimeCenter],
   );
 
   const cancelTask = useCallback(
     async (taskId: string) => {
-      setActionBusyId(taskId);
       try {
-        await api.cancelRuntimeTask(taskId);
-        await loadRuntimeOps(true);
-        setRuntimeError('');
-      } catch (e) {
-        setRuntimeError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setActionBusyId(null);
+        await api.cancelRuntimeTask?.(taskId, 'Cancelled from mobile runtime operations center', true);
+        await loadRuntimeCenter();
+      } catch {
+        Alert.alert('Action Failed', 'Unable to cancel runtime task.');
       }
     },
-    [api, loadRuntimeOps],
+    [api, loadRuntimeCenter],
   );
 
-  useEffect(() => {
-    void loadRuntimeOps();
-
-    if (Platform.OS !== 'web') {
-      const interval = setInterval(() => void loadRuntimeOps(true), 4500);
-      return () => clearInterval(interval);
+  const runMemoryQualityEval = useCallback(async () => {
+    setMemoryEvalBusy(true);
+    try {
+      await api.evaluateMemoryQuality?.({ topK: 5 });
+      await loadRuntimeCenter();
+    } catch {
+      Alert.alert('Evaluation Failed', 'Unable to run memory quality evaluation.');
     }
+    setMemoryEvalBusy(false);
+  }, [api, loadRuntimeCenter]);
 
-    const controller = api.subscribeRuntimeTaskEvents({
-      onEvent: (event) => {
-        setRuntimeTaskEvents((prev) => [event, ...prev].slice(0, 60));
-        setRuntimeTasks((prev) => {
-          const filtered = prev.filter((task) => task.task_id !== event.task.task_id);
-          return sortTasks([event.task, ...filtered]).slice(0, 40);
-        });
-      },
-      onError: (e) => {
-        setRuntimeError(e.message);
-      },
-    });
+  const metrics = observabilityMetrics;
 
-    const interval = setInterval(() => void loadRuntimeOps(true), 7000);
-    return () => {
-      controller.abort();
-      clearInterval(interval);
-    };
-  }, [api, loadRuntimeOps]);
+  const tabs: { key: ObsTab; label: string; icon: string }[] = [
+    { key: 'metrics', label: 'Metrics', icon: 'chart-bar' },
+    { key: 'traces', label: 'Traces', icon: 'timeline-clock-outline' },
+    { key: 'events', label: 'Live Events', icon: 'lightning-bolt' },
+    { key: 'runtime', label: 'Runtime', icon: 'shield-check-outline' },
+  ];
+
+  // Helpers for extracting nested RAG stats
+  const metricsAny = metrics as Record<string, any> | null;
 
   return (
     <View style={styles.container}>
-      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
-        <View style={styles.header}>
-          <Text style={styles.title}>Pipeline Observability</Text>
-          <View style={styles.liveBadge}>
-            <NeuralPulse active size={6} color={NEURAL.tertiary} />
-            <Text style={styles.liveText}>LIVE</Text>
-          </View>
-        </View>
-        <Text style={styles.subtitle}>Updated {formatRelativeTime(pipelineEvents[0]?.timestamp ?? null)}</Text>
+      {/* Tab bar */}
+      <View style={styles.tabBar}>
+        {tabs.map((tab) => (
+          <TouchableOpacity
+            key={tab.key}
+            style={[styles.tab, activeTab === tab.key && styles.tabActive]}
+            onPress={() => {
+              setActiveTab(tab.key);
+              if (tab.key === 'traces' && traces.length === 0) loadTraces();
+              if (tab.key === 'runtime' && !runtimeHealth) void loadRuntimeCenter();
+            }}
+            activeOpacity={0.7}
+          >
+            <AppIcon
+              name={tab.icon as any}
+              size={16}
+              color={activeTab === tab.key ? '#6366f1' : '#94a3b8'}
+            />
+            <Text style={[styles.tabLabel, activeTab === tab.key && styles.tabLabelActive]}>
+              {tab.label}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
 
-        {loadingView ? (
-          <ActivityIndicator color={NEURAL.primary} size="large" style={styles.loader} />
-        ) : observabilityMetrics ? (
-          <>
-            <View style={styles.metricGrid}>
-              {METRIC_KEYS.map((mk) => {
-                const val = observabilityMetrics[mk.key];
-                return (
-                  <Card key={mk.key} variant="elevated" style={styles.metricTile}>
-                    <AppIcon name={mk.iconName} size={18} color={NEURAL.onSurfaceVariant} style={styles.metricTileIcon} />
-                    <Text style={styles.metricTileValue}>{shortNum(val)}</Text>
-                    <Text style={styles.metricTileLabel}>{mk.label}</Text>
-                  </Card>
-                );
-              })}
-            </View>
+      {activeTab === 'metrics' && (
+        <ScrollView
+          style={styles.scrollView}
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+        >
+          {loadingView && !metrics ? (
+            <LoadingSpinner message="Loading metrics..." />
+          ) : !metrics ? (
+            <EmptyState icon="chart-timeline-variant" title="No Metrics" message="Metrics will appear when the backend is connected." />
+          ) : (
+            <>
+              {/* Primary metrics grid */}
+              <View style={styles.metricsGrid}>
+                <MetricCard
+                  label="Total Requests"
+                  value={String(metricsAny?.total_requests ?? metricsAny?.request_count ?? 0)}
+                  tone="indigo"
+                  compact
+                  style={styles.metricHalf}
+                />
+                <MetricCard
+                  label="Avg Latency"
+                  value={metricsAny?.avg_latency_ms ? `${Number(metricsAny.avg_latency_ms).toFixed(0)}ms` : 'N/A'}
+                  tone="blue"
+                  compact
+                  style={styles.metricHalf}
+                />
+              </View>
 
-            <TouchableOpacity onPress={() => setExpandedMetrics((p) => !p)} style={styles.expandBtn}>
-              <Text style={styles.expandText}>{expandedMetrics ? 'Hide all metrics' : 'Show all metrics'}</Text>
-            </TouchableOpacity>
+              <View style={styles.metricsGrid}>
+                <MetricCard
+                  label="Cache Hit Rate"
+                  value={metricsAny?.cache_hit_rate ? `${(Number(metricsAny.cache_hit_rate) * 100).toFixed(1)}%` : 'N/A'}
+                  tone="emerald"
+                  compact
+                  style={styles.metricHalf}
+                />
+                <MetricCard
+                  label="Error Rate"
+                  value={metricsAny?.error_rate ? `${(Number(metricsAny.error_rate) * 100).toFixed(1)}%` : '0%'}
+                  tone="rose"
+                  compact
+                  style={styles.metricHalf}
+                />
+              </View>
 
-            {expandedMetrics && (
-              <Card variant="outlined" style={styles.metricsCard}>
-                {Object.entries(observabilityMetrics)
-                  .slice(0, 20)
-                  .map(([key, value]) => (
+              {/* Pipeline stage breakdown */}
+              <Card variant="outlined" padding="lg" style={styles.section}>
+                <SectionHeader title="Pipeline Stages" icon={<AppIcon name="pipe" size={16} color="#6366f1" />} />
+                {Array.isArray(metricsAny?.stages) && metricsAny.stages.length > 0 ? (
+                  metricsAny.stages.map((stage: any, i: number) => (
+                    <View key={i} style={styles.stageRow}>
+                      <View style={[styles.stageDot, { backgroundColor: stage.status === 'healthy' ? '#10b981' : '#f59e0b' }]} />
+                      <Text style={styles.stageName}>{stage.name || stage.stage || `Stage ${i + 1}`}</Text>
+                      <Badge label={stage.status || 'active'} variant={stage.status === 'healthy' ? 'success' : 'warning'} size="sm" />
+                    </View>
+                  ))
+                ) : (
+                  <Text style={styles.noData}>Pipeline stages will appear during active processing</Text>
+                )}
+              </Card>
+
+              {/* All metrics dump */}
+              <Card variant="outlined" padding="lg" style={styles.section}>
+                <SectionHeader title="All Metrics" />
+                {metricsAny && Object.entries(metricsAny).slice(0, 20).map(([key, val]) => {
+                  if (typeof val === 'object') return null;
+                  return (
                     <View key={key} style={styles.metricRow}>
                       <Text style={styles.metricKey}>{key.replace(/_/g, ' ')}</Text>
-                      <Text style={styles.metricVal} numberOfLines={1}>
-                        {typeof value === 'object' ? JSON.stringify(value).slice(0, 30) : shortNum(value)}
-                      </Text>
+                      <Text style={styles.metricVal}>{String(val)}</Text>
                     </View>
-                  ))}
+                  );
+                })}
               </Card>
-            )}
-          </>
-        ) : (
-          <Card variant="outlined" style={styles.metricsCard}>
-            <Text style={styles.emptyBody}>No metrics available yet. Ensure backend is running.</Text>
-          </Card>
-        )}
-
-        <Card variant="outlined" style={styles.eventsCard}>
-          <View style={styles.eventsHeader}>
-            <Text style={styles.sectionTitle}>Realtime Pipeline Events</Text>
-            <Badge label={`${pipelineEvents.length} live`} variant="success" small dot />
-          </View>
-
-          {pipelineEvents.length > 0 ? (
-            pipelineEvents.slice(0, 10).map((event, i) => {
-              const cfg = STATUS_CONFIG[event.status?.toLowerCase() ?? 'running'] || STATUS_CONFIG.running;
-              return (
-                <View key={`${event.trace_id}-${i}`} style={styles.eventRow}>
-                  {cfg.pulse ? (
-                    <NeuralPulse active size={5} color={cfg.color} />
-                  ) : (
-                    <View style={[styles.eventDot, { backgroundColor: cfg.color }]} />
-                  )}
-                  <View style={styles.eventContent}>
-                    <Text style={styles.eventName} numberOfLines={1}>{event.step_name.replace(/_/g, ' ')}</Text>
-                    <Text style={styles.eventMeta}>{event.event_type} · {event.status} · {Math.round(event.duration_ms)}ms</Text>
-                  </View>
-                </View>
-              );
-            })
-          ) : (
-            <Text style={styles.emptyBody}>Waiting for pipeline events...</Text>
+            </>
           )}
-        </Card>
+        </ScrollView>
+      )}
 
-        <Card variant="outlined" style={styles.eventsCard}>
-          <View style={styles.eventsHeader}>
-            <Text style={styles.sectionTitle}>Runtime Safety Queue</Text>
-            <View style={styles.headerActions}>
-              <Badge label={`${runtimePermissions.length} pending`} variant={runtimePermissions.length > 0 ? 'warning' : 'ghost'} small />
-              <Button label="Refresh" variant="ghost" size="xs" onPress={() => void loadRuntimeOps()} disabled={runtimeBusy} />
-            </View>
-          </View>
-
-          {runtimeBusy && runtimePermissions.length === 0 ? (
-            <ActivityIndicator color={NEURAL.primary} />
-          ) : runtimePermissions.length > 0 ? (
-            runtimePermissions.slice(0, 6).map((permission) => (
-              <View key={permission.permission_id} style={styles.permissionRow}>
-                <View style={styles.permissionTop}>
-                  <Text style={styles.permissionTool} numberOfLines={1}>{permission.tool_name}</Text>
-                  <Badge label={permission.status} variant={PERMISSION_VARIANT[permission.status] || 'warning'} small />
-                </View>
-                <Text style={styles.permissionBody} numberOfLines={2}>{permission.reason || permission.command_text}</Text>
-                <Text style={styles.permissionMeta}>{formatIsoRelative(permission.created_at)} · {permission.request_id}</Text>
-                <View style={styles.rowActions}>
-                  <Button
-                    label="Approve"
-                    size="xs"
-                    variant="success"
-                    onPress={() => void resolvePermission(permission.permission_id, true)}
-                    disabled={actionBusyId === permission.permission_id}
-                  />
-                  <Button
-                    label="Deny"
-                    size="xs"
-                    variant="error"
-                    onPress={() => void resolvePermission(permission.permission_id, false)}
-                    disabled={actionBusyId === permission.permission_id}
-                  />
-                </View>
-              </View>
+      {activeTab === 'traces' && (
+        <ScrollView
+          style={styles.scrollView}
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl refreshing={tracesLoading} onRefresh={loadTraces} tintColor="#6366f1" colors={['#6366f1']} />
+          }
+        >
+          {tracesLoading && traces.length === 0 ? (
+            <LoadingSpinner message="Loading traces..." />
+          ) : traces.length === 0 ? (
+            <EmptyState icon="timeline-clock-outline" title="No Traces" message="Pipeline traces will appear after queries are processed." />
+          ) : (
+            traces.slice(0, 50).map((trace, i) => (
+              <TouchableOpacity
+                key={trace.trace_id || String(i)}
+                onPress={() => loadTraceDetail(trace.trace_id)}
+                activeOpacity={0.7}
+              >
+                <Card variant="default" padding="md" style={styles.traceCard}>
+                  <View style={styles.traceHeader}>
+                    <Badge
+                      label={trace.routing_decision || 'standard'}
+                      variant="primary"
+                      size="sm"
+                    />
+                    <Text style={styles.traceTime}>
+                      {trace.timestamp ? new Date(trace.timestamp).toLocaleTimeString() : ''}
+                    </Text>
+                  </View>
+                  <Text style={styles.traceQuery} numberOfLines={2}>
+                    {trace.query || 'No query'}
+                  </Text>
+                  <View style={styles.traceMetaRow}>
+                    <Text style={styles.traceMeta}>⏱ {trace.total_duration_ms}ms</Text>
+                    <Text style={styles.traceMeta}>
+                      {trace.agents_invoked?.length ?? 0} agent{(trace.agents_invoked?.length ?? 0) !== 1 ? 's' : ''}
+                    </Text>
+                    <Text style={styles.traceMeta}>
+                      {trace.evidence_count} evidence
+                    </Text>
+                    <Text style={styles.traceMeta}>
+                      {(trace.final_confidence * 100).toFixed(0)}%
+                    </Text>
+                  </View>
+                </Card>
+              </TouchableOpacity>
             ))
-          ) : (
-            <Text style={styles.emptyBody}>No pending runtime permissions.</Text>
           )}
-        </Card>
+        </ScrollView>
+      )}
 
-        <Card variant="outlined" style={styles.eventsCard}>
-          <View style={styles.eventsHeader}>
-            <Text style={styles.sectionTitle}>Runtime Executor</Text>
-            <Badge label={runtimeExecutorStatus?.running ? 'Running' : 'Idle'} variant={runtimeExecutorStatus?.running ? 'success' : 'ghost'} small />
-          </View>
-          {runtimeExecutorStatus ? (
-            <View style={styles.executorGrid}>
-              <ExecutorMetric label="Approved" value={runtimeExecutorStatus.summary.approved_total} />
-              <ExecutorMetric label="Pending" value={runtimeExecutorStatus.summary.pending_total} />
-              <ExecutorMetric label="Running" value={runtimeExecutorStatus.summary.running} />
-              <ExecutorMetric label="Failed" value={runtimeExecutorStatus.summary.failed} />
-            </View>
-          ) : (
-            <Text style={styles.emptyBody}>Executor status unavailable.</Text>
+      {activeTab === 'events' && (
+        <FlatList
+          data={pipelineEvents}
+          keyExtractor={(_, i) => `event-${i}`}
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+          ListEmptyComponent={
+            <EmptyState icon="lightning-bolt" title="No Live Events" message="Pipeline events will stream here during active processing." />
+          }
+          renderItem={({ item, index }) => (
+            <Card variant="default" padding="sm" style={styles.eventCard}>
+              <View style={styles.eventHeader}>
+                <Badge
+                  label={item.event_type}
+                  variant={
+                    item.status === 'error' ? 'error' :
+                    item.status === 'completed' ? 'success' :
+                    item.status === 'running' ? 'primary' : 'default'
+                  }
+                  size="sm"
+                />
+                <Text style={styles.eventTime}>
+                  {item.timestamp ? new Date(item.timestamp).toLocaleTimeString() : `#${pipelineEvents.length - index}`}
+                </Text>
+              </View>
+              <View style={styles.eventBody}>
+                <Text style={styles.eventStep}>{item.step_name}</Text>
+                <Text style={styles.eventType}>{item.step_type}</Text>
+              </View>
+              {item.duration_ms > 0 && (
+                <Text style={styles.eventDuration}>{item.duration_ms}ms</Text>
+              )}
+              {item.details && Object.keys(item.details).length > 0 && (
+                <Text style={styles.eventContent} numberOfLines={2}>
+                  {JSON.stringify(item.details).slice(0, 200)}
+                </Text>
+              )}
+            </Card>
           )}
-        </Card>
+        />
+      )}
 
-        <Card variant="outlined" style={styles.eventsCard}>
-          <View style={styles.eventsHeader}>
-            <Text style={styles.sectionTitle}>Runtime Task Board</Text>
-            <Badge label={`${runtimeTasks.length} tasks`} variant="info" small />
+      {activeTab === 'runtime' && (
+        <ScrollView
+          style={styles.scrollView}
+          contentContainerStyle={styles.scrollContent}
+          refreshControl={
+            <RefreshControl
+              refreshing={runtimeLoading}
+              onRefresh={() => void loadRuntimeCenter()}
+              tintColor="#6366f1"
+              colors={['#6366f1']}
+            />
+          }
+        >
+          <SectionHeader
+            title="Runtime Operations Center"
+            subtitle="Approvals, task controls, governance audit, and quality signals"
+            action={{ label: 'Refresh', onPress: () => void loadRuntimeCenter() }}
+          />
+
+          <View style={styles.metricsGrid}>
+            <MetricCard
+              label="Pending Approvals"
+              value={String(runtimePermissions.length)}
+              tone={runtimePermissions.length > 0 ? 'amber' : 'emerald'}
+              compact
+              style={styles.metricHalf}
+            />
+            <MetricCard
+              label="Runtime Tasks"
+              value={String(runtimeTasks.length)}
+              tone="indigo"
+              compact
+              style={styles.metricHalf}
+            />
           </View>
-          {runtimeTasks.length > 0 ? (
-            runtimeTasks.slice(0, 10).map((task) => {
-              const canCancel = !['completed', 'failed', 'cancelled'].includes(task.state);
-              return (
-                <View key={task.task_id} style={styles.taskRow}>
-                  <View style={styles.taskHead}>
-                    <Text style={styles.taskId} numberOfLines={1}>{task.task_id}</Text>
-                    <Badge label={task.state} variant={TASK_VARIANT[task.state] || 'info'} small />
+
+          <View style={styles.metricsGrid}>
+            <MetricCard
+              label="Executor"
+              value={runtimeExecutor?.running ? 'Running' : 'Idle'}
+              tone={runtimeExecutor?.running ? 'emerald' : 'default'}
+              compact
+              style={styles.metricHalf}
+            />
+            <MetricCard
+              label="Audit Events"
+              value={String(runtimeAudit.length)}
+              tone="violet"
+              compact
+              style={styles.metricHalf}
+            />
+          </View>
+
+          <Card variant="outlined" padding="lg">
+            <SectionHeader title="Approval Queue" />
+            {runtimePermissions.length === 0 ? (
+              <Text style={styles.noData}>No pending permissions. Risky operations are currently clear.</Text>
+            ) : (
+              runtimePermissions.slice(0, 12).map((permission, index) => (
+                <View key={permission.permission_id || index} style={styles.runtimeRow}>
+                  <View style={styles.runtimeRowTop}>
+                    <Text style={styles.runtimeTitle}>{String(permission.tool_name || 'tool')}</Text>
+                    <Badge label={String(permission.status || 'pending')} variant="warning" size="sm" />
                   </View>
-                  <Text style={styles.taskMeta}>Updated {formatIsoRelative(task.updated_at)}</Text>
-                  {task.permission_scope?.length ? (
-                    <Text style={styles.taskMeta} numberOfLines={1}>Scope: {task.permission_scope.join(', ')}</Text>
-                  ) : null}
-                  <View style={styles.rowActions}>
+                  <Text style={styles.runtimeMeta}>{String(permission.reason || permission.command_text || 'No reason provided')}</Text>
+                  <Text style={styles.runtimeCode}>{String(permission.command_text || '')}</Text>
+                  <View style={styles.runtimeActions}>
                     <Button
-                      label="Refresh"
+                      label="Approve"
                       size="xs"
-                      variant="ghost"
-                      onPress={async () => {
-                        try {
-                          const response = await api.getRuntimeTask(task.task_id);
-                          setRuntimeTasks((prev) => {
-                            const next = prev.filter((t) => t.task_id !== task.task_id);
-                            return sortTasks([response.task, ...next]).slice(0, 40);
-                          });
-                        } catch (e) {
-                          setRuntimeError(e instanceof Error ? e.message : String(e));
-                        }
-                      }}
-                      disabled={actionBusyId === task.task_id}
+                      variant="success"
+                      onPress={() => void resolvePermission(String(permission.permission_id || ''), true)}
                     />
                     <Button
-                      label="Cancel"
+                      label="Deny"
                       size="xs"
                       variant="error"
-                      onPress={() => void cancelTask(task.task_id)}
-                      disabled={!canCancel || actionBusyId === task.task_id}
+                      onPress={() => void resolvePermission(String(permission.permission_id || ''), false)}
                     />
                   </View>
                 </View>
-              );
-            })
-          ) : (
-            <Text style={styles.emptyBody}>No runtime tasks yet.</Text>
-          )}
-        </Card>
+              ))
+            )}
+          </Card>
 
-        <Card variant="outlined" style={styles.eventsCard}>
-          <View style={styles.eventsHeader}>
-            <Text style={styles.sectionTitle}>Runtime Task Events</Text>
-            <Badge label={Platform.OS === 'web' ? 'SSE live' : 'Polling mode'} variant="secondary" small />
-          </View>
-          {runtimeTaskEvents.length > 0 ? (
-            runtimeTaskEvents.slice(0, 12).map((event) => (
-              <View key={event.event_id} style={styles.eventRow}>
-                <View style={[styles.eventDot, { backgroundColor: NEURAL.secondary }]} />
-                <View style={styles.eventContent}>
-                  <Text style={styles.eventName}>{event.event_type.replace(/_/g, ' ')}</Text>
-                  <Text style={styles.eventMeta}>{event.task.task_id} · {formatIsoRelative(event.timestamp)}</Text>
+          <Card variant="outlined" padding="lg">
+            <SectionHeader title="Runtime Tasks" />
+            {runtimeTasks.length === 0 ? (
+              <Text style={styles.noData}>No runtime tasks currently tracked.</Text>
+            ) : (
+              runtimeTasks.slice(0, 20).map((task, index) => {
+                const state = String(task.state || 'unknown');
+                const variant =
+                  state === 'completed' ? 'success' :
+                  state === 'failed' || state === 'cancelled' ? 'error' :
+                  state === 'running' ? 'primary' :
+                  state === 'waiting_approval' ? 'warning' : 'default';
+
+                return (
+                  <View key={task.task_id || index} style={styles.runtimeRow}>
+                    <View style={styles.runtimeRowTop}>
+                      <Text style={styles.runtimeTitle}>{String(task.task_id || 'task')}</Text>
+                      <Badge label={state} variant={variant as any} size="sm" />
+                    </View>
+                    <Text style={styles.runtimeMeta}>Updated: {String(task.updated_at || task.created_at || 'n/a')}</Text>
+                    {Array.isArray(task.permission_scope) && task.permission_scope.length > 0 && (
+                      <Text style={styles.runtimeMeta}>Scope: {task.permission_scope.join(', ')}</Text>
+                    )}
+                    {(state === 'queued' || state === 'running' || state === 'waiting_approval' || state === 'blocked') && (
+                      <View style={styles.runtimeActions}>
+                        <Button
+                          label="Cancel Task"
+                          size="xs"
+                          variant="error"
+                          onPress={() => void cancelTask(String(task.task_id || ''))}
+                        />
+                      </View>
+                    )}
+                  </View>
+                );
+              })
+            )}
+          </Card>
+
+          <Card variant="outlined" padding="lg">
+            <SectionHeader title="Safety Audit" />
+            {runtimeAudit.length === 0 ? (
+              <Text style={styles.noData}>No recent audit events found.</Text>
+            ) : (
+              runtimeAudit.slice(0, 15).map((event, index) => (
+                <View key={index} style={styles.auditRow}>
+                  <Badge label={String(event.effect || event.decision || 'event')} variant="violet" size="sm" />
+                  <Text style={styles.auditText} numberOfLines={3}>{compact(event, 220)}</Text>
+                </View>
+              ))
+            )}
+          </Card>
+
+          <Card variant="outlined" padding="lg">
+            <SectionHeader title="Interfaces & Contracts" />
+            <View style={styles.runtimeKvRow}>
+              <Text style={styles.runtimeKvKey}>Tool Contracts</Text>
+              <Text style={styles.runtimeKvValue}>{String(runtimeContracts?.count ?? 0)}</Text>
+            </View>
+            <View style={styles.runtimeKvRow}>
+              <Text style={styles.runtimeKvKey}>Interface Snapshot</Text>
+              <Text style={styles.runtimeKvValue}>{runtimeInterfaces ? 'Loaded' : 'Unavailable'}</Text>
+            </View>
+            {runtimeHealth && (
+              <View style={styles.runtimePreviewBox}>
+                <Text style={styles.runtimePreviewText}>{compact(runtimeHealth, 320)}</Text>
+              </View>
+            )}
+          </Card>
+
+          <Card variant="outlined" padding="lg">
+            <SectionHeader
+              title="Memory Quality"
+              action={{ label: memoryEvalBusy ? 'Running...' : 'Evaluate', onPress: () => void runMemoryQualityEval() }}
+            />
+            {memoryQualityHistory.length === 0 ? (
+              <Text style={styles.noData}>No memory quality snapshots available yet.</Text>
+            ) : (
+              memoryQualityHistory.slice(0, 10).map((item, index) => (
+                <View key={index} style={styles.runtimeRow}>
+                  <View style={styles.runtimeRowTop}>
+                    <Text style={styles.runtimeTitle}>{String(item.source || 'snapshot')}</Text>
+                    <Text style={styles.runtimeTime}>{String(item.timestamp || item.created_at || '')}</Text>
+                  </View>
+                  <Text style={styles.runtimeMeta}>
+                    P@k: {Number(item.avg_precision_at_k || 0).toFixed(2)} • Recall: {Number(item.recall_proxy_rate || 0).toFixed(2)} • Extraction hit: {Number(item.extraction_hit_rate || 0).toFixed(2)}
+                  </Text>
+                </View>
+              ))
+            )}
+          </Card>
+        </ScrollView>
+      )}
+
+      {/* Trace detail modal */}
+      {selectedTrace && (
+        <View style={styles.traceOverlay}>
+          <View style={styles.traceDetailSheet}>
+            <View style={styles.traceDetailHeader}>
+              <View>
+                <Text style={styles.traceDetailTitle}>Trace Details</Text>
+                <Text style={styles.traceDetailId}>{selectedTrace.trace_id}</Text>
+              </View>
+              <TouchableOpacity onPress={() => setSelectedTrace(null)} style={styles.traceCloseBtn}>
+                <AppIcon name="close" size={18} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={styles.traceDetailContent} showsVerticalScrollIndicator={false}>
+              {/* Query */}
+              <SectionHeader title="Query" />
+              <Text style={styles.traceDetailQuery}>{selectedTrace.query}</Text>
+
+              {/* Quick stats */}
+              <View style={styles.traceStatsRow}>
+                <View style={styles.traceStat}>
+                  <Text style={styles.traceStatVal}>{selectedTrace.total_duration_ms}ms</Text>
+                  <Text style={styles.traceStatLabel}>Duration</Text>
+                </View>
+                <View style={styles.traceStat}>
+                  <Text style={styles.traceStatVal}>{(selectedTrace.final_confidence * 100).toFixed(0)}%</Text>
+                  <Text style={styles.traceStatLabel}>Confidence</Text>
+                </View>
+                <View style={styles.traceStat}>
+                  <Text style={styles.traceStatVal}>{selectedTrace.evidence_count}</Text>
+                  <Text style={styles.traceStatLabel}>Evidence</Text>
                 </View>
               </View>
-            ))
-          ) : (
-            <Text style={styles.emptyBody}>
-              {Platform.OS === 'web'
-                ? 'Waiting for task SSE events...'
-                : 'Task event stream unavailable on native fetch. Polling snapshots only.'}
-            </Text>
-          )}
-        </Card>
 
-        {runtimeError ? (
-          <Card variant="outlined" style={styles.metricsCard}>
-            <Text style={styles.runtimeError}>{runtimeError}</Text>
-          </Card>
-        ) : null}
+              {/* Steps */}
+              <SectionHeader title="Pipeline Steps" subtitle={`${selectedTrace.steps.length} steps`} />
+              {selectedTrace.steps.map((step, i) => (
+                <View key={i} style={styles.stepRow}>
+                  <View style={[styles.stepDot, {
+                    backgroundColor: step.status === 'completed' ? '#10b981' : step.status === 'skipped' ? '#94a3b8' : '#f43f5e'
+                  }]} />
+                  <View style={styles.stepContent}>
+                    <Text style={styles.stepName}>{step.step_name}</Text>
+                    <Text style={styles.stepMeta}>{step.step_type} · {step.duration_ms}ms · {step.status}</Text>
+                  </View>
+                </View>
+              ))}
 
-        <View style={styles.tracesWrap}>
-          <PipelineTracesList baseUrl={apiBaseUrl} refreshInterval={4000} maxTraces={30} />
+              {/* Retrieval channels */}
+              {selectedTrace.retrieval_channels.length > 0 && (
+                <>
+                  <SectionHeader title="Retrieval Channels" />
+                  {selectedTrace.retrieval_channels.map((ch, i) => (
+                    <View key={i} style={styles.channelRow}>
+                      <Text style={styles.channelName}>{ch.channel}</Text>
+                      <View style={styles.channelStats}>
+                        <Badge label={`${ch.result_count} results`} variant="primary" size="sm" />
+                        <Badge label={`${ch.top_score.toFixed(2)} top`} variant="success" size="sm" />
+                        <Text style={styles.channelDuration}>{ch.duration_ms}ms</Text>
+                      </View>
+                    </View>
+                  ))}
+                </>
+              )}
+
+              {/* Agents invoked */}
+              {selectedTrace.agents_invoked.length > 0 && (
+                <>
+                  <SectionHeader title="Agents Invoked" />
+                  <View style={styles.agentChips}>
+                    {selectedTrace.agents_invoked.map((a, i) => (
+                      <Badge key={i} label={`${a.agent}${a.is_primary ? ' ★' : ''}`} variant={a.is_primary ? 'violet' : 'default'} size="sm" />
+                    ))}
+                  </View>
+                </>
+              )}
+
+              {/* Cache status */}
+              <SectionHeader title="Cache" />
+              <View style={styles.cacheRow}>
+                <Badge
+                  label={selectedTrace.cache_status.hit ? 'Cache Hit' : 'Cache Miss'}
+                  variant={selectedTrace.cache_status.hit ? 'success' : 'default'}
+                  dot
+                  size="md"
+                />
+                {selectedTrace.cache_status.level && (
+                  <Text style={styles.cacheLevel}>Level: {selectedTrace.cache_status.level}</Text>
+                )}
+              </View>
+
+              {/* Raw JSON fallback */}
+              <SectionHeader title="Raw Trace" />
+              <Text style={styles.traceDetailJson}>
+                {JSON.stringify(selectedTrace, null, 2)}
+              </Text>
+            </ScrollView>
+          </View>
         </View>
-      </ScrollView>
-    </View>
-  );
-}
-
-function ExecutorMetric({ label, value }: { label: string; value: number }) {
-  return (
-    <View style={styles.executorTile}>
-      <Text style={styles.executorValue}>{shortNum(value)}</Text>
-      <Text style={styles.executorLabel}>{label}</Text>
+      )}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: NEURAL.background },
-  scroll: { paddingBottom: SPACING['5xl'] },
-
-  header: {
+  container: {
+    flex: 1,
+    backgroundColor: '#f8fafc',
+  },
+  tabBar: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    backgroundColor: '#ffffff',
     paddingHorizontal: SPACING.lg,
-    paddingTop: SPACING.lg,
-  },
-  title: { fontSize: FONT_SIZE['2xl'], fontWeight: FONT_WEIGHT.bold, color: NEURAL.onSurface },
-  liveBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: `${NEURAL.tertiary}22`,
-    borderRadius: RADIUS.full,
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: 4,
-    gap: 4,
-    borderWidth: 1,
-    borderColor: `${NEURAL.tertiary}60`,
-  },
-  liveText: { fontSize: FONT_SIZE.xs, fontWeight: FONT_WEIGHT.bold, color: NEURAL.tertiary },
-  subtitle: {
-    fontSize: FONT_SIZE.sm,
-    color: NEURAL.onSurfaceVariant,
-    paddingHorizontal: SPACING.lg,
-    marginBottom: SPACING.lg,
-    marginTop: 4,
-  },
-
-  loader: { marginVertical: SPACING['4xl'] },
-
-  metricGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: SPACING.sm,
-    paddingHorizontal: SPACING.lg,
-    marginBottom: SPACING.sm,
-  },
-  metricTile: {
-    width: '30%',
-    flexGrow: 1,
-    alignItems: 'center',
-    paddingVertical: SPACING.md,
-    gap: 3,
-  },
-  metricTileIcon: { marginBottom: 1 },
-  metricTileValue: { fontSize: FONT_SIZE.xl, fontWeight: FONT_WEIGHT.bold, color: NEURAL.primary },
-  metricTileLabel: { fontSize: FONT_SIZE.xs, color: NEURAL.onSurfaceVariant },
-
-  expandBtn: { marginHorizontal: SPACING.lg, marginBottom: SPACING.md, alignItems: 'center' },
-  expandText: { fontSize: FONT_SIZE.sm, color: NEURAL.primary, fontWeight: FONT_WEIGHT.medium },
-
-  metricsCard: { marginHorizontal: SPACING.lg, marginBottom: SPACING.md },
-  metricRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: SPACING.xs + 2,
-    borderTopWidth: 1,
-    borderTopColor: `${NEURAL.outlineVariant}40`,
-  },
-  metricKey: { flex: 1, fontSize: FONT_SIZE.sm, color: NEURAL.onSurfaceVariant, textTransform: 'capitalize' },
-  metricVal: {
-    fontSize: FONT_SIZE.sm,
-    color: NEURAL.onSurface,
-    fontWeight: FONT_WEIGHT.semibold,
-    maxWidth: '50%',
-    textAlign: 'right',
-  },
-
-  eventsCard: { marginHorizontal: SPACING.lg, marginBottom: SPACING.md, gap: SPACING.sm },
-  eventsHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: SPACING.sm },
-  sectionTitle: { fontSize: FONT_SIZE.base, fontWeight: FONT_WEIGHT.bold, color: NEURAL.onSurface },
-
-  eventRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
     paddingVertical: SPACING.sm,
-    borderTopWidth: 1,
-    borderTopColor: `${NEURAL.outlineVariant}30`,
+    gap: SPACING.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
   },
-  eventDot: { width: 8, height: 8, borderRadius: 4 },
-  eventContent: { flex: 1 },
-  eventName: {
+  tab: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: SPACING.xs,
+    paddingVertical: SPACING.sm,
+    borderRadius: RADIUS.lg,
+    backgroundColor: '#f8fafc',
+  },
+  tabActive: {
+    backgroundColor: '#eef2ff',
+  },
+  tabLabel: {
     fontSize: FONT_SIZE.sm,
-    color: NEURAL.onSurface,
+    fontWeight: FONT_WEIGHT.medium,
+    color: '#94a3b8',
+  },
+  tabLabelActive: {
+    color: '#6366f1',
+    fontWeight: FONT_WEIGHT.semibold,
+  },
+  scrollView: {
+    flex: 1,
+  },
+  scrollContent: {
+    padding: SPACING.lg,
+    paddingBottom: SPACING['5xl'],
+    gap: SPACING.md,
+  },
+  metricsGrid: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+  },
+  metricHalf: {
+    flex: 1,
+  },
+  section: {
+    marginTop: SPACING.xs,
+  },
+  stageRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: SPACING.sm,
+    gap: SPACING.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f8fafc',
+  },
+  stageDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  stageName: {
+    flex: 1,
+    fontSize: FONT_SIZE.sm,
+    color: '#334155',
     fontWeight: FONT_WEIGHT.medium,
     textTransform: 'capitalize',
   },
-  eventMeta: { fontSize: FONT_SIZE.xs, color: NEURAL.onSurfaceVariant, marginTop: 2 },
-
-  headerActions: { flexDirection: 'row', alignItems: 'center', gap: SPACING.xs },
-
-  permissionRow: {
-    borderTopWidth: 1,
-    borderTopColor: `${NEURAL.outlineVariant}35`,
-    paddingTop: SPACING.sm,
-    gap: 4,
+  noData: {
+    fontSize: FONT_SIZE.sm,
+    color: '#94a3b8',
+    paddingVertical: SPACING.md,
+    textAlign: 'center',
   },
-  permissionTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: SPACING.sm },
-  permissionTool: { flex: 1, fontSize: FONT_SIZE.sm, color: NEURAL.onSurface, fontWeight: FONT_WEIGHT.semibold },
-  permissionBody: { fontSize: FONT_SIZE.sm, color: NEURAL.onSurfaceVariant },
-  permissionMeta: { fontSize: FONT_SIZE.xs, color: NEURAL.onSurfaceVariant },
+  metricRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: SPACING.xs,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f8fafc',
+  },
+  metricKey: {
+    fontSize: FONT_SIZE.sm,
+    color: '#64748b',
+    flex: 1,
+    textTransform: 'capitalize',
+  },
+  metricVal: {
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: '#0f172a',
+  },
 
-  rowActions: { flexDirection: 'row', gap: SPACING.xs, flexWrap: 'wrap' },
-
-  executorGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING.sm },
-  executorTile: {
-    width: '47%',
-    flexGrow: 1,
-    borderRadius: RADIUS.md,
-    backgroundColor: NEURAL.surfaceContainerLow,
-    borderWidth: 1,
-    borderColor: `${NEURAL.outlineVariant}70`,
-    paddingVertical: SPACING.sm,
+  // Traces
+  traceCard: { marginBottom: 0 },
+  traceHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    gap: 2,
+    marginBottom: SPACING.xs,
   },
-  executorValue: { fontSize: FONT_SIZE.lg, fontWeight: FONT_WEIGHT.bold, color: NEURAL.primary },
-  executorLabel: { fontSize: FONT_SIZE.xs, color: NEURAL.onSurfaceVariant },
+  traceTime: { fontSize: 10, color: '#94a3b8' },
+  traceQuery: {
+    fontSize: FONT_SIZE.sm,
+    color: '#334155',
+    lineHeight: 18,
+  },
+  traceMetaRow: {
+    flexDirection: 'row',
+    gap: SPACING.md,
+    marginTop: SPACING.sm,
+  },
+  traceMeta: {
+    fontSize: 10,
+    color: '#64748b',
+    fontWeight: FONT_WEIGHT.medium,
+  },
 
-  taskRow: {
-    borderTopWidth: 1,
-    borderTopColor: `${NEURAL.outlineVariant}35`,
-    paddingTop: SPACING.sm,
+  // Events
+  eventCard: { marginBottom: 0 },
+  eventHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: SPACING.xs,
+  },
+  eventTime: { fontSize: 10, color: '#94a3b8' },
+  eventBody: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+    alignItems: 'center',
+  },
+  eventStep: {
+    fontSize: FONT_SIZE.sm,
+    color: '#334155',
+    fontWeight: FONT_WEIGHT.semibold,
+  },
+  eventType: {
+    fontSize: FONT_SIZE.xs,
+    color: '#94a3b8',
+  },
+  eventDuration: {
+    fontSize: 10,
+    color: '#64748b',
+    marginTop: 2,
+  },
+  eventContent: {
+    fontSize: FONT_SIZE.xs,
+    color: '#475569',
+    lineHeight: 16,
+    marginTop: SPACING.xs,
+  },
+
+  // Trace detail overlay
+  traceOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(15, 23, 42, 0.4)',
+    justifyContent: 'flex-end',
+  },
+  traceDetailSheet: {
+    backgroundColor: '#ffffff',
+    borderTopLeftRadius: RADIUS['3xl'],
+    borderTopRightRadius: RADIUS['3xl'],
+    maxHeight: '85%',
+    ...SHADOWS.xl,
+  },
+  traceDetailHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    padding: SPACING.xl,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  traceDetailTitle: {
+    fontSize: FONT_SIZE.lg,
+    fontWeight: FONT_WEIGHT.bold,
+    color: '#0f172a',
+  },
+  traceDetailId: {
+    fontSize: 10,
+    color: '#94a3b8',
+    fontFamily: 'monospace',
+    marginTop: 2,
+  },
+  traceCloseBtn: {
+    padding: SPACING.sm,
+    backgroundColor: '#f1f5f9',
+    borderRadius: RADIUS.lg,
+  },
+  traceDetailContent: {
+    padding: SPACING.xl,
+  },
+  traceDetailQuery: {
+    fontSize: FONT_SIZE.base,
+    color: '#334155',
+    lineHeight: 22,
+    marginBottom: SPACING.lg,
+  },
+  traceStatsRow: {
+    flexDirection: 'row',
+    marginBottom: SPACING.lg,
+  },
+  traceStat: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  traceStatVal: {
+    fontSize: FONT_SIZE.xl,
+    fontWeight: FONT_WEIGHT.bold,
+    color: '#0f172a',
+  },
+  traceStatLabel: {
+    fontSize: FONT_SIZE.xs,
+    color: '#64748b',
+    marginTop: 2,
+  },
+  stepRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: SPACING.sm,
+    paddingVertical: SPACING.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f8fafc',
+  },
+  stepDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginTop: 5,
+  },
+  stepContent: { flex: 1 },
+  stepName: {
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: '#334155',
+  },
+  stepMeta: {
+    fontSize: 10,
+    color: '#94a3b8',
+    marginTop: 1,
+  },
+  channelRow: {
+    paddingVertical: SPACING.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f8fafc',
+  },
+  channelName: {
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: '#334155',
+    marginBottom: SPACING.xs,
+    textTransform: 'capitalize',
+  },
+  channelStats: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+    alignItems: 'center',
+  },
+  channelDuration: {
+    fontSize: 10,
+    color: '#94a3b8',
+  },
+  agentChips: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: SPACING.sm,
+    marginBottom: SPACING.lg,
+  },
+  cacheRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.md,
+    marginBottom: SPACING.lg,
+  },
+  cacheLevel: {
+    fontSize: FONT_SIZE.sm,
+    color: '#64748b',
+  },
+  traceDetailJson: {
+    fontSize: 10,
+    color: '#475569',
+    fontFamily: 'monospace',
+    lineHeight: 14,
+  },
+
+  // Runtime center
+  runtimeRow: {
+    paddingVertical: SPACING.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f8fafc',
     gap: 4,
   },
-  taskHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: SPACING.sm },
-  taskId: { flex: 1, fontSize: FONT_SIZE.sm, color: NEURAL.onSurface, fontWeight: FONT_WEIGHT.semibold },
-  taskMeta: { fontSize: FONT_SIZE.xs, color: NEURAL.onSurfaceVariant },
-
-  runtimeError: { fontSize: FONT_SIZE.sm, color: NEURAL.error },
-
-  tracesWrap: { minHeight: 300 },
-  emptyBody: { fontSize: FONT_SIZE.sm, color: NEURAL.onSurfaceVariant, textAlign: 'center', padding: SPACING.md },
+  runtimeRowTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: SPACING.sm,
+  },
+  runtimeTitle: {
+    flex: 1,
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: '#334155',
+  },
+  runtimeMeta: {
+    fontSize: 10,
+    color: '#64748b',
+    lineHeight: 15,
+  },
+  runtimeCode: {
+    fontSize: 10,
+    color: '#475569',
+    fontFamily: 'monospace',
+    lineHeight: 14,
+  },
+  runtimeActions: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+    marginTop: SPACING.xs,
+  },
+  auditRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: SPACING.sm,
+    paddingVertical: SPACING.xs,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f8fafc',
+  },
+  auditText: {
+    flex: 1,
+    fontSize: FONT_SIZE.xs,
+    color: '#475569',
+    lineHeight: 16,
+  },
+  runtimeKvRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: SPACING.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f8fafc',
+  },
+  runtimeKvKey: {
+    fontSize: FONT_SIZE.sm,
+    color: '#64748b',
+  },
+  runtimeKvValue: {
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: '#0f172a',
+  },
+  runtimePreviewBox: {
+    marginTop: SPACING.md,
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: RADIUS.lg,
+    padding: SPACING.sm,
+  },
+  runtimePreviewText: {
+    fontSize: 10,
+    color: '#475569',
+    lineHeight: 14,
+    fontFamily: 'monospace',
+  },
+  runtimeTime: {
+    fontSize: 10,
+    color: '#94a3b8',
+  },
 });

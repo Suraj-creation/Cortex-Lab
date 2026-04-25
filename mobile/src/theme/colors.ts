@@ -1,104 +1,107 @@
 /**
- * Cortex Lab Mobile — Neural Dark Design System
- * Matches "Cortex Neural Dark" from Stitch Project 4565645347880235116
- * Philosophy: The Neural Luminary — Atmospheric Intelligence
+ * Cortex Lab Mobile — "Cortex Aurora" Light Design System
+ * Premium light theme with indigo/violet accents, glassmorphism, and depth.
+ * Replaces Neural Dark (#060e20) → Light Aurora (#f8fafc)
  */
 
-// ─── Stitch "Cortex Neural Dark" Named Colors ────────────────────────────────
+// ─── Core Light Palette ──────────────────────────────────────────────────────
 export const NEURAL = {
-  // Backgrounds / Surfaces (layered depth)
-  background:              '#060e20', // root bg
-  surfaceDim:              '#060e20', // same as bg
-  surfaceContainerLowest:  '#000000',
-  surfaceContainerLow:     '#091328',
-  surfaceContainer:        '#0f1930', // cards
-  surfaceContainerHigh:    '#141f38', // elevated cards, active rows
-  surfaceContainerHighest: '#192540', // inputs, floating sheets
-  surfaceVariant:          '#192540', // glass elements
-  surfaceBright:           '#1f2b49',
+  // Backgrounds / Surfaces (layered depth — light)
+  background:              '#f8fafc', // root bg — cool white
+  surfaceDim:              '#f1f5f9', // dimmed surface
+  surfaceContainerLowest:  '#ffffff', // pure white cards
+  surfaceContainerLow:     '#f8fafc', // sidebar / nav
+  surfaceContainer:        '#ffffff', // cards — white
+  surfaceContainerHigh:    '#f1f5f9', // elevated cards, active rows
+  surfaceContainerHighest: '#e2e8f0', // inputs, floating sheets
+  surfaceVariant:          '#f1f5f9', // glass elements
+  surfaceBright:           '#e2e8f0', // bright surface for emphasis
 
   // Primary — Indigo
-  primary:           '#a3a6ff',
-  primaryContainer:  '#9396ff',
-  primaryDim:        '#6063ee',
-  primaryFixed:      '#9396ff',
-  primaryFixedDim:   '#8387ff',
-  inversePrimary:    '#494bd7',
+  primary:           '#6366f1',
+  primaryContainer:  '#eef2ff',
+  primaryDim:        '#4f46e5',
+  primaryFixed:      '#818cf8',
+  primaryFixedDim:   '#6366f1',
+  inversePrimary:    '#c7d2fe',
 
   // Secondary — Violet
-  secondary:          '#ac8aff',
-  secondaryContainer: '#5516be',
-  secondaryDim:       '#8455ef',
-  secondaryFixed:     '#dac9ff',
+  secondary:          '#8b5cf6',
+  secondaryContainer: '#ede9fe',
+  secondaryDim:       '#7c3aed',
+  secondaryFixed:     '#ddd6fe',
 
   // Tertiary — Emerald
-  tertiary:          '#9bffce',
-  tertiaryContainer: '#69f6b8',
-  tertiaryDim:       '#58e7ab',
+  tertiary:          '#10b981',
+  tertiaryContainer: '#d1fae5',
+  tertiaryDim:       '#059669',
 
-  // Error — Coral
-  error:          '#ff6e84',
-  errorContainer: '#a70138',
-  errorDim:       '#d73357',
+  // Error — Rose
+  error:          '#f43f5e',
+  errorContainer: '#ffe4e6',
+  errorDim:       '#e11d48',
 
-  // On-colors (text on surfaces)
-  onBackground:        '#dee5ff',
-  onSurface:           '#dee5ff', // primary text
-  onSurfaceVariant:    '#a3aac4', // secondary text / metadata
-  onPrimary:           '#0f00a4',
-  onSecondary:         '#280067',
-  onTertiary:          '#006443',
-  onTertiaryFixed:     '#00452d',
-  onTertiaryContainer: '#005a3c',
-  onError:             '#490013',
-  inverseSurface:      '#faf8ff',
-  inverseOnSurface:    '#4d556b',
+  // On-colors (text on light surfaces)
+  onBackground:        '#0f172a',
+  onSurface:           '#0f172a', // primary text — near black
+  onSurfaceVariant:    '#475569', // secondary text — slate
+  onPrimary:           '#ffffff',
+  onSecondary:         '#ffffff',
+  onTertiary:          '#ffffff',
+  onTertiaryFixed:     '#064e3b',
+  onTertiaryContainer: '#065f46',
+  onError:             '#ffffff',
+  inverseSurface:      '#1e293b',
+  inverseOnSurface:    '#f8fafc',
 
   // Border / Outline
-  outline:        '#6d758c',
-  outlineVariant: '#40485d', // ghost borders
+  outline:        '#94a3b8',  // medium borders
+  outlineVariant: '#e2e8f0',  // subtle borders
 
   // Surface tint
-  surfaceTint: '#a3a6ff',
+  surfaceTint: '#6366f1',
 } as const;
 
 // ─── Semantic Aliases ─────────────────────────────────────────────────────────
 export const SEMANTIC = {
   // Text
-  textPrimary:   NEURAL.onSurface,         // #dee5ff
-  textSecondary: NEURAL.onSurfaceVariant,  // #a3aac4
-  textTertiary:  NEURAL.outline,           // #6d758c
-  textMuted:     NEURAL.outlineVariant,    // #40485d
-  textBrand:     NEURAL.primary,           // #a3a6ff
+  textPrimary:   NEURAL.onSurface,         // #0f172a
+  textSecondary: NEURAL.onSurfaceVariant,  // #475569
+  textTertiary:  NEURAL.outline,           // #94a3b8
+  textMuted:     '#cbd5e1',                // very light text
+  textBrand:     NEURAL.primary,           // #6366f1
 
   // Surfaces
-  bgRoot:     NEURAL.background,              // #060e20
-  bgCard:     NEURAL.surfaceContainer,        // #0f1930
-  bgCardHigh: NEURAL.surfaceContainerHigh,    // #141f38
-  bgInput:    NEURAL.surfaceContainerHighest, // #192540
-  bgSidebar:  NEURAL.surfaceContainerLow,     // #091328
-  bgElevated: NEURAL.surfaceBright,           // #1f2b49
+  bgRoot:     NEURAL.background,              // #f8fafc
+  bgCard:     NEURAL.surfaceContainer,        // #ffffff
+  bgCardHigh: NEURAL.surfaceContainerHigh,    // #f1f5f9
+  bgInput:    '#f8fafc',                      // input bg
+  bgSidebar:  NEURAL.surfaceContainerLow,     // #f8fafc
+  bgElevated: '#ffffff',                      // elevated — pure white
 
   // Interactive
-  brand:        NEURAL.primary,    // #a3a6ff
-  brandDim:     NEURAL.primaryDim, // #6063ee
-  accent:       NEURAL.secondary,  // #ac8aff
-  live:         NEURAL.tertiary,   // #9bffce
-  error:        NEURAL.error,      // #ff6e84
+  brand:        NEURAL.primary,    // #6366f1
+  brandDim:     NEURAL.primaryDim, // #4f46e5
+  accent:       NEURAL.secondary,  // #8b5cf6
+  live:         NEURAL.tertiary,   // #10b981
+  error:        NEURAL.error,      // #f43f5e
 
-  // Borders (ghost border rule: outlineVariant at low opacity)
-  borderGhost:  `${NEURAL.outlineVariant}26`, // 15% opacity
-  borderSubtle: NEURAL.outlineVariant,        // #40485d full
-  borderBrand:  `${NEURAL.primary}40`,        // primary at 25%
+  // Borders
+  borderGhost:  '#f1f5f9',                    // very subtle
+  borderSubtle: NEURAL.outlineVariant,        // #e2e8f0
+  borderBrand:  `${NEURAL.primary}30`,        // indigo at 19%
 
-  // Glass
-  glassBg:    `${NEURAL.surfaceVariant}99`,   // 60% opacity
+  // Glass (for glassmorphism effects)
+  glassBg:    'rgba(255, 255, 255, 0.75)',
   glassBlur:  20,
 
-  // Gradients (used via expo-linear-gradient)
-  gradientPrimary: [NEURAL.primary, NEURAL.primaryDim] as string[], // indigo gradient CTA
-  gradientUser:    ['#a3a6ff', '#6063ee'] as string[],              // user bubble
-  gradientBg:      ['#060e20', '#091328'] as string[],              // subtle bg gradient
+  // Gradients
+  gradientPrimary: ['#6366f1', '#4f46e5'] as string[],    // indigo gradient CTA
+  gradientUser:    ['#6366f1', '#8b5cf6'] as string[],     // user message
+  gradientBg:      ['#f8fafc', '#eef2ff'] as string[],     // subtle bg gradient
+  gradientAccent:  ['#8b5cf6', '#6366f1'] as string[],     // violet → indigo
+  gradientSuccess: ['#10b981', '#059669'] as string[],     // emerald
+  gradientWarm:    ['#fef3c7', '#fde68a'] as string[],     // amber warm
 } as const;
 
 // ─── Spacing Scale ────────────────────────────────────────────────────────────
@@ -115,7 +118,6 @@ export const SPACING = {
 } as const;
 
 // ─── Border Radius ────────────────────────────────────────────────────────────
-// Stitch: ROUND_FOUR ≈ rounded-xl. No radius < 6px ("Don't use border-radius smaller than md")
 export const RADIUS = {
   sm:   6,
   md:   10,
@@ -148,66 +150,115 @@ export const FONT_WEIGHT = {
   extrabold: '800' as const,
 } as const;
 
-// ─── Status Colors (for pipeline events, badges) ──────────────────────────────
-export const STATUS_COLORS = {
-  running:  NEURAL.primary,   // indigo pulse
-  complete: NEURAL.tertiary,  // emerald
-  error:    NEURAL.error,     // coral
-  pending:  NEURAL.secondary, // violet
-  cached:   NEURAL.tertiaryDim,
+// ─── Shadows (Platform-adaptive) ──────────────────────────────────────────────
+export const SHADOWS = {
+  sm: {
+    shadowColor: '#0f172a',
+    shadowOpacity: 0.04,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 1,
+  },
+  md: {
+    shadowColor: '#0f172a',
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 3,
+  },
+  lg: {
+    shadowColor: '#0f172a',
+    shadowOpacity: 0.08,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 6,
+  },
+  xl: {
+    shadowColor: '#0f172a',
+    shadowOpacity: 0.12,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 10,
+  },
+  glow: {
+    shadowColor: '#6366f1',
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 8,
+  },
+  glowSuccess: {
+    shadowColor: '#10b981',
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 8,
+  },
 } as const;
 
-// ─── Legacy compatibility (for shared components still using COLORS / SEMANTIC_COLORS) ──
+// ─── Status Colors (for pipeline events, badges) ──────────────────────────────
+export const STATUS_COLORS = {
+  running:  '#3b82f6',    // blue
+  complete: '#10b981',    // emerald
+  error:    '#f43f5e',    // rose
+  pending:  '#f59e0b',    // amber
+  cached:   '#8b5cf6',    // violet
+  queued:   '#94a3b8',    // slate
+  blocked:  '#a78bfa',    // violet light
+  waiting:  '#f59e0b',    // amber
+} as const;
+
+// ─── Legacy compatibility ─────────────────────────────────────────────────────
 export const COLORS = {
-  primary:   { 300: '#c4c6ff', 500: NEURAL.primary, 600: NEURAL.primaryDim, 700: '#4f51c8' },
+  primary:   { 300: '#a5b4fc', 500: NEURAL.primary, 600: NEURAL.primaryDim, 700: '#4338ca' },
   secondary: { 500: NEURAL.secondary },
-  success:   { 50: '#f0fff7', 100: '#d6f7e8', 300: NEURAL.tertiaryDim, 500: NEURAL.tertiary, 600: NEURAL.tertiaryContainer },
-  warning:   { 100: '#fff3c4', 300: '#ffd86b', 500: '#f59e0b', 600: '#d97706' },
-  error:     { 50: '#fff0f2', 100: '#ffd6db', 200: '#ffb3bc', 300: NEURAL.errorDim, 500: NEURAL.error, 600: NEURAL.errorContainer, 700: '#7a0020' },
-  info:      { 100: '#dbeafe', 300: '#93c5fd', 500: '#60a5fa', 600: '#3b82f6' },
-  surface:   { 400: NEURAL.onSurfaceVariant, 500: NEURAL.outline, 700: NEURAL.surfaceBright, 800: NEURAL.surfaceContainerHigh, 900: NEURAL.surfaceContainer },
+  success:   { 50: '#f0fdf4', 100: '#dcfce7', 300: '#86efac', 500: NEURAL.tertiary, 600: NEURAL.tertiaryDim },
+  warning:   { 100: '#fef3c7', 300: '#fcd34d', 500: '#f59e0b', 600: '#d97706' },
+  error:     { 50: '#fff1f2', 100: '#ffe4e6', 200: '#fecdd3', 300: '#fda4af', 500: NEURAL.error, 600: NEURAL.errorDim, 700: '#be123c' },
+  info:      { 100: '#dbeafe', 300: '#93c5fd', 500: '#3b82f6', 600: '#2563eb' },
+  surface:   { 400: NEURAL.onSurfaceVariant, 500: NEURAL.outline, 700: '#e2e8f0', 800: '#f1f5f9', 900: '#ffffff' },
   white:     '#ffffff',
   black:     '#000000',
   transparent: 'transparent',
   violet:    { 500: NEURAL.secondary, 600: NEURAL.secondaryDim },
   emerald:   { 500: NEURAL.tertiary, 600: NEURAL.tertiaryDim },
   amber:     { 500: '#f59e0b', 600: '#d97706' },
-  cyan:      { 500: '#58e7ff', 600: '#00bcd4' },
+  cyan:      { 500: '#06b6d4', 600: '#0891b2' },
 } as const;
 
 export const SEMANTIC_COLORS = {
   textPrimary:    SEMANTIC.textPrimary,
   textSecondary:  SEMANTIC.textSecondary,
   textTertiary:   SEMANTIC.textTertiary,
-  textInverse:    NEURAL.inverseSurface,
+  textInverse:    NEURAL.inverseOnSurface,
   textMuted:      SEMANTIC.textMuted,
-  textOnAccent:   NEURAL.onPrimary,
+  textOnAccent:   '#ffffff',
   bgCanvas:       NEURAL.background,
-  bgPrimary:      NEURAL.surfaceContainer,
-  bgSecondary:    NEURAL.surfaceContainerLow,
-  bgTertiary:     NEURAL.surfaceContainerHigh,
-  bgElevated:     NEURAL.surfaceContainerHighest,
-  bgOverlay:      'rgba(6, 14, 32, 0.85)',
-  bgHighlight:    `${NEURAL.primary}20`,
+  bgPrimary:      '#ffffff',
+  bgSecondary:    '#f8fafc',
+  bgTertiary:     '#f1f5f9',
+  bgElevated:     '#ffffff',
+  bgOverlay:      'rgba(15, 23, 42, 0.5)',
+  bgHighlight:    `${NEURAL.primary}10`,
   borderPrimary:   NEURAL.outlineVariant,
   borderSecondary: NEURAL.outline,
-  borderAccent:    `${NEURAL.primary}40`,
-  borderLight:     `${NEURAL.outlineVariant}26`,
+  borderAccent:    `${NEURAL.primary}30`,
+  borderLight:     '#f1f5f9',
   buttonPrimary:          NEURAL.primary,
   buttonPrimaryHover:     NEURAL.primaryDim,
-  buttonPrimaryActive:    NEURAL.inversePrimary,
-  buttonPrimaryDisabled:  NEURAL.surfaceBright,
-  buttonSecondary:        NEURAL.surfaceContainerHigh,
+  buttonPrimaryActive:    '#4338ca',
+  buttonPrimaryDisabled:  '#e2e8f0',
+  buttonSecondary:        '#f1f5f9',
   buttonSecondaryText:    NEURAL.onSurface,
-  buttonSecondaryHover:   NEURAL.surfaceContainerHighest,
-  navBackground:          NEURAL.surfaceContainer,
+  buttonSecondaryHover:   '#e2e8f0',
+  navBackground:          '#ffffff',
   statusSuccess: NEURAL.tertiary,
   statusWarning: '#f59e0b',
   statusError:   NEURAL.error,
-  statusInfo:    NEURAL.primary,
+  statusInfo:    '#3b82f6',
   statusLoading: NEURAL.primary,
   glassBg:     SEMANTIC.glassBg,
-  glassOverlay: NEURAL.surfaceContainerHighest,
+  glassOverlay: 'rgba(255, 255, 255, 0.6)',
   accentPrimary:   NEURAL.primary,
   accentSecondary: NEURAL.secondary,
 } as const;

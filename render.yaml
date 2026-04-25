@@ -16,7 +16,7 @@ services:
       - key: CORTEX_DATA_DIR
         value: /tmp/cortex
       - key: CORS_ALLOW_ORIGINS
-        value: https://cortex-frontend.onrender.com
+        value: https://cortex-frontend-t53t.onrender.com
       - key: CORS_ALLOW_ORIGIN_REGEX
         value: ^https://.*\.onrender\.com$|^https://.*\.trycloudflare\.com$|^https?://(localhost|127\.0\.0\.1)(:\d+)?$
       - key: GOOGLE_API_KEY
@@ -35,4 +35,4 @@ services:
       - key: NEXT_TELEMETRY_DISABLED
         value: "1"
       - key: NEXT_PUBLIC_API_BASE_URL
-        value: https://cortex-backend.onrender.com/api
+        value: https://cortex-backend-dbcv.onrender.com/api

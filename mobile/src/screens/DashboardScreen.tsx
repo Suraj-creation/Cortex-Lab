@@ -1,230 +1,503 @@
 /**
- * DashboardScreen — Neural Dark RAG Dashboard
- * Stitch ref: 53094837d331410794d2137fb52c803c
+ * DashboardScreen — Cortex Lab mobile hub for deep applications.
+ * Presents the core surfaces from the web product in a mobile-first launchpad.
  */
-import React from 'react';
+import React, { useMemo } from 'react';
 import {
   View,
   Text,
   ScrollView,
   StyleSheet,
-  ActivityIndicator,
+  RefreshControl,
+  TouchableOpacity,
 } from 'react-native';
-import { NEURAL, SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT } from '../theme/colors';
-import { Card } from '../components/ui/Card';
-import { Badge } from '../components/ui/Badge';
-import { ProgressBar } from '../components/ui/ProgressBar';
+import { LinearGradient } from 'expo-linear-gradient';
+import { SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT, SHADOWS } from '../theme/colors';
 import { AppIcon, type AppIconName } from '../components/ui/AppIcon';
-import type { RAGStats } from '../../shared/core/types';
-
-function shortNum(v: number | undefined): string {
-  if (typeof v !== 'number') return '0';
-  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
-  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`;
-  return `${v}`;
-}
-
-function toPercent(v: number): string {
-  return `${Math.round(v * 100)}%`;
-}
+import { Card } from '../components/ui/Card';
+import { MetricCard } from '../components/ui/MetricCard';
+import { SectionHeader } from '../components/ui/SectionHeader';
+import { Badge } from '../components/ui/Badge';
+import type { NavKey } from '../components/ui/BottomNav';
+import type { GraphData, ModelStatus, RAGStats } from '../../shared/core/types';
 
 interface DashboardScreenProps {
   ragStats: RAGStats | null;
+  graphData: GraphData | null;
+  documentCount: number;
+  apiBaseUrl: string;
+  modelStatus: ModelStatus;
   loadingView: boolean;
   onRefresh: () => void;
+  onOpenView: (view: NavKey) => void;
 }
 
-export function DashboardScreen({ ragStats, loadingView, onRefresh }: DashboardScreenProps) {
-  if (loadingView) {
-    return (
-      <View style={[styles.container, styles.center]}>
-        <ActivityIndicator color={NEURAL.primary} size="large" />
-      </View>
-    );
+interface FeatureTile {
+  key: NavKey;
+  title: string;
+  description: string;
+  icon: AppIconName;
+  badge: string;
+  badgeVariant: 'primary' | 'success' | 'info' | 'violet' | 'warning';
+  metric?: string;
+}
+
+function formatEndpoint(rawUrl: string): string {
+  try {
+    return new URL(rawUrl).host;
+  } catch {
+    return rawUrl;
   }
+}
 
-  if (!ragStats) {
-    return (
-      <View style={[styles.container, styles.center]}>
-        <Text style={styles.emptyTitle}>Dashboard loading…</Text>
-        <Text style={styles.emptyBody}>Connect to backend to view RAG stats.</Text>
-      </View>
-    );
-  }
+export function DashboardScreen({
+  ragStats,
+  graphData,
+  documentCount,
+  apiBaseUrl,
+  modelStatus,
+  loadingView,
+  onRefresh,
+  onOpenView,
+}: DashboardScreenProps) {
+  const isConnected = modelStatus.status !== 'offline';
+  const endpoint = formatEndpoint(apiBaseUrl);
 
-  const hitRate = ragStats.cache.hit_rate ?? 0;
-  const vectorHot   = (ragStats.vectors as any)?.hot_count ?? 0;
-  const vectorWarm  = (ragStats.vectors as any)?.warm_count ?? 0;
-  const vectorCold  = (ragStats.vectors as any)?.cold_count ?? (ragStats.vectors?.total_vectors ?? 0);
-  const totalVectors = ragStats.vectors?.total_vectors ?? 0;
+  const featureTiles = useMemo<FeatureTile[]>(() => {
+    const graphNodes = graphData?.nodes?.length ?? ragStats?.graph?.nodes ?? 0;
+    const graphEdges = graphData?.edges?.length ?? ragStats?.graph?.edges ?? 0;
+    const memories = ragStats?.memories?.memories ?? 0;
+    const runtimeTraces = ragStats?.cache?.total_queries ?? 0;
 
-  const heroMetrics: Array<{ label: string; value: string; iconName: AppIconName; color: string }> = [
-    { label: 'Memories', value: shortNum(ragStats.memories?.memories), iconName: 'brain', color: NEURAL.primary },
-    { label: 'Entities', value: shortNum(ragStats.memories?.entities), iconName: 'hexagon-outline', color: NEURAL.secondary },
-    { label: 'Vectors', value: shortNum(ragStats.vectors?.total_vectors), iconName: 'vector-link', color: NEURAL.tertiary },
-    { label: 'Graph Nodes', value: shortNum(ragStats.graph?.nodes), iconName: 'graph-outline', color: '#60a5fa' },
-  ];
-
-  const vectorTiers: Array<{ iconName: AppIconName; label: string; count: number; color: string }> = [
-    { iconName: 'fire', label: 'Hot', count: vectorHot, color: NEURAL.error },
-    { iconName: 'weather-sunny', label: 'Warm', count: vectorWarm, color: '#f59e0b' },
-    { iconName: 'snowflake', label: 'Cold', count: vectorCold, color: '#60a5fa' },
-  ];
+    return [
+      {
+        key: 'chat',
+        title: 'RAG System',
+        description: 'Memory-grounded chat, fast recall, and streaming answers.',
+        icon: 'chat-processing-outline',
+        badge: 'Core',
+        badgeVariant: 'primary',
+        metric: `${memories} memories`,
+      },
+      {
+        key: 'agent',
+        title: 'Agent Chat',
+        description: 'Tiered orchestration, steering, sessions, and runtime control.',
+        icon: 'robot-outline',
+        badge: 'Agentic',
+        badgeVariant: 'violet',
+      },
+      {
+        key: 'wiki',
+        title: 'Personal Wiki',
+        description: 'Canonical memory pages, claims, linting, and compaction.',
+        icon: 'book-open-page-variant-outline',
+        badge: 'Knowledge',
+        badgeVariant: 'info',
+      },
+      {
+        key: 'memories',
+        title: 'Memory Browser',
+        description: 'Search, ingest, inspect, and manage long-term memory objects.',
+        icon: 'brain',
+        badge: 'Recall',
+        badgeVariant: 'success',
+        metric: `${memories} stored`,
+      },
+      {
+        key: 'graph',
+        title: 'Knowledge Graph',
+        description: 'Entity nodes, relations, and graph-driven context traversal.',
+        icon: 'graph-outline',
+        badge: 'Graph',
+        badgeVariant: 'info',
+        metric: `${graphNodes} nodes · ${graphEdges} edges`,
+      },
+      {
+        key: 'dashboard',
+        title: 'RAG Dashboard',
+        description: 'Pipeline health, cache behavior, vector stats, and load signals.',
+        icon: 'view-dashboard-outline',
+        badge: 'Metrics',
+        badgeVariant: 'primary',
+        metric: `${runtimeTraces} queries`,
+      },
+      {
+        key: 'observability',
+        title: 'Pipeline Observability',
+        description: 'Traces, live events, runtime safety queue, and task execution.',
+        icon: 'chart-timeline-variant',
+        badge: 'Ops',
+        badgeVariant: 'warning',
+      },
+      {
+        key: 'ambient',
+        title: 'Ambient Listening',
+        description: 'Live transcript, continuous context, and Gemini voice runtime.',
+        icon: 'microphone-outline',
+        badge: 'Live',
+        badgeVariant: 'success',
+      },
+      {
+        key: 'documents',
+        title: 'PageIndex Documents',
+        description: 'Upload, query, and inspect document trees and grounded answers.',
+        icon: 'file-document-outline',
+        badge: 'Docs',
+        badgeVariant: 'info',
+        metric: `${documentCount} indexed`,
+      },
+      {
+        key: 'session-forge',
+        title: 'Session Forge',
+        description: 'Crystallization, summaries, gap mapping, and belief detection.',
+        icon: 'atom-variant',
+        badge: 'Deep App',
+        badgeVariant: 'violet',
+      },
+      {
+        key: 'chronicle',
+        title: 'Life Chronicle',
+        description: 'Moment capture, observation logging, and timeline snapshots.',
+        icon: 'timeline-text-outline',
+        badge: 'Chronicle',
+        badgeVariant: 'warning',
+      },
+    ];
+  }, [documentCount, graphData, ragStats]);
 
   return (
-    <View style={styles.container}>
-      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
-        {/* Header */}
-        <View style={styles.header}>
-          <Text style={styles.title}>RAG Dashboard</Text>
-          <Badge label="Live" variant="success" dot />
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={styles.content}
+      showsVerticalScrollIndicator={false}
+      refreshControl={
+        <RefreshControl
+          refreshing={loadingView}
+          onRefresh={onRefresh}
+          tintColor="#6366f1"
+          colors={['#6366f1']}
+        />
+      }
+    >
+      <LinearGradient
+        colors={['#0f172a', '#312e81', '#4338ca']}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={styles.hero}
+      >
+        <View style={styles.heroTopRow}>
+          <View style={styles.heroTitleWrap}>
+            <Text style={styles.heroEyebrow}>Cortex Deep Applications</Text>
+            <Text style={styles.heroTitle}>Production mobile command center</Text>
+            <Text style={styles.heroBody}>
+              Agent chat, personal wiki, graph memory, observability, ambient listening,
+              and document intelligence are all available from the same mobile shell now.
+            </Text>
+          </View>
+          <View style={styles.heroOrb}>
+            <AppIcon name="brain" size={24} color="#ffffff" />
+          </View>
         </View>
 
-        {/* 2×2 Hero metrics */}
-        <View style={styles.metricGrid}>
-          {heroMetrics.map((m) => (
-            <Card key={m.label} variant="elevated" style={styles.metricCard}>
-              <AppIcon name={m.iconName} size={22} color={m.color} style={styles.metricIcon} />
-              <Text style={[styles.metricValue, { color: m.color }]}>{m.value}</Text>
-              <Text style={styles.metricLabel}>{m.label}</Text>
-            </Card>
-          ))}
-        </View>
-
-        {/* Cache Performance */}
-        <Card variant="outlined" style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>Cache Performance</Text>
-          <ProgressBar
-            value={hitRate}
-            label="Hit Rate"
-            style={styles.progressBar}
+        <View style={styles.heroBadgeRow}>
+          <Badge
+            label={isConnected ? 'Backend Connected' : 'Backend Offline'}
+            variant={isConnected ? 'success' : 'error'}
+            size="md"
+            dot
           />
-          {[
-            { label: 'Total Queries',  value: ragStats.cache.total_queries },
-            { label: 'Total Hits',     value: ragStats.cache.total_hits },
-            { label: 'Exact Cache',    value: ragStats.cache.exact_cache_size },
-            { label: 'Semantic Cache', value: ragStats.cache.semantic_cache_size },
-            { label: 'Embedding Cache',value: ragStats.cache.embedding_cache_size },
-          ].map((row) => (
-            <View key={row.label} style={styles.statRow}>
-              <Text style={styles.statLabel}>{row.label}</Text>
-              <Text style={styles.statValue}>{shortNum(row.value)}</Text>
-            </View>
-          ))}
-        </Card>
+          <Badge
+            label={modelStatus.model_info?.llm_provider?.toUpperCase() || 'Runtime'}
+            variant="violet"
+            size="md"
+          />
+        </View>
 
-        {/* LLM Usage */}
-        <Card variant="outlined" style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>LLM Usage</Text>
-          {[
-            { label: 'Total Calls',   value: shortNum(ragStats.llm?.call_count) },
-            { label: 'Total Tokens',  value: shortNum(ragStats.llm?.total_tokens) },
-            { label: 'Model Loaded',  value: ragStats.llm?.model_loaded ? 'Yes' : 'No' },
-          ].map((row) => (
-            <View key={row.label} style={styles.statRow}>
-              <Text style={styles.statLabel}>{row.label}</Text>
-              <Text style={styles.statValue}>{row.value}</Text>
-            </View>
-          ))}
-        </Card>
+        <View style={styles.heroInfoCard}>
+          <View style={styles.heroInfoRow}>
+            <Text style={styles.heroInfoLabel}>Live backend</Text>
+            <Text style={styles.heroInfoValue}>{endpoint}</Text>
+          </View>
+          <View style={styles.heroInfoRow}>
+            <Text style={styles.heroInfoLabel}>Knowledge graph</Text>
+            <Text style={styles.heroInfoValue}>
+              {(graphData?.nodes?.length ?? ragStats?.graph?.nodes ?? 0)} nodes
+            </Text>
+          </View>
+          <View style={styles.heroInfoRow}>
+            <Text style={styles.heroInfoLabel}>Indexed documents</Text>
+            <Text style={styles.heroInfoValue}>{documentCount}</Text>
+          </View>
+        </View>
+      </LinearGradient>
 
-        {/* Vector Store Tier Breakdown */}
-        <Card variant="outlined" style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>Vector Store Tiers</Text>
-          {vectorTiers.map((tier) => (
-            <View key={tier.label} style={styles.tierRow}>
-              <AppIcon name={tier.iconName} size={16} color={tier.color} style={styles.tierIcon} />
-              <Text style={styles.tierLabel}>{tier.label}</Text>
-              <View style={[styles.tierBadge, { borderColor: `${tier.color}60`, backgroundColor: `${tier.color}18` }]}>
-                <Text style={[styles.tierCount, { color: tier.color }]}>{shortNum(tier.count)}</Text>
+      <View style={styles.metricsRow}>
+        <MetricCard
+          label="Memories"
+          value={String(ragStats?.memories?.memories ?? 0)}
+          tone="indigo"
+          compact
+          style={styles.metricCard}
+        />
+        <MetricCard
+          label="Graph"
+          value={String(graphData?.nodes?.length ?? ragStats?.graph?.nodes ?? 0)}
+          tone="blue"
+          compact
+          style={styles.metricCard}
+        />
+        <MetricCard
+          label="Queries"
+          value={String(ragStats?.cache?.total_queries ?? 0)}
+          tone="emerald"
+          compact
+          style={styles.metricCard}
+        />
+      </View>
+
+      <SectionHeader
+        title="Core Surfaces"
+        subtitle="Everything critical from the web app, optimized for mobile"
+        icon={<AppIcon name="view-dashboard-outline" size={18} color="#6366f1" />}
+      />
+
+      <View style={styles.featureGrid}>
+        {featureTiles.map((feature) => (
+          <TouchableOpacity
+            key={feature.key}
+            style={styles.featureTouch}
+            activeOpacity={0.82}
+            onPress={() => onOpenView(feature.key)}
+          >
+            <Card variant="outlined" padding="lg" style={styles.featureCard}>
+              <View style={styles.featureHeader}>
+                <View style={styles.featureIconWrap}>
+                  <AppIcon name={feature.icon} size={18} color="#4338ca" />
+                </View>
+                <Badge label={feature.badge} variant={feature.badgeVariant} size="sm" />
               </View>
-              {totalVectors > 0 && (
-                <Text style={styles.tierPct}>{toPercent(tier.count / totalVectors)}</Text>
-              )}
-            </View>
-          ))}
-        </Card>
 
-        {/* Belief Deltas */}
-        {(ragStats as any).beliefs && (
-          <Card variant="outlined" style={styles.sectionCard}>
-            <Text style={styles.sectionTitle}>Belief Deltas</Text>
-            <Text style={styles.emptyBody}>No recent belief changes recorded.</Text>
-          </Card>
-        )}
-      </ScrollView>
-    </View>
+              <Text style={styles.featureTitle}>{feature.title}</Text>
+              <Text style={styles.featureDescription}>{feature.description}</Text>
+
+              <View style={styles.featureFooter}>
+                <Text style={styles.featureMetric}>{feature.metric || 'Open surface'}</Text>
+                <AppIcon name="arrow-right" size={16} color="#94a3b8" />
+              </View>
+            </Card>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      <Card variant="outlined" padding="lg" style={styles.pipelineCard}>
+        <SectionHeader
+          title="Pipeline Snapshot"
+          subtitle="Live retrieval system telemetry"
+          icon={<AppIcon name="chart-bar" size={16} color="#6366f1" />}
+        />
+        <View style={styles.pipelineRows}>
+          <View style={styles.pipelineRow}>
+            <Text style={styles.pipelineLabel}>Cache hit rate</Text>
+            <Text style={styles.pipelineValue}>
+              {ragStats?.cache?.hit_rate != null
+                ? `${(ragStats.cache.hit_rate * 100).toFixed(1)}%`
+                : 'Waiting for telemetry'}
+            </Text>
+          </View>
+          <View style={styles.pipelineRow}>
+            <Text style={styles.pipelineLabel}>Vector store</Text>
+            <Text style={styles.pipelineValue}>
+              {ragStats?.vectors?.total_vectors != null
+                ? `${ragStats.vectors.total_vectors} vectors`
+                : 'Unavailable'}
+            </Text>
+          </View>
+          <View style={styles.pipelineRow}>
+            <Text style={styles.pipelineLabel}>Active backend</Text>
+            <Text style={styles.pipelineValue}>
+              {ragStats?.memories?.backend || endpoint}
+            </Text>
+          </View>
+          <View style={styles.pipelineRow}>
+            <Text style={styles.pipelineLabel}>Model status</Text>
+            <Text style={styles.pipelineValue}>
+              {modelStatus.model_loaded ? 'Local model ready' : isConnected ? 'Remote runtime connected' : 'Offline'}
+            </Text>
+          </View>
+        </View>
+      </Card>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: NEURAL.background },
-  center: { alignItems: 'center', justifyContent: 'center' },
-  scroll: { paddingBottom: SPACING['5xl'] },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: SPACING.lg,
-    paddingTop: SPACING.lg,
-    paddingBottom: SPACING.md,
+  container: {
+    flex: 1,
+    backgroundColor: '#f8fafc',
   },
-  title: { fontSize: FONT_SIZE['2xl'], fontWeight: FONT_WEIGHT.bold, color: NEURAL.onSurface, letterSpacing: -0.5 },
-
-  // Metric grid
-  metricGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: SPACING.sm,
-    paddingHorizontal: SPACING.lg,
-    marginBottom: SPACING.lg,
+  content: {
+    padding: SPACING.lg,
+    paddingBottom: SPACING['5xl'],
+    gap: SPACING.lg,
   },
-  metricCard: {
-    width: '47%',
-    flexGrow: 1,
-    alignItems: 'center',
-    paddingVertical: SPACING.xl,
+  hero: {
+    borderRadius: RADIUS['2xl'],
+    padding: SPACING.xl,
+    gap: SPACING.lg,
+    ...SHADOWS.lg,
+  },
+  heroTopRow: {
+    flexDirection: 'row',
+    gap: SPACING.md,
+    alignItems: 'flex-start',
+  },
+  heroTitleWrap: {
+    flex: 1,
     gap: SPACING.xs,
   },
-  metricIcon: { marginBottom: 1 },
-  metricValue: { fontSize: FONT_SIZE['3xl'], fontWeight: FONT_WEIGHT.extrabold },
-  metricLabel: { fontSize: FONT_SIZE.sm, color: NEURAL.onSurfaceVariant },
-
-  // Section card
-  sectionCard: { marginHorizontal: SPACING.lg, marginBottom: SPACING.md, gap: SPACING.sm },
-  sectionTitle: { fontSize: FONT_SIZE.base, fontWeight: FONT_WEIGHT.bold, color: NEURAL.onSurface, marginBottom: SPACING.xs },
-  progressBar: { marginVertical: SPACING.sm },
-  statRow: {
+  heroEyebrow: {
+    fontSize: FONT_SIZE.xs,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: 'rgba(255,255,255,0.72)',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+  },
+  heroTitle: {
+    fontSize: FONT_SIZE['2xl'],
+    fontWeight: FONT_WEIGHT.extrabold,
+    color: '#ffffff',
+    lineHeight: 28,
+  },
+  heroBody: {
+    fontSize: FONT_SIZE.sm,
+    lineHeight: 20,
+    color: 'rgba(255,255,255,0.84)',
+  },
+  heroOrb: {
+    width: 52,
+    height: 52,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  heroBadgeRow: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+    flexWrap: 'wrap',
+  },
+  heroInfoCard: {
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderRadius: RADIUS.xl,
+    padding: SPACING.md,
+    gap: SPACING.sm,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  heroInfoRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: SPACING.md,
+  },
+  heroInfoLabel: {
+    flex: 1,
+    fontSize: FONT_SIZE.xs,
+    color: 'rgba(255,255,255,0.72)',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  heroInfoValue: {
+    flex: 1,
+    textAlign: 'right',
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: '#ffffff',
+  },
+  metricsRow: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+  },
+  metricCard: {
+    flex: 1,
+  },
+  featureGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: SPACING.md,
+  },
+  featureTouch: {
+    width: '48%',
+  },
+  featureCard: {
+    minHeight: 178,
+    justifyContent: 'space-between',
+  },
+  featureHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: SPACING.md,
+  },
+  featureIconWrap: {
+    width: 38,
+    height: 38,
+    borderRadius: RADIUS.lg,
+    backgroundColor: '#eef2ff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  featureTitle: {
+    fontSize: FONT_SIZE.md,
+    fontWeight: FONT_WEIGHT.bold,
+    color: '#0f172a',
+    marginBottom: SPACING.xs,
+  },
+  featureDescription: {
+    fontSize: FONT_SIZE.sm,
+    lineHeight: 18,
+    color: '#64748b',
+    flex: 1,
+  },
+  featureFooter: {
+    marginTop: SPACING.lg,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: SPACING.xs + 2,
     borderTopWidth: 1,
-    borderTopColor: `${NEURAL.outlineVariant}40`,
+    borderTopColor: '#f1f5f9',
+    paddingTop: SPACING.sm,
   },
-  statLabel: { fontSize: FONT_SIZE.sm, color: NEURAL.onSurfaceVariant },
-  statValue: { fontSize: FONT_SIZE.sm, color: NEURAL.onSurface, fontWeight: FONT_WEIGHT.semibold },
-
-  // Tier row
-  tierRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: SPACING.sm,
+  featureMetric: {
+    flex: 1,
+    fontSize: FONT_SIZE.xs,
+    color: '#4338ca',
+    fontWeight: FONT_WEIGHT.semibold,
+  },
+  pipelineCard: {
     gap: SPACING.sm,
-    borderTopWidth: 1,
-    borderTopColor: `${NEURAL.outlineVariant}40`,
   },
-  tierIcon: { width: 24 },
-  tierLabel: { flex: 1, fontSize: FONT_SIZE.sm, color: NEURAL.onSurface, fontWeight: FONT_WEIGHT.medium },
-  tierBadge: {
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: 2,
-    borderRadius: RADIUS.full,
-    borderWidth: 1,
+  pipelineRows: {
+    gap: SPACING.sm,
   },
-  tierCount: { fontSize: FONT_SIZE.sm, fontWeight: FONT_WEIGHT.bold },
-  tierPct: { fontSize: FONT_SIZE.xs, color: NEURAL.onSurfaceVariant, width: 36, textAlign: 'right' },
-
-  emptyTitle: { fontSize: FONT_SIZE.lg, fontWeight: FONT_WEIGHT.semibold, color: NEURAL.onSurface, marginBottom: SPACING.sm },
-  emptyBody: { fontSize: FONT_SIZE.sm, color: NEURAL.onSurfaceVariant, textAlign: 'center' },
+  pipelineRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: SPACING.md,
+    paddingVertical: SPACING.xs,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f8fafc',
+  },
+  pipelineLabel: {
+    flex: 1,
+    fontSize: FONT_SIZE.sm,
+    color: '#64748b',
+  },
+  pipelineValue: {
+    flex: 1,
+    textAlign: 'right',
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: '#0f172a',
+  },
 });

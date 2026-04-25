@@ -1,28 +1,19 @@
 /**
- * ConversationDrawer — Neural Dark slide-in conversation history
- * Stitch ref: e0034294221049f79e6bc5e9ec4f868d
+ * ConversationDrawer — Cortex Aurora slide-in conversation history
  */
-import React, { useRef, useEffect, useState } from 'react';
+import React from 'react';
 import {
   View,
   Text,
   Modal,
-  Animated,
   TouchableOpacity,
-  TextInput,
+  Pressable,
   FlatList,
   StyleSheet,
-  Dimensions,
-  Pressable,
+  Platform,
 } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
-import { NEURAL, SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT } from '../theme/colors';
-import { Button } from '../components/ui/Button';
-import { NeuralPulse } from '../components/ui/NeuralPulse';
+import { SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT, SHADOWS } from '../theme/colors';
 import { AppIcon } from '../components/ui/AppIcon';
-
-const SCREEN_W = Dimensions.get('window').width;
-const DRAWER_W = Math.min(SCREEN_W * 0.82, 320);
 
 interface ConvSummary {
   id: string;
@@ -41,25 +32,6 @@ interface ConversationDrawerProps {
   onOpenSettings: () => void;
 }
 
-function groupByDate(conversations: ConvSummary[]): { label: string; items: ConvSummary[] }[] {
-  const now = Date.now();
-  const ONE_DAY = 86400000;
-  const ONE_WEEK = 7 * ONE_DAY;
-
-  const groups: Record<string, ConvSummary[]> = { Today: [], Yesterday: [], 'This Week': [], Older: [] };
-  conversations.forEach((c) => {
-    const diff = now - c.timestamp;
-    if (diff < ONE_DAY) groups.Today.push(c);
-    else if (diff < 2 * ONE_DAY) groups.Yesterday.push(c);
-    else if (diff < ONE_WEEK) groups['This Week'].push(c);
-    else groups.Older.push(c);
-  });
-
-  return Object.entries(groups)
-    .filter(([, items]) => items.length > 0)
-    .map(([label, items]) => ({ label, items }));
-}
-
 export function ConversationDrawer({
   visible,
   onClose,
@@ -70,244 +42,271 @@ export function ConversationDrawer({
   isOnline,
   onOpenSettings,
 }: ConversationDrawerProps) {
-  const slideAnim = useRef(new Animated.Value(-DRAWER_W)).current;
-  const opacityAnim = useRef(new Animated.Value(0)).current;
-  const [search, setSearch] = useState('');
-
-  useEffect(() => {
-    if (visible) {
-      Animated.parallel([
-        Animated.timing(slideAnim, { toValue: 0, duration: 250, useNativeDriver: true }),
-        Animated.timing(opacityAnim, { toValue: 1, duration: 250, useNativeDriver: true }),
-      ]).start();
-    } else {
-      Animated.parallel([
-        Animated.timing(slideAnim, { toValue: -DRAWER_W, duration: 200, useNativeDriver: true }),
-        Animated.timing(opacityAnim, { toValue: 0, duration: 200, useNativeDriver: true }),
-      ]).start();
-    }
-  }, [visible]);
-
-  const filtered = conversations.filter((c) =>
-    c.title.toLowerCase().includes(search.toLowerCase())
-  );
-  const groups = groupByDate(filtered);
+  const formatTime = (ts: number) => {
+    const d = new Date(ts);
+    const now = new Date();
+    if (d.toDateString() === now.toDateString()) return 'Today';
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  };
 
   return (
-    <Modal visible={visible} transparent animationType="none" onRequestClose={onClose}>
-      {/* Backdrop */}
-      <Animated.View style={[styles.backdrop, { opacity: opacityAnim }]}>
-        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
-      </Animated.View>
-
-      {/* Drawer */}
-      <Animated.View style={[styles.drawer, { transform: [{ translateX: slideAnim }] }]}>
-        {/* Logo header */}
-        <LinearGradient
-          colors={[NEURAL.surfaceContainerLow, NEURAL.surfaceContainer]}
-          style={styles.drawerHeader}
-        >
-          <View style={styles.logoRow}>
-            <AppIcon name="brain" size={18} color={NEURAL.primary} />
-            <Text style={styles.logoText}>Cortex Lab</Text>
-          </View>
-          <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
-            <AppIcon name="close" size={18} color={NEURAL.onSurfaceVariant} style={styles.closeIcon} />
-          </TouchableOpacity>
-        </LinearGradient>
-
-        {/* New Chat */}
-        <View style={styles.newChatWrap}>
-          <Button
-            label="+ New Chat"
-            onPress={() => { onNewChat(); onClose(); }}
-            fullWidth
-          />
-        </View>
-
-        {/* Search */}
-        <View style={styles.searchWrap}>
-          <TextInput
-            style={styles.searchInput}
-            placeholder="Search conversations…"
-            placeholderTextColor={NEURAL.outline}
-            value={search}
-            onChangeText={setSearch}
-            selectionColor={NEURAL.primary}
-          />
-        </View>
-
-        {/* Conversation groups */}
-        <FlatList
-          data={groups}
-          keyExtractor={(g) => g.label}
-          style={styles.list}
-          showsVerticalScrollIndicator={false}
-          renderItem={({ item: group }) => (
-            <View>
-              <Text style={styles.groupLabel}>{group.label}</Text>
-              {group.items.map((conv) => {
-                const isActive = conv.id === activeConversationId;
-                return (
-                  <TouchableOpacity
-                    key={conv.id}
-                    onPress={() => { onSelectConversation(conv.id); onClose(); }}
-                    style={[styles.convRow, isActive && styles.convRowActive]}
-                  >
-                    {isActive && <View style={styles.activeIndicator} />}
-                    <Text style={[styles.convTitle, isActive && styles.convTitleActive]} numberOfLines={2}>
-                      {conv.title}
-                    </Text>
-                    <Text style={styles.convTime}>
-                      {new Date(conv.timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
+    <Modal
+      visible={visible}
+      transparent
+      animationType="slide"
+      onRequestClose={onClose}
+    >
+      <Pressable style={styles.overlay} onPress={onClose}>
+        <Pressable style={styles.drawer} onPress={(e) => e.stopPropagation()}>
+          {/* Header */}
+          <View style={styles.header}>
+            <View style={styles.headerLeft}>
+              <View style={styles.logoContainer}>
+                <View style={styles.logoDot} />
+              </View>
+              <View>
+                <Text style={styles.headerTitle}>Cortex Lab</Text>
+                <Text style={styles.headerSubtitle}>Conversation History</Text>
+              </View>
             </View>
-          )}
-        />
-
-        {/* Bottom: Settings + status */}
-        <View style={styles.drawerFooter}>
-          <TouchableOpacity
-            onPress={() => { onOpenSettings(); onClose(); }}
-            style={styles.settingsRow}
-          >
-            <AppIcon name="cog-outline" size={18} color={NEURAL.onSurfaceVariant} style={styles.settingsIcon} />
-            <Text style={styles.settingsText}>Settings</Text>
-          </TouchableOpacity>
-          <View style={styles.serverStatus}>
-            <NeuralPulse active={isOnline} size={5} color={isOnline ? NEURAL.tertiary : NEURAL.error} />
-            <Text style={[styles.serverText, { color: isOnline ? NEURAL.tertiary : NEURAL.error }]}>
-              {isOnline ? 'Server Connected' : 'Server Offline'}
-            </Text>
+            <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
+              <AppIcon name="close" size={18} color="#64748b" />
+            </TouchableOpacity>
           </View>
-        </View>
-      </Animated.View>
+
+          {/* New Chat button */}
+          <View style={styles.newChatWrap}>
+            <TouchableOpacity onPress={onNewChat} style={styles.newChatBtn} activeOpacity={0.7}>
+              <AppIcon name="plus" size={16} color="#6366f1" />
+              <Text style={styles.newChatText}>New Conversation</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Conversation list */}
+          <FlatList
+            data={conversations}
+            keyExtractor={(c) => c.id}
+            contentContainerStyle={styles.list}
+            showsVerticalScrollIndicator={false}
+            renderItem={({ item }) => {
+              const isActive = item.id === activeConversationId;
+              return (
+                <TouchableOpacity
+                  onPress={() => { onSelectConversation(item.id); onClose(); }}
+                  style={[styles.convItem, isActive && styles.convItemActive]}
+                  activeOpacity={0.7}
+                >
+                  <AppIcon
+                    name="chat-processing-outline"
+                    size={16}
+                    color={isActive ? '#6366f1' : '#94a3b8'}
+                  />
+                  <View style={styles.convContent}>
+                    <Text
+                      style={[styles.convTitle, isActive && styles.convTitleActive]}
+                      numberOfLines={1}
+                    >
+                      {item.title}
+                    </Text>
+                    <Text style={styles.convTime}>{formatTime(item.timestamp)}</Text>
+                  </View>
+                  {isActive && (
+                    <View style={styles.activeDot} />
+                  )}
+                </TouchableOpacity>
+              );
+            }}
+            ListEmptyComponent={
+              <View style={styles.emptyContainer}>
+                <Text style={styles.emptyText}>No conversations yet</Text>
+              </View>
+            }
+          />
+
+          {/* Footer */}
+          <View style={styles.footer}>
+            <View style={styles.statusRow}>
+              <View style={[styles.statusDot, { backgroundColor: isOnline ? '#10b981' : '#94a3b8' }]} />
+              <Text style={styles.statusText}>
+                {isOnline ? 'Backend Connected' : 'Offline'}
+              </Text>
+            </View>
+            <TouchableOpacity onPress={() => { onOpenSettings(); onClose(); }} style={styles.settingsBtn}>
+              <AppIcon name="cog-outline" size={16} color="#64748b" />
+              <Text style={styles.settingsBtnText}>Settings</Text>
+            </TouchableOpacity>
+          </View>
+        </Pressable>
+      </Pressable>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  backdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(6,14,32,0.75)',
+  overlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.3)',
+    justifyContent: 'flex-end',
   },
   drawer: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    bottom: 0,
-    width: DRAWER_W,
-    backgroundColor: NEURAL.surfaceContainerLow,
-    shadowColor: NEURAL.primary,
-    shadowOpacity: 0.2,
-    shadowRadius: 24,
-    shadowOffset: { width: 8, height: 0 },
-    elevation: 20,
+    backgroundColor: '#ffffff',
+    borderTopLeftRadius: RADIUS['3xl'],
+    borderTopRightRadius: RADIUS['3xl'],
+    maxHeight: '85%',
+    ...SHADOWS.xl,
   },
-  drawerHeader: {
+  header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: SPACING.lg,
-    paddingTop: SPACING['4xl'],
+    paddingHorizontal: SPACING['2xl'],
+    paddingTop: SPACING.xl,
     paddingBottom: SPACING.md,
   },
-  logoRow: {
+  headerLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: SPACING.xs,
+    gap: SPACING.md,
   },
-  logoText: { fontSize: FONT_SIZE.xl, fontWeight: FONT_WEIGHT.bold, color: NEURAL.onSurface, letterSpacing: -0.5 },
-  closeBtn: { padding: SPACING.sm },
-  closeIcon: { marginVertical: 1 },
-
-  newChatWrap: { paddingHorizontal: SPACING.lg, paddingVertical: SPACING.md },
-
-  searchWrap: {
-    paddingHorizontal: SPACING.lg,
-    marginBottom: SPACING.md,
-  },
-  searchInput: {
-    backgroundColor: NEURAL.surfaceContainerHighest,
-    borderRadius: RADIUS.full,
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
-    fontSize: FONT_SIZE.sm,
-    color: NEURAL.onSurface,
-    borderWidth: 1,
-    borderColor: NEURAL.outlineVariant,
-  },
-
-  list: { flex: 1, paddingHorizontal: SPACING.sm },
-  groupLabel: {
-    fontSize: FONT_SIZE.xs,
-    fontWeight: FONT_WEIGHT.bold,
-    color: NEURAL.onSurfaceVariant,
-    textTransform: 'uppercase',
-    letterSpacing: 0.8,
-    paddingHorizontal: SPACING.sm,
-    paddingTop: SPACING.md,
-    paddingBottom: SPACING.xs,
-  },
-  convRow: {
-    paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
+  logoContainer: {
+    width: 36,
+    height: 36,
     borderRadius: RADIUS.lg,
-    position: 'relative',
+    backgroundColor: '#6366f1',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  logoDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#ffffff',
+  },
+  headerTitle: {
+    fontSize: FONT_SIZE.lg,
+    fontWeight: FONT_WEIGHT.bold,
+    color: '#0f172a',
+  },
+  headerSubtitle: {
+    fontSize: FONT_SIZE.xs,
+    color: '#64748b',
+    marginTop: 1,
+  },
+  closeBtn: {
+    padding: SPACING.sm,
+    backgroundColor: '#f1f5f9',
+    borderRadius: RADIUS.lg,
+  },
+
+  newChatWrap: {
+    paddingHorizontal: SPACING.xl,
+    paddingBottom: SPACING.md,
+  },
+  newChatBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: SPACING.sm,
+    backgroundColor: '#eef2ff',
+    borderWidth: 1,
+    borderColor: '#c7d2fe',
+    borderRadius: RADIUS.xl,
+    paddingVertical: SPACING.md,
+  },
+  newChatText: {
+    fontSize: FONT_SIZE.base,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: '#6366f1',
+  },
+
+  list: {
+    paddingHorizontal: SPACING.lg,
+    paddingBottom: SPACING.md,
+  },
+  convItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.lg,
+    borderRadius: RADIUS.xl,
     marginBottom: 2,
+    gap: SPACING.md,
   },
-  convRowActive: {
-    backgroundColor: NEURAL.surfaceContainerHigh,
-    paddingLeft: SPACING.md + 6,
+  convItemActive: {
+    backgroundColor: '#eef2ff',
   },
-  activeIndicator: {
-    position: 'absolute',
-    left: 8,
-    top: '20%',
-    bottom: '20%',
-    width: 3,
-    backgroundColor: NEURAL.primary,
-    borderRadius: 2,
+  convContent: {
+    flex: 1,
   },
   convTitle: {
-    fontSize: FONT_SIZE.sm,
-    color: NEURAL.onSurfaceVariant,
-    fontWeight: FONT_WEIGHT.normal,
-    marginBottom: 2,
+    fontSize: FONT_SIZE.base,
+    fontWeight: FONT_WEIGHT.medium,
+    color: '#334155',
   },
   convTitleActive: {
-    color: NEURAL.onSurface,
+    color: '#4338ca',
     fontWeight: FONT_WEIGHT.semibold,
   },
   convTime: {
-    fontSize: FONT_SIZE.xs,
-    color: NEURAL.outline,
+    fontSize: 10,
+    color: '#94a3b8',
+    marginTop: 2,
+  },
+  activeDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#6366f1',
   },
 
-  drawerFooter: {
-    padding: SPACING.lg,
-    borderTopWidth: 1,
-    borderTopColor: `${NEURAL.outlineVariant}40`,
-    gap: SPACING.md,
+  emptyContainer: {
+    paddingVertical: SPACING['4xl'],
+    alignItems: 'center',
   },
-  settingsRow: {
+  emptyText: {
+    fontSize: FONT_SIZE.sm,
+    color: '#94a3b8',
+  },
+
+  footer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: SPACING['2xl'],
+    paddingVertical: SPACING.lg,
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+  },
+  statusRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: SPACING.sm,
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  statusText: {
+    fontSize: FONT_SIZE.sm,
+    color: '#64748b',
+    fontWeight: FONT_WEIGHT.medium,
+  },
+  settingsBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xs,
+    backgroundColor: '#f1f5f9',
+    borderRadius: RADIUS.lg,
+    paddingHorizontal: SPACING.md,
     paddingVertical: SPACING.sm,
   },
-  settingsIcon: { marginVertical: 1 },
-  settingsText: { fontSize: FONT_SIZE.base, color: NEURAL.onSurface, fontWeight: FONT_WEIGHT.medium },
-  serverStatus: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-  },
-  serverText: {
-    fontSize: FONT_SIZE.xs,
-    fontWeight: FONT_WEIGHT.semibold,
+  settingsBtnText: {
+    fontSize: FONT_SIZE.sm,
+    color: '#64748b',
+    fontWeight: FONT_WEIGHT.medium,
   },
 });

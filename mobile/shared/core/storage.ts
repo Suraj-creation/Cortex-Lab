@@ -4,7 +4,7 @@
  * Platform-agnostic interface for persistence
  */
 
-import { ChatMessage, ChatSettings, MemoryObject, DEFAULT_SETTINGS } from './types';
+import { ChatMessage, ChatSettings, DEFAULT_SETTINGS, ModelpackInstallState } from './types';
 
 // Storage keys
 const STORAGE_KEYS = {
@@ -14,6 +14,7 @@ const STORAGE_KEYS = {
   LAST_API_URL: 'last_api_url',
   ONBOARDING_COMPLETED: 'onboarding_completed',
   SYNC_METADATA: 'sync_metadata',
+  MODELPACK_INSTALLS: 'modelpack_installs',
 };
 
 interface StoredConversation {
@@ -213,6 +214,23 @@ export async function getOnboardingCompleted(): Promise<boolean> {
     return (await StorageBackend.getItem(STORAGE_KEYS.ONBOARDING_COMPLETED)) === 'true';
   } catch {
     return false;
+  }
+}
+
+export async function saveModelpackInstalls(
+  installs: Record<string, ModelpackInstallState>,
+): Promise<void> {
+  await StorageBackend.setItem(STORAGE_KEYS.MODELPACK_INSTALLS, JSON.stringify(installs));
+}
+
+export async function loadModelpackInstalls(): Promise<Record<string, ModelpackInstallState>> {
+  try {
+    const data = await StorageBackend.getItem(STORAGE_KEYS.MODELPACK_INSTALLS);
+    const parsed = data ? JSON.parse(data) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (error) {
+    console.error('Failed to load modelpack installs:', error);
+    return {};
   }
 }
 

@@ -1,6 +1,6 @@
 /**
- * SettingsScreen — Full-screen settings page
- * Replaces modal sheet interaction for stable editing and navigation.
+ * SettingsScreen — Cortex Aurora Full-screen settings page
+ * Light theme with clean form elements and indigo accents
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
@@ -23,20 +23,30 @@ import { ModelDownloadManager } from '../components/modelpacks/ModelDownloadMana
 import { ModelRecommendationCard } from '../components/modelpacks/ModelRecommendationCard';
 import { OfflineReadinessBadge } from '../components/modelpacks/OfflineReadinessBadge';
 
-import type { ChatSettings, ModelpackEntry, ModelpackManifest } from '../../shared/core/types';
+import type {
+  ChatSettings,
+  LLMProviderType,
+  ModelpackEntry,
+  ModelpackInstallState,
+  ModelpackManifest,
+} from '../../shared/core/types';
 
 interface SettingsScreenProps {
   settings: ChatSettings;
   onUpdateSettings: (s: Partial<ChatSettings>) => void;
+  onSelectLLMProvider: (provider: LLMProviderType) => void;
   onBack: () => void;
-  onSave: (backendUrl: string) => void;
-  onTestConnection: (backendUrl: string) => void;
-  testingConnection: boolean;
+  onReconnect: () => void;
+  reconnecting: boolean;
   connectionStatus: string;
-  backendUrl: string;
+  backendUrlLabel: string;
+  localModelAvailable: boolean;
   modelpackManifest: ModelpackManifest | null;
+  modelpackInstalls: Record<string, ModelpackInstallState>;
+  modelpackCapabilityMessage: string;
   modelpackError: string;
   onRefreshModelpacks: () => void;
+  onInstallModelpack: (pack: ModelpackEntry) => void;
 }
 
 const MODELPACK_DOCS_FALLBACK =
@@ -53,8 +63,11 @@ const FALLBACK_MODELPACKS: ModelpackEntry[] = [
     summary: 'Higher-quality Gemma 4 local model for capable devices.',
     availability: 'available',
     download_url: 'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm',
-    cta_label: 'Download from Hugging Face',
-    files: [],
+    cta_label: 'Download to device',
+    files: [
+      { path: 'gemma-4-E4B-it.litertlm', size_bytes: 0, sha256: '' },
+      { path: 'gemma-4-E4B-it-web.task', size_bytes: 0, sha256: '' },
+    ],
   },
   {
     id: 'gemma-4-e2b-it-litert-lm',
@@ -66,8 +79,11 @@ const FALLBACK_MODELPACKS: ModelpackEntry[] = [
     summary: 'Lean Gemma 4 local model for faster installs and mid-range devices.',
     availability: 'available',
     download_url: 'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm',
-    cta_label: 'Download from Hugging Face',
-    files: [],
+    cta_label: 'Download to device',
+    files: [
+      { path: 'gemma-4-E2B-it.litertlm', size_bytes: 0, sha256: '' },
+      { path: 'gemma-4-E2B-it-web.task', size_bytes: 0, sha256: '' },
+    ],
   },
   {
     id: 'gemma-3-5-ft-local',
@@ -138,23 +154,22 @@ function normalizeModelpackManifest(input: ModelpackManifest | null): ModelpackM
 export function SettingsScreen({
   settings,
   onUpdateSettings,
+  onSelectLLMProvider,
   onBack,
-  onSave,
-  onTestConnection,
-  testingConnection,
+  onReconnect,
+  reconnecting,
   connectionStatus,
-  backendUrl,
+  backendUrlLabel,
+  localModelAvailable,
   modelpackManifest,
+  modelpackInstalls,
+  modelpackCapabilityMessage,
   modelpackError,
   onRefreshModelpacks,
+  onInstallModelpack,
 }: SettingsScreenProps) {
-  const [backendDraft, setBackendDraft] = useState(backendUrl);
   const [maxTokensDraft, setMaxTokensDraft] = useState(String(settings.maxTokens ?? ''));
   const [modelpackLinkError, setModelpackLinkError] = useState('');
-
-  useEffect(() => {
-    setBackendDraft(backendUrl);
-  }, [backendUrl]);
 
   useEffect(() => {
     setMaxTokensDraft(String(settings.maxTokens ?? ''));
@@ -184,9 +199,13 @@ export function SettingsScreen({
   const downloadableNow = useMemo(
     () =>
       normalizedManifest.packs.filter(
-        (pack) => pack.availability !== 'coming_soon' && Boolean(pack.download_url),
+        (pack) => pack.availability !== 'coming_soon' && (pack.files.length > 0 || Boolean(pack.download_url)),
       ).length,
     [normalizedManifest.packs],
+  );
+  const installedNow = useMemo(
+    () => Object.values(modelpackInstalls).filter((item) => item.status === 'installed').length,
+    [modelpackInstalls],
   );
 
   const openExternalUrl = useCallback(async (url: string) => {
@@ -227,15 +246,31 @@ export function SettingsScreen({
             {(['local', 'gemma_local', 'gemini'] as const).map((p) => (
               <TouchableOpacity
                 key={p}
-                onPress={() => onUpdateSettings({ llmProvider: p })}
-                style={[styles.segBtn, settings.llmProvider === p && styles.segBtnActive]}
+                onPress={() => onSelectLLMProvider(p)}
+                disabled={(p === 'local' || p === 'gemma_local') && !localModelAvailable}
+                style={[
+                  styles.segBtn,
+                  settings.llmProvider === p && styles.segBtnActive,
+                  (p === 'local' || p === 'gemma_local') && !localModelAvailable && styles.segBtnDisabled,
+                ]}
               >
-                <Text style={[styles.segText, settings.llmProvider === p && styles.segTextActive]}>
+                <Text
+                  style={[
+                    styles.segText,
+                    settings.llmProvider === p && styles.segTextActive,
+                    (p === 'local' || p === 'gemma_local') && !localModelAvailable && styles.segTextDisabled,
+                  ]}
+                >
                   {p === 'gemini' ? 'Gemini' : p === 'gemma_local' ? 'Gemma Local' : 'Local'}
                 </Text>
               </TouchableOpacity>
             ))}
           </View>
+          {!localModelAvailable ? (
+            <Text style={styles.hintText}>
+              Local inference is unavailable on the current deployed backend, so Gemini is the safe active option.
+            </Text>
+          ) : null}
         </View>
 
         <View style={styles.section}>
@@ -243,16 +278,19 @@ export function SettingsScreen({
             <View style={styles.modelpackHeaderText}>
               <Text style={styles.sectionLabel}>Local Model Packs</Text>
               <Text style={styles.hintText}>
-                Direct links for LiteRT Gemma downloads used by Gemma Local mode.
+                Download LiteRT Gemma artifacts inside the app with persistent install status.
               </Text>
             </View>
-            <OfflineReadinessBadge ready={false} details={`${downloadableNow} downloadable now`} />
+            <OfflineReadinessBadge
+              ready={installedNow > 0}
+              details={installedNow > 0 ? `${installedNow} installed` : `${downloadableNow} downloadable now`}
+            />
           </View>
 
           <View style={styles.modelpackList}>
             {normalizedManifest.packs.map((pack) => {
               const available = pack.availability !== 'coming_soon';
-              const downloadUrl = pack.download_url;
+              const installState = modelpackInstalls[pack.id];
 
               return (
                 <View key={pack.id} style={styles.modelpackBlock}>
@@ -263,13 +301,22 @@ export function SettingsScreen({
                   />
                   <ModelDownloadManager
                     packName={pack.display_name}
-                    status="not_installed"
-                    actionLabel={available ? pack.cta_label || 'Download' : pack.cta_label || 'Coming Soon'}
-                    actionDisabled={!available || !downloadUrl}
+                    status={installState?.status || 'not_installed'}
+                    progress={installState?.progress || 0}
+                    detail={installState?.error || installState?.activeFile || undefined}
+                    actionLabel={available ? pack.cta_label || 'Download to device' : pack.cta_label || 'Coming Soon'}
+                    actionDisabled={!available}
                     onInstall={
-                      available && downloadUrl
+                      available
                         ? () => {
-                            void openExternalUrl(downloadUrl);
+                            onInstallModelpack(pack);
+                          }
+                        : undefined
+                    }
+                    onRetry={
+                      available
+                        ? () => {
+                            onInstallModelpack(pack);
                           }
                         : undefined
                     }
@@ -298,6 +345,9 @@ export function SettingsScreen({
             <Text style={[styles.connStatus, { color: NEURAL.error }]}>
               Modelpack catalog: {modelpackError}
             </Text>
+          ) : null}
+          {modelpackCapabilityMessage ? (
+            <Text style={styles.hintText}>{modelpackCapabilityMessage}</Text>
           ) : null}
           {modelpackLinkError ? (
             <Text style={[styles.connStatus, { color: NEURAL.error }]}>
@@ -377,32 +427,31 @@ export function SettingsScreen({
         </View>
 
         <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Backend URL</Text>
-          <TextInput
-            placeholder="http://192.168.1.x:8000"
-            value={backendDraft}
-            onChangeText={setBackendDraft}
-            autoCapitalize="none"
-            autoCorrect={false}
-            keyboardType="url"
-            blurOnSubmit={false}
-          />
+          <Text style={styles.sectionLabel}>Backend Connection</Text>
+          <View style={styles.connectionCard}>
+            <View style={styles.connectionHeader}>
+              <View style={styles.connectionIconWrap}>
+                <AppIcon name="cloud-check-outline" size={16} color={NEURAL.primary} />
+              </View>
+              <View style={styles.connectionMeta}>
+                <Text style={styles.connectionTitle}>Automatic backend discovery</Text>
+                <Text style={styles.connectionBody}>
+                  Cortex Lab now connects to the deployed backend automatically on launch.
+                </Text>
+              </View>
+            </View>
+            <View style={styles.connectionEndpointRow}>
+              <Text style={styles.connectionEndpointLabel}>Live endpoint</Text>
+              <Text style={styles.connectionEndpointValue}>{backendUrlLabel}</Text>
+            </View>
+          </View>
           <View style={styles.actionRow}>
             <Button
-              label={testingConnection ? 'Testing…' : 'Test Connection'}
+              label={reconnecting ? 'Reconnecting…' : 'Re-check Backend'}
               variant="outline"
-              onPress={() => onTestConnection(backendDraft)}
-              disabled={testingConnection}
-              loading={testingConnection}
-              size="sm"
-            />
-            <Button
-              label="Save Settings"
-              onPress={() => {
-                commitMaxTokensDraft();
-                onSave(backendDraft);
-                onBack();
-              }}
+              onPress={onReconnect}
+              disabled={reconnecting}
+              loading={reconnecting}
               size="sm"
             />
           </View>
@@ -410,7 +459,7 @@ export function SettingsScreen({
             <Text
               style={[
                 styles.connStatus,
-                { color: connectionStatus.startsWith('Connected') ? NEURAL.tertiary : NEURAL.error },
+                { color: connectionStatus.startsWith('Connected') ? NEURAL.tertiary : NEURAL.onSurfaceVariant },
               ]}
             >
               {connectionStatus}
@@ -425,7 +474,7 @@ export function SettingsScreen({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: NEURAL.background,
+    backgroundColor: '#f8fafc',
   },
   header: {
     flexDirection: 'row',
@@ -434,9 +483,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: SPACING.lg,
     paddingTop: SPACING.md,
     paddingBottom: SPACING.md,
-    backgroundColor: NEURAL.surfaceContainerLow,
+    backgroundColor: '#ffffff',
     borderBottomWidth: 1,
-    borderBottomColor: `${NEURAL.outlineVariant}50`,
+    borderBottomColor: '#f1f5f9',
   },
   headerButton: {
     width: 32,
@@ -497,8 +546,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   segBtnActive: { backgroundColor: `${NEURAL.primary}26`, borderColor: `${NEURAL.primary}60` },
+  segBtnDisabled: { backgroundColor: `${NEURAL.outlineVariant}30`, borderColor: `${NEURAL.outlineVariant}60` },
   segText: { fontSize: FONT_SIZE.sm, color: NEURAL.onSurfaceVariant, fontWeight: FONT_WEIGHT.medium },
   segTextActive: { color: NEURAL.primary, fontWeight: FONT_WEIGHT.bold },
+  segTextDisabled: { color: `${NEURAL.onSurfaceVariant}99` },
   sliderHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -520,6 +571,59 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: SPACING.sm,
     marginTop: SPACING.md,
+  },
+  connectionCard: {
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: RADIUS.xl,
+    padding: SPACING.lg,
+    gap: SPACING.md,
+  },
+  connectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: SPACING.md,
+  },
+  connectionIconWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: RADIUS.lg,
+    backgroundColor: '#eef2ff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  connectionMeta: {
+    flex: 1,
+    gap: 2,
+  },
+  connectionTitle: {
+    fontSize: FONT_SIZE.base,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: NEURAL.onSurface,
+  },
+  connectionBody: {
+    fontSize: FONT_SIZE.sm,
+    color: NEURAL.onSurfaceVariant,
+    lineHeight: 18,
+  },
+  connectionEndpointRow: {
+    gap: 4,
+    paddingTop: SPACING.sm,
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+  },
+  connectionEndpointLabel: {
+    fontSize: FONT_SIZE.xs,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: NEURAL.onSurfaceVariant,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  connectionEndpointValue: {
+    fontSize: FONT_SIZE.sm,
+    color: NEURAL.onSurface,
+    fontWeight: FONT_WEIGHT.medium,
   },
   connStatus: {
     fontSize: FONT_SIZE.sm,

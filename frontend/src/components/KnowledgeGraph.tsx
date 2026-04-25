@@ -118,6 +118,10 @@ export function KnowledgeGraph({ onBack }: { onBack: () => void }) {
   }, [pan.x, pan.y, zoom, selectedNode?.id]);
 
   const startSimulation = useCallback((data: GraphData) => {
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+    }
+
     let iteration = 0;
     const maxIterations = 300;
 
@@ -214,16 +218,16 @@ export function KnowledgeGraph({ onBack }: { onBack: () => void }) {
 
   const loadGraph = useCallback(async () => {
     setLoading(true);
+    nodesRef.current = [];
     try {
       const data = await getGraphData();
       setGraphData(data);
-      initializePositions(data);
     } catch (err) {
       console.error("Failed to load graph:", err);
     } finally {
       setLoading(false);
     }
-  }, [initializePositions]);
+  }, []);
 
   useEffect(() => {
     loadGraph();
@@ -241,14 +245,27 @@ export function KnowledgeGraph({ onBack }: { onBack: () => void }) {
     const resize = () => {
       canvas.width = container.clientWidth;
       canvas.height = container.clientHeight;
-      if (graphData) draw(graphData);
+      if (!graphData) {
+        return;
+      }
+
+      const requiresLayout =
+        nodesRef.current.length !== graphData.nodes.length ||
+        nodesRef.current.some((node, index) => node.node.id !== graphData.nodes[index]?.id);
+
+      if (requiresLayout) {
+        initializePositions(graphData);
+        return;
+      }
+
+      draw(graphData);
     };
 
     resize();
     const observer = new ResizeObserver(resize);
     observer.observe(container);
     return () => observer.disconnect();
-  }, [graphData, draw]);
+  }, [graphData, draw, initializePositions, loading]);
 
   // Mouse interactions
   const handleMouseDown = (e: React.MouseEvent) => {

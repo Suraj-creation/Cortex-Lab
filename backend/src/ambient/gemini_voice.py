@@ -78,6 +78,45 @@ class GeminiSTT:
         result["processing_time_s"] = round(elapsed, 2)
         return result
 
+    async def transcribe_bytes(
+        self,
+        audio_bytes: bytes,
+        *,
+        mime_type: str,
+        language: Optional[str] = None,
+        quality_mode: bool = False,
+        estimated_duration_s: float = 0.0,
+    ) -> Dict:
+        if not audio_bytes:
+            return {
+                "text": "",
+                "language": language or "",
+                "segments": [],
+                "duration": 0.0,
+                "confidence": 0.0,
+                "processing_time_s": 0.0,
+            }
+
+        t0 = time.time()
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            self._executor,
+            self._transcribe_bytes_sync,
+            audio_bytes,
+            mime_type,
+            language,
+            quality_mode,
+        )
+
+        elapsed = time.time() - t0
+        self._total_transcriptions += 1
+        self._total_audio_seconds += max(float(estimated_duration_s or 0.0), 0.0)
+        self._total_processing_seconds += elapsed
+
+        result["duration"] = round(max(float(estimated_duration_s or 0.0), 0.0), 2)
+        result["processing_time_s"] = round(elapsed, 2)
+        return result
+
     def _transcribe_sync(self, wav_bytes: bytes,
                          language: Optional[str],
                          quality_mode: bool) -> Dict:
@@ -125,6 +164,55 @@ class GeminiSTT:
             "language_probability": 0.95 if text else 0.0,
             "segments": [{"start": 0.0, "end": round(len(wav_bytes) / 32000, 2),
                           "text": text}] if text else [],
+            "confidence": confidence,
+        }
+
+    def _transcribe_bytes_sync(
+        self,
+        audio_bytes: bytes,
+        mime_type: str,
+        language: Optional[str],
+        quality_mode: bool,
+    ) -> Dict:
+        lang_hint = f" The audio is in {language}." if language else ""
+        prompt = (
+            f"Transcribe the following audio accurately.{lang_hint} "
+            "Return ONLY the transcribed text, nothing else. "
+            "If the audio is silent or unintelligible, return an empty string."
+        )
+
+        audio_part = self._types.Part.from_bytes(
+            data=audio_bytes,
+            mime_type=mime_type,
+        )
+
+        config = self._types.GenerateContentConfig(
+            max_output_tokens=4096,
+            temperature=0.0,
+        )
+
+        response = self._client.models.generate_content(
+            model=self._model_name,
+            contents=[audio_part, prompt],
+            config=config,
+        )
+
+        text = ""
+        if response and response.text:
+            text = response.text.strip()
+            if text.startswith('"') and text.endswith('"'):
+                text = text[1:-1]
+            if text.startswith("'") and text.endswith("'"):
+                text = text[1:-1]
+
+        confidence = 0.9 if text else 0.0
+        detected_lang = language or "en"
+
+        return {
+            "text": text,
+            "language": detected_lang,
+            "language_probability": 0.95 if text else 0.0,
+            "segments": [{"start": 0.0, "end": 0.0, "text": text}] if text else [],
             "confidence": confidence,
         }
 

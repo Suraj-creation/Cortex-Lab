@@ -19,12 +19,23 @@
       "availability": "available",
       "summary": "Higher-quality Gemma 4 local model for capable devices.",
       "download_url": "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm",
-      "cta_label": "Download from Hugging Face",
+      "cta_label": "Download to device",
       "requires": [
         "litertlm-runtime",
         "gemma-runtime-bridge"
       ],
-      "files": []
+      "files": [
+        {
+          "path": "gemma-4-E4B-it.litertlm",
+          "size_bytes": 0,
+          "sha256": ""
+        },
+        {
+          "path": "gemma-4-E4B-it-web.task",
+          "size_bytes": 0,
+          "sha256": ""
+        }
+      ]
     },
     {
       "id": "gemma-4-e2b-it-litert-lm",
@@ -36,12 +47,23 @@
       "availability": "available",
       "summary": "Lean Gemma 4 local model for faster installs and mid-range devices.",
       "download_url": "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm",
-      "cta_label": "Download from Hugging Face",
+      "cta_label": "Download to device",
       "requires": [
         "litertlm-runtime",
         "gemma-runtime-bridge"
       ],
-      "files": []
+      "files": [
+        {
+          "path": "gemma-4-E2B-it.litertlm",
+          "size_bytes": 0,
+          "sha256": ""
+        },
+        {
+          "path": "gemma-4-E2B-it-web.task",
+          "size_bytes": 0,
+          "sha256": ""
+        }
+      ]
     },
     {
       "id": "gemma-3-5-ft-local",

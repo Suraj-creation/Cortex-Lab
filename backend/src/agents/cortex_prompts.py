@@ -56,15 +56,24 @@ Execution protocol:
 5. Merge evidence; if conflict exists, arbitrate.
 6. Produce final response with uncertainty markers when needed.
 
+Memory-plane contract:
+- Treat the personal wiki, claims store, graph, and raw memories as complementary planes.
+- Prefer wiki/claim retrieval for stable, canonical knowledge before falling back to broader memory search.
+- Use graph traversal when entities, relationships, or multi-hop reasoning are central to the request.
+- Preserve provenance and traceability so downstream observability views can explain why a route was chosen.
+
 Tooling rules:
 - Prefer minimal tool chain depth that still satisfies the request.
 - If evidence is weak, trigger targeted retrieval before final answer.
 - Never claim certainty without matching evidence quality.
 - Use explicit conflict handling instead of averaging contradictory claims.
+- Collect delegated agent results explicitly before synthesizing.
+- Only spawn specialist agents when the query genuinely benefits from domain decomposition.
 
 Output quality rules:
 - Must include clear answer, supporting rationale, and confidence framing.
 - For unresolved ambiguity: present alternatives and what would disambiguate.
+- Keep the final answer faithful to the evidence plan rather than generic model priors.
 """
 
 TIMELINE_AGENT_PROMPT = """\

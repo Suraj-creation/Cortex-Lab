@@ -66,6 +66,7 @@ from src.runtime.memory_personalization import (
     is_context_dependent_query,
     select_prompt_evidence,
 )
+from src.runtime.manual_memory_intake import prepare_manual_memory_session
 from src.runtime.task_manager import RuntimeTaskManager
 from src.runtime.event_bus import runtime_events
 from src.applications import session_memory_forge_service, life_chronicle_service
@@ -190,9 +191,20 @@ def _default_modelpacks_manifest() -> Dict[str, Any]:
                 "availability": "available",
                 "summary": "Higher-quality Gemma 4 local model for capable devices.",
                 "download_url": "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm",
-                "cta_label": "Download from Hugging Face",
+                "cta_label": "Download to device",
                 "requires": ["litertlm-runtime", "gemma-runtime-bridge"],
-                "files": [],
+                "files": [
+                    {
+                        "path": "gemma-4-E4B-it.litertlm",
+                        "size_bytes": 0,
+                        "sha256": "",
+                    },
+                    {
+                        "path": "gemma-4-E4B-it-web.task",
+                        "size_bytes": 0,
+                        "sha256": "",
+                    },
+                ],
             },
             {
                 "id": "gemma-4-e2b-it-litert-lm",
@@ -204,9 +216,20 @@ def _default_modelpacks_manifest() -> Dict[str, Any]:
                 "availability": "available",
                 "summary": "Lean Gemma 4 local model for faster installs and mid-range devices.",
                 "download_url": "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm",
-                "cta_label": "Download from Hugging Face",
+                "cta_label": "Download to device",
                 "requires": ["litertlm-runtime", "gemma-runtime-bridge"],
-                "files": [],
+                "files": [
+                    {
+                        "path": "gemma-4-E2B-it.litertlm",
+                        "size_bytes": 0,
+                        "sha256": "",
+                    },
+                    {
+                        "path": "gemma-4-E2B-it-web.task",
+                        "size_bytes": 0,
+                        "sha256": "",
+                    },
+                ],
             },
             {
                 "id": "gemma-3-5-ft-local",
@@ -695,7 +718,7 @@ def _register_phase1_deep_app_tasks(background_scheduler: Any) -> None:
         agent_id="session_forge_crystallizer",
         factory=_run_session_forge_crystallizer_task,
         interval_seconds=15 * 60,
-        events=["memory_ingested"],
+        events=["memory_ingested", "ambient_session_closed"],
     )
     background_scheduler.register(
         agent_id="session_forge_gap_mapper",
@@ -711,6 +734,7 @@ def _register_phase1_deep_app_tasks(background_scheduler: Any) -> None:
         agent_id="session_forge_summary_forge",
         factory=_run_session_forge_summary_task,
         interval_seconds=72 * 60 * 60,
+        events=["ambient_session_closed"],
     )
     background_scheduler.register(
         agent_id="life_chronicle_passive",
@@ -1209,6 +1233,8 @@ class MemoryIngestRequest(BaseModel):
     content: str
     source: str = "manual"
     session_id: str = ""
+    platform: str = "mobile"
+    force_keep: bool = True
 
 class MemorySearchRequest(BaseModel):
     query: str
@@ -3539,6 +3565,8 @@ async def ingest_memory(req: MemoryIngestRequest):
                 "content": req.content,
                 "source": req.source,
                 "session_id": req.session_id,
+                "platform": req.platform,
+                "force_keep": req.force_keep,
                 "entrypoint": "api.memories.ingest",
             },
         )
@@ -3565,10 +3593,39 @@ async def ingest_memory(req: MemoryIngestRequest):
         )
 
     try:
-        result = await rag_engine.ingest_memory(
-            content=req.content, source=req.source, session_id=req.session_id
+        intake = prepare_manual_memory_session(
+            req.content,
+            session_id=req.session_id,
+            platform=req.platform,
+            source=req.source,
+            force_keep=req.force_keep,
         )
-        return {"status": "ok", "memory": result}
+        result = await rag_engine.ingest_memory(
+            content=req.content,
+            source=req.source,
+            session_id=str(intake.get("session_id", "") or req.session_id),
+        )
+        session_id = str(intake.get("session_id", "") or req.session_id)
+        if session_id:
+            runtime_session_manager.update_metadata(
+                session_id,
+                {
+                    "last_memory_id": str((result or {}).get("id", "") or ""),
+                    "last_memory_source": req.source,
+                    "last_memory_preview": str(req.content or "")[:280],
+                },
+            )
+            snapshot = runtime_session_manager.get_session(session_id)
+            intake["session"] = snapshot.to_dict() if snapshot else intake.get("session")
+
+        return {
+            "status": "ok",
+            "memory": result,
+            "session": intake.get("session"),
+            "session_id": session_id,
+            "retention_trace": intake.get("retention_trace"),
+            "session_created": bool(intake.get("session_created")),
+        }
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
@@ -4505,6 +4562,9 @@ class AmbientConfigUpdate(BaseModel):
     energy_gate_threshold: Optional[float] = None
     energy_min_speech_ms: Optional[int] = None
     energy_silence_ms: Optional[int] = None
+    assistant_name: Optional[str] = None
+    assistant_aliases: Optional[list[str]] = None
+    companion_followup_window_s: Optional[int] = None
 
 class TTSSynthesizeRequest(BaseModel):
     text: str
@@ -4517,6 +4577,23 @@ class VoiceQueryRequest(BaseModel):
 class AmbientLiveInjectAudioRequest(BaseModel):
     audio_base64: str  # Base64-encoded int16 PCM audio at 16kHz
     sample_rate: int = Field(16000, ge=8000, le=48000)
+
+class AmbientClientSessionStartRequest(BaseModel):
+    platform: str = "web"
+    metadata: Optional[dict] = None
+
+class AmbientClientSessionStopRequest(BaseModel):
+    session_id: str
+    reason: str = "user_request"
+
+class AmbientClientAudioRequest(BaseModel):
+    session_id: Optional[str] = None
+    audio_base64: str
+    mime_type: str
+    platform: str = "web"
+    language: Optional[str] = None
+    estimated_duration_s: float = Field(0.0, ge=0.0, le=3600.0)
+    metadata: Optional[dict] = None
 
 class EnrollmentRequest(BaseModel):
     duration_seconds: int = Field(20, ge=10, le=30)
@@ -4577,6 +4654,61 @@ async def ambient_live_status():
     """Get Gemini Live ambient session status and diagnostics."""
     ambient = _get_ambient()
     return ambient.get_live_status()
+
+
+@app.post("/api/ambient/client/session/start")
+async def ambient_client_session_start(req: AmbientClientSessionStartRequest):
+    """Start a client-captured ambient companion session."""
+    ambient = _get_ambient()
+    return await ambient.start_client_session(
+        platform=req.platform or "web",
+        metadata=req.metadata or {},
+    )
+
+
+@app.post("/api/ambient/client/session/stop")
+async def ambient_client_session_stop(req: AmbientClientSessionStopRequest):
+    """Stop a client companion session and trigger downstream refinement."""
+    ambient = _get_ambient()
+    result = await ambient.stop_client_session(
+        req.session_id,
+        reason=req.reason or "user_request",
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=404, detail=result.get("error", "Session not found"))
+    return result
+
+
+@app.get("/api/ambient/client/sessions")
+async def ambient_client_sessions():
+    """List active/recent client companion sessions."""
+    ambient = _get_ambient()
+    return ambient.get_client_sessions()
+
+
+@app.post("/api/ambient/client/process-audio")
+async def ambient_client_process_audio(req: AmbientClientAudioRequest):
+    """Process client-captured audio through STT, retention, and speech reply flows."""
+    import base64
+
+    ambient = _get_ambient()
+    try:
+        audio_bytes = base64.b64decode(req.audio_base64)
+    except Exception as e:
+        raise HTTPException(400, f"Invalid audio payload: {e}")
+
+    result = await ambient.process_client_audio(
+        session_id=str(req.session_id or ""),
+        audio_bytes=audio_bytes,
+        mime_type=req.mime_type,
+        platform=req.platform or "web",
+        language=req.language,
+        estimated_duration_s=req.estimated_duration_s,
+        metadata=req.metadata or {},
+    )
+    if not result.get("success", True):
+        raise HTTPException(400, detail=result.get("error", "Audio processing failed"))
+    return result
 
 
 @app.post("/api/ambient/live/inject-audio")
@@ -5617,11 +5749,15 @@ async def search_wiki(request: dict):
 
 
 @app.get("/api/wiki/claims")
-async def list_claims():
+async def list_claims(limit: int = Query(50, ge=1, le=200)):
     """Get claim store statistics and recent claims."""
     from src.wiki.claim_store import ClaimStore
     store = ClaimStore.get_instance()
-    return store.stats()
+    stats = store.stats()
+    return {
+        **stats,
+        "claims": store.list_claims(limit=limit),
+    }
 
 
 @app.post("/api/wiki/rebuild")

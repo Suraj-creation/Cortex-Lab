@@ -1,81 +1,69 @@
-import React from "react";
-import { View, Text, StyleSheet, Pressable } from "react-native";
-import { NEURAL, SEMANTIC_COLORS, SPACING, TYPOGRAPHY, BORDER_RADIUS } from "../../theme/colors";
+/**
+ * EmptyState — Cortex Aurora illustrated empty placeholder
+ */
+import React from 'react';
+import { View, Text, StyleSheet, ViewStyle } from 'react-native';
+import { FONT_SIZE, FONT_WEIGHT, SPACING, RADIUS } from '../../theme/colors';
+import { AppIcon, type AppIconName } from './AppIcon';
 
 interface EmptyStateProps {
-  icon?: React.ReactNode;
+  icon?: AppIconName;
   title: string;
-  description?: string;
-  action?: {
-    label: string;
-    onPress: () => void;
-  };
+  message?: string;
+  action?: React.ReactNode;
+  style?: ViewStyle;
 }
 
 export function EmptyState({
-  icon,
+  icon = 'information-outline',
   title,
-  description,
+  message,
   action,
+  style,
 }: EmptyStateProps) {
   return (
-    <View style={styles.container}>
-      {icon ? <View style={styles.icon}>{icon}</View> : null}
+    <View style={[styles.container, style]}>
+      <View style={styles.iconContainer}>
+        <AppIcon name={icon} size={32} color="#a5b4fc" />
+      </View>
       <Text style={styles.title}>{title}</Text>
-      {description ? <Text style={styles.description}>{description}</Text> : null}
-      {action ? (
-        <Pressable
-          onPress={action.onPress}
-          style={({ pressed }) => [styles.actionContainer, pressed && styles.actionPressed]}
-        >
-          <Text style={styles.actionText}>{action.label}</Text>
-        </Pressable>
-      ) : null}
+      {message && <Text style={styles.message}>{message}</Text>}
+      {action && <View style={styles.action}>{action}</View>}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING["5xl"],
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: SPACING['5xl'],
+    paddingHorizontal: SPACING['3xl'],
   },
-  icon: {
+  iconContainer: {
+    width: 72,
+    height: 72,
+    borderRadius: RADIUS['2xl'],
+    backgroundColor: '#eef2ff',
+    alignItems: 'center',
+    justifyContent: 'center',
     marginBottom: SPACING.lg,
-    opacity: 0.5,
   },
   title: {
-    fontSize: TYPOGRAPHY.fontSize.lg,
-    fontWeight: TYPOGRAPHY.fontWeight.semibold,
-    color: SEMANTIC_COLORS.textPrimary,
+    fontSize: FONT_SIZE.lg,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: '#0f172a',
+    textAlign: 'center',
     marginBottom: SPACING.sm,
-    textAlign: "center",
   },
-  description: {
-    fontSize: TYPOGRAPHY.fontSize.md,
-    color: SEMANTIC_COLORS.textSecondary,
-    textAlign: "center",
-    marginBottom: SPACING.lg,
+  message: {
+    fontSize: FONT_SIZE.base,
+    color: '#64748b',
+    textAlign: 'center',
     lineHeight: 20,
+    maxWidth: 280,
   },
-  actionContainer: {
-    paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.md,
-    backgroundColor: `${NEURAL.primary}18`,
-    borderRadius: BORDER_RADIUS.lg,
-    borderWidth: 1,
-    borderColor: `${NEURAL.primary}40`,
-  },
-  actionText: {
-    fontSize: TYPOGRAPHY.fontSize.md,
-    fontWeight: TYPOGRAPHY.fontWeight.semibold,
-    color: NEURAL.primary,
-    textAlign: "center",
-  },
-  actionPressed: {
-    opacity: 0.85,
+  action: {
+    marginTop: SPACING.xl,
   },
 });

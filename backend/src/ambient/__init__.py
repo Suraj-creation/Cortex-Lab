@@ -21,14 +21,23 @@ Accepted values: "traditional" | "local" | "gemini".
 """
 
 import asyncio
+import base64
 import time
 import threading
+import uuid
 from enum import Enum
 from typing import Optional, Dict, Callable, Any, Awaitable
 
 import numpy as np
 
 from .config import AmbientConfig, load_config, save_config
+from .companion_logic import (
+    analyze_client_turn,
+    build_assistant_aliases,
+    build_retention_trace,
+)
+from src.agents.scheduler import background_scheduler
+from src.runtime.session_manager import runtime_session_manager
 
 
 class AmbientStatus(str, Enum):
@@ -61,6 +70,8 @@ class AmbientService:
         self._status = AmbientStatus.IDLE
         self._error_message = ""
         self._started_at: Optional[float] = None
+        self._client_active_session_id = ""
+        self._client_followup_until = 0.0
 
         # Components (lazy-initialized on start)
         self.audio_capture = None
@@ -465,6 +476,589 @@ class AmbientService:
             "native_live_error": None,
         }
 
+    async def _init_client_companion_components(self):
+        """Initialize only the components needed for client-captured companion audio."""
+        if self.conversation is None:
+            from .conversation import ConversationSegmenter
+
+            self.conversation = ConversationSegmenter(
+                ingestion_pipeline=self._ingestion_pipeline,
+                auto_ingest=self.config.auto_ingest,
+                data_dir=self.data_dir,
+                gemini_api_key=self._gemini_api_key,
+            )
+
+        backend_stt = "traditional" if self.config.stt_provider == "local" else self.config.stt_provider
+        backend_tts = "traditional" if self.config.tts_provider == "local" else self.config.tts_provider
+
+        if backend_stt == "gemini":
+            self._init_gemini_stt()
+        elif self._traditional_stt is None:
+            try:
+                from .transcription import Transcriber
+
+                self._traditional_stt = Transcriber(
+                    model_size=self.config.whisper_model_size,
+                    device=self.config.whisper_device,
+                    vram_guard=self.vram_guard,
+                )
+            except Exception:
+                if self._gemini_api_key:
+                    self._init_gemini_stt()
+                    self.config.stt_provider = "gemini"
+                else:
+                    raise
+
+        if backend_tts == "gemini":
+            self._init_gemini_tts()
+        elif self._traditional_tts is None:
+            try:
+                from .tts import TextToSpeech
+
+                self._traditional_tts = TextToSpeech(
+                    voice=self.config.tts_voice,
+                    data_dir=self.data_dir,
+                )
+            except Exception:
+                if self._gemini_api_key:
+                    self._init_gemini_tts()
+                    self.config.tts_provider = "gemini"
+                else:
+                    raise
+
+    def _estimate_audio_duration_seconds(
+        self,
+        audio_bytes: bytes,
+        mime_type: str,
+        estimated_duration_s: float = 0.0,
+    ) -> float:
+        if estimated_duration_s and estimated_duration_s > 0:
+            return round(float(estimated_duration_s), 3)
+
+        if not audio_bytes:
+            return 0.0
+
+        normalized_mime = str(mime_type or "").lower()
+        if "wav" in normalized_mime and len(audio_bytes) > 44:
+            try:
+                import io
+                import wave
+
+                with wave.open(io.BytesIO(audio_bytes), "rb") as wf:
+                    frames = wf.getnframes()
+                    rate = wf.getframerate() or 16000
+                    return round(frames / rate, 3)
+            except Exception:
+                pass
+
+        # Best-effort fallback: assume 16-bit mono PCM-equivalent density.
+        return round(max(len(audio_bytes) / 32000.0, 0.0), 3)
+
+    async def _synthesize_response_wav(self, text: str) -> bytes:
+        if not text.strip() or not self.config.tts_enabled:
+            return b""
+
+        tts = self.tts
+        if not tts or not getattr(tts, "is_available", False):
+            return b""
+
+        try:
+            if hasattr(tts, "synthesize_to_wav_async"):
+                return (await tts.synthesize_to_wav_async(text)) or b""
+            if hasattr(tts, "synthesize_to_wav"):
+                return tts.synthesize_to_wav(text) or b""
+        except Exception as e:
+            self._error_message = str(e)
+        return b""
+
+    def _get_metadata_store(self):
+        try:
+            from src.engine import rag_engine
+
+            return getattr(rag_engine, "metadata_store", None)
+        except Exception:
+            return None
+
+    def _store_conversation_turn(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        *,
+        thinking: str = "",
+        memory_id: str | None = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        metadata_store = self._get_metadata_store()
+        if not metadata_store or not hasattr(metadata_store, "store_conversation_turn"):
+            return
+
+        try:
+            metadata_store.store_conversation_turn(
+                session_id,
+                role,
+                content,
+                thinking=thinking,
+                memory_id=memory_id,
+                metadata=metadata or {},
+            )
+        except TypeError:
+            metadata_store.store_conversation_turn(
+                session_id,
+                role,
+                content,
+                thinking=thinking,
+                memory_id=memory_id,
+            )
+        except Exception:
+            pass
+
+    async def start_client_session(
+        self,
+        *,
+        platform: str = "web",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        await self._init_client_companion_components()
+
+        session_metadata = {
+            "platform": platform,
+            "assistant_name": self.config.assistant_name,
+            "assistant_aliases": build_assistant_aliases(
+                self.config.assistant_name,
+                self.config.assistant_aliases,
+            ),
+            "companion_followup_window_s": int(
+                getattr(self.config, "companion_followup_window_s", 45) or 45
+            ),
+            "companion_followup_until": 0.0,
+            "turn_counts": {
+                "user": 0,
+                "assistant": 0,
+            },
+            **dict(metadata or {}),
+        }
+        session = runtime_session_manager.open_session(
+            mode="ambient_client",
+            metadata=session_metadata,
+        )
+
+        self._client_active_session_id = session.session_id
+        self._client_followup_until = 0.0
+        self._status = AmbientStatus.LISTENING
+        self._started_at = time.time()
+
+        if self._ws_broadcast:
+            try:
+                await self._ws_broadcast(
+                    {
+                        "type": "session_state",
+                        "session_id": session.session_id,
+                        "status": self._status.value,
+                        "platform": platform,
+                    }
+                )
+            except Exception:
+                pass
+
+        return {
+            "success": True,
+            "session_id": session.session_id,
+            "platform": platform,
+            "metadata": dict(session.metadata),
+            "session": session.to_dict(),
+        }
+
+    async def stop_client_session(
+        self,
+        session_id: str,
+        reason: str = "user_request",
+    ) -> Dict[str, Any]:
+        session = runtime_session_manager.get_session(session_id)
+        if session is None:
+            return {
+                "success": False,
+                "error": f"Unknown session: {session_id}",
+            }
+
+        if self.conversation:
+            await self.conversation.force_finalize()
+
+        closed = runtime_session_manager.close_session(
+            session_id,
+            reason=reason,
+            retention_summary=session.retention_summary,
+            agent_tags=session.agent_tags,
+        )
+
+        if self._client_active_session_id == session_id:
+            self._client_active_session_id = ""
+            self._client_followup_until = 0.0
+
+        remaining_active = [
+            item
+            for item in runtime_session_manager.active_sessions()
+            if str(item.get("mode", "")) == "ambient_client"
+        ]
+        if not remaining_active:
+            self._status = AmbientStatus.IDLE
+            self._started_at = None
+
+        triggered_agents: list[str] = []
+        try:
+            triggered_agents = await background_scheduler.trigger_event(
+                "ambient_session_closed",
+                {
+                    "session_id": session_id,
+                    "reason": reason,
+                    "mode": "ambient_client",
+                },
+            )
+        except Exception:
+            triggered_agents = []
+
+        if self._ws_broadcast:
+            try:
+                await self._ws_broadcast(
+                    {
+                        "type": "session_state",
+                        "session_id": session_id,
+                        "status": self._status.value,
+                        "reason": reason,
+                    }
+                )
+            except Exception:
+                pass
+
+        return {
+            "success": True,
+            "session": closed.to_dict(),
+            "triggered_agents": triggered_agents,
+        }
+
+    def get_client_sessions(self) -> Dict[str, Any]:
+        sessions = [
+            session
+            for session in runtime_session_manager.list_sessions(limit=100)
+            if str(session.get("mode", "")) == "ambient_client"
+        ]
+        active = [
+            session
+            for session in runtime_session_manager.active_sessions()
+            if str(session.get("mode", "")) == "ambient_client"
+        ]
+        return {
+            "active_session_id": self._client_active_session_id or (
+                active[0]["session_id"] if active else ""
+            ),
+            "followup_until": self._client_followup_until,
+            "active_sessions": active,
+            "sessions": sessions,
+        }
+
+    async def process_client_audio(
+        self,
+        *,
+        session_id: str,
+        audio_bytes: bytes,
+        mime_type: str,
+        platform: str = "web",
+        language: Optional[str] = None,
+        estimated_duration_s: float = 0.0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if not audio_bytes:
+            return {
+                "success": False,
+                "error": "Audio payload is empty",
+                "session_id": session_id,
+            }
+
+        await self._init_client_companion_components()
+
+        session = runtime_session_manager.get_session(session_id) if session_id else None
+        if session is None:
+            started = await self.start_client_session(
+                platform=platform,
+                metadata=metadata,
+            )
+            session_id = str(started.get("session_id", "") or "")
+            session = runtime_session_manager.get_session(session_id)
+        elif metadata:
+            runtime_session_manager.update_metadata(
+                session_id,
+                {
+                    "platform": platform,
+                    **dict(metadata or {}),
+                },
+            )
+
+        self._client_active_session_id = session_id
+        self._status = AmbientStatus.TRANSCRIBING
+
+        duration_s = self._estimate_audio_duration_seconds(
+            audio_bytes,
+            mime_type,
+            estimated_duration_s=estimated_duration_s,
+        )
+        transcriber = self.transcriber
+        if not transcriber:
+            raise RuntimeError("No transcription provider is available for client companion mode")
+
+        if hasattr(transcriber, "transcribe_bytes"):
+            result = await transcriber.transcribe_bytes(
+                audio_bytes,
+                mime_type=mime_type,
+                language=language or self.config.whisper_language,
+                estimated_duration_s=duration_s,
+            )
+        else:
+            raise RuntimeError("Selected transcription provider does not support encoded audio input")
+
+        text = str(result.get("text", "") or "").strip()
+        if not text:
+            self._status = AmbientStatus.LISTENING
+            return {
+                "success": True,
+                "session_id": session_id,
+                "transcript": "",
+                "analysis": analyze_client_turn(
+                    "",
+                    assistant_aliases=build_assistant_aliases(
+                        self.config.assistant_name,
+                        self.config.assistant_aliases,
+                    ),
+                    engaged_until=self._client_followup_until,
+                ),
+                "retention_trace": build_retention_trace(
+                    "",
+                    session_id=session_id,
+                    platform=platform,
+                ),
+                "assistant_text": "",
+                "assistant_audio_base64": "",
+            }
+
+        now_ts = time.time()
+        analysis = analyze_client_turn(
+            text,
+            assistant_aliases=build_assistant_aliases(
+                self.config.assistant_name,
+                self.config.assistant_aliases,
+            ),
+            engaged_until=self._client_followup_until,
+            now_ts=now_ts,
+        )
+        retention_trace = build_retention_trace(
+            text,
+            session_id=session_id,
+            direct_address=bool(analysis.get("direct_address")),
+            retrieval_intent=bool(analysis.get("retrieval_intent")),
+            reply_expected=bool(analysis.get("reply_expected")),
+            platform=platform,
+        )
+
+        if analysis.get("reply_expected"):
+            self._client_followup_until = now_ts + float(
+                getattr(self.config, "companion_followup_window_s", 45) or 45
+            )
+
+        user_turn_id = f"client_{uuid.uuid4().hex[:10]}"
+        if self.conversation:
+            await self.conversation.add_turn(
+                speaker_label="USER",
+                speaker_name="You",
+                text=text,
+                timestamp=now_ts,
+                confidence=float(result.get("confidence", 0.0) or 0.0),
+                speaker_confidence=1.0,
+                live_turn_id=user_turn_id,
+                session_id=session_id,
+                source_platform=platform,
+                retention_trace=retention_trace,
+            )
+
+        user_turn_metadata = {
+            "platform": platform,
+            "source": "client_companion",
+            "analysis": analysis,
+            "retention_trace": retention_trace,
+            "mime_type": mime_type,
+            "estimated_duration_s": duration_s,
+            "language": str(result.get("language", language or "en") or "en"),
+            "stt_confidence": float(result.get("confidence", 0.0) or 0.0),
+            **dict(metadata or {}),
+        }
+        self._store_conversation_turn(
+            session_id,
+            "user",
+            text,
+            metadata=user_turn_metadata,
+        )
+
+        retention_key = str(retention_trace.get("memory_decision") or "discarded")
+        if retention_key not in {"discarded", "session_only", "structured", "priority"}:
+            retention_key = "discarded"
+        runtime_session_manager.merge_retention_summary(session_id, {retention_key: 1})
+        runtime_session_manager.append_agent_tags(
+            session_id,
+            list(retention_trace.get("tags", []) or []),
+        )
+        session_snapshot = runtime_session_manager.get_session(session_id)
+        turn_counts = dict(
+            (session_snapshot.metadata.get("turn_counts") or {})
+            if session_snapshot and isinstance(session_snapshot.metadata, dict)
+            else {}
+        )
+        turn_counts["user"] = int(turn_counts.get("user", 0) or 0) + 1
+        runtime_session_manager.update_metadata(
+            session_id,
+            {
+                "platform": platform,
+                "assistant_name": self.config.assistant_name,
+                "last_user_turn_at": now_ts,
+                "last_user_text": text,
+                "last_analysis": analysis,
+                "last_retention_trace": retention_trace,
+                "companion_followup_until": self._client_followup_until,
+                "turn_counts": turn_counts,
+                **dict(metadata or {}),
+            },
+        )
+
+        if self._ws_broadcast:
+            try:
+                await self._ws_broadcast(
+                    {
+                        "type": "live_final_turn",
+                        "speaker_label": "USER",
+                        "speaker_name": "You",
+                        "text": text,
+                        "timestamp": now_ts,
+                        "confidence": float(result.get("confidence", 0.0) or 0.0),
+                        "speaker_confidence": 1.0,
+                        "live_turn_id": user_turn_id,
+                        "session_id": session_id,
+                        "source_platform": platform,
+                        "retention_trace": retention_trace,
+                    }
+                )
+            except Exception:
+                pass
+
+        assistant_text = ""
+        assistant_audio_base64 = ""
+        if analysis.get("reply_expected"):
+            prompt_text = str(analysis.get("query_text") or text).strip() or text
+            reply_callback = None
+            if analysis.get("retrieval_intent") and self._live_retrieve_reply_cb:
+                reply_callback = self._live_retrieve_reply_cb
+            elif self._live_assistant_reply_cb:
+                reply_callback = self._live_assistant_reply_cb
+
+            if reply_callback:
+                try:
+                    assistant_text = str(
+                        (await reply_callback(prompt_text, session_id)) or ""
+                    ).strip()
+                except Exception as e:
+                    self._error_message = str(e)
+                    assistant_text = ""
+
+            if assistant_text:
+                assistant_turn_id = f"assistant_{uuid.uuid4().hex[:10]}"
+                assistant_trace = build_retention_trace(
+                    assistant_text,
+                    session_id=session_id,
+                    platform=platform,
+                    source="assistant_companion",
+                )
+                if self.conversation:
+                    await self.conversation.add_turn(
+                        speaker_label="ASSISTANT",
+                        speaker_name=self.config.assistant_name or "Eva",
+                        text=assistant_text,
+                        timestamp=time.time(),
+                        confidence=1.0,
+                        speaker_confidence=1.0,
+                        live_turn_id=assistant_turn_id,
+                        session_id=session_id,
+                        source_platform=platform,
+                        retention_trace=assistant_trace,
+                    )
+
+                assistant_turn_metadata = {
+                    "platform": platform,
+                    "source": "assistant_companion",
+                    "assistant_name": self.config.assistant_name or "Eva",
+                    "retention_trace": assistant_trace,
+                    "reply_to_turn_id": user_turn_id,
+                }
+                self._store_conversation_turn(
+                    session_id,
+                    "assistant",
+                    assistant_text,
+                    metadata=assistant_turn_metadata,
+                )
+
+                session_snapshot = runtime_session_manager.get_session(session_id)
+                turn_counts = dict(
+                    (session_snapshot.metadata.get("turn_counts") or {})
+                    if session_snapshot and isinstance(session_snapshot.metadata, dict)
+                    else {}
+                )
+                turn_counts["assistant"] = int(turn_counts.get("assistant", 0) or 0) + 1
+                runtime_session_manager.update_metadata(
+                    session_id,
+                    {
+                        "last_assistant_turn_at": time.time(),
+                        "last_assistant_text": assistant_text,
+                        "last_assistant_retention_trace": assistant_trace,
+                        "turn_counts": turn_counts,
+                    },
+                )
+                assistant_wav = await self._synthesize_response_wav(assistant_text)
+                if assistant_wav:
+                    assistant_audio_base64 = base64.b64encode(assistant_wav).decode("ascii")
+
+                if self._ws_broadcast:
+                    try:
+                        await self._ws_broadcast(
+                            {
+                                "type": "live_final_turn",
+                                "speaker_label": "ASSISTANT",
+                                "speaker_name": self.config.assistant_name or "Eva",
+                                "text": assistant_text,
+                                "timestamp": time.time(),
+                                "confidence": 1.0,
+                                "speaker_confidence": 1.0,
+                                "live_turn_id": assistant_turn_id,
+                                "session_id": session_id,
+                                "source_platform": platform,
+                                "retention_trace": assistant_trace,
+                            }
+                        )
+                    except Exception:
+                        pass
+
+        self._transcriptions_completed += 1
+        self._status = AmbientStatus.LISTENING
+
+        session_snapshot = runtime_session_manager.get_session(session_id)
+        return {
+            "success": True,
+            "session_id": session_id,
+            "transcript": text,
+            "analysis": analysis,
+            "retention_trace": retention_trace,
+            "assistant_text": assistant_text,
+            "assistant_audio_base64": assistant_audio_base64,
+            "assistant_name": self.config.assistant_name,
+            "stt_confidence": float(result.get("confidence", 0.0) or 0.0),
+            "language": str(result.get("language", language or "en") or "en"),
+            "session": session_snapshot.to_dict() if session_snapshot else None,
+        }
+
     # ── Component Initialization ─────────────────────────────────────────
 
     async def _init_live_components(self):
@@ -853,6 +1447,7 @@ class AmbientService:
                 "traditional_tts": self._traditional_tts is not None,
             },
             "live": self.get_live_status(),
+            "client_session": self.get_client_sessions(),
         }
 
         # Component stats

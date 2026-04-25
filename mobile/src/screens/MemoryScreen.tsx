@@ -1,42 +1,32 @@
 /**
- * MemoryScreen — Neural Dark Memory Browser
- * Stitch ref: 9346356d0b4a49789a66f110c6968e73
+ * MemoryScreen — Cortex Aurora Memory Browser
+ * Light theme with search, add, delete, quality evaluation
  */
-import React, { useState } from 'react';
+import React from 'react';
 import {
   View,
   Text,
-  ScrollView,
+  FlatList,
   TouchableOpacity,
   StyleSheet,
-  ActivityIndicator,
-  FlatList,
+  RefreshControl,
+  Alert,
+  Platform,
 } from 'react-native';
-import { NEURAL, SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT } from '../theme/colors';
-import { Card } from '../components/ui/Card';
+import { SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT, SHADOWS } from '../theme/colors';
+import { AppIcon } from '../components/ui/AppIcon';
+import { SearchBar } from '../components/ui/SearchBar';
 import { Badge } from '../components/ui/Badge';
+import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { TextInput } from '../components/ui/TextInput';
-import { ProgressBar } from '../components/ui/ProgressBar';
-import { AppIcon } from '../components/ui/AppIcon';
-import type { MemoryObject } from '../../shared/core/types';
-
-const MEMORY_TYPES = ['All', 'Episodic', 'Procedural', 'Semantic', 'Belief'] as const;
-type MemoryFilter = (typeof MEMORY_TYPES)[number];
-
-const TYPE_BADGE: Record<string, 'primary' | 'secondary' | 'success' | 'warning' | 'tertiary'> = {
-  episodic:   'primary',
-  procedural: 'secondary',
-  semantic:   'success',
-  belief:     'warning',
-  working:    'tertiary',
-};
-
-function formatDate(ts: string | number) {
-  try {
-    return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-  } catch { return ''; }
-}
+import { EmptyState } from '../components/ui/EmptyState';
+import { LoadingSpinner } from '../components/ui/LoadingSpinner';
+import type {
+  AmbientClientSessionInfo,
+  AmbientRetentionTrace,
+  MemoryObject,
+} from '../../shared/core/types';
 
 interface MemoryScreenProps {
   memories: MemoryObject[];
@@ -46,8 +36,12 @@ interface MemoryScreenProps {
   setMemoryDraft: (v: string) => void;
   memoryBusy: boolean;
   loadingView: boolean;
+  lastRetentionTrace: AmbientRetentionTrace | null;
+  lastSession: AmbientClientSessionInfo | null;
+  lastUploadedDocument: string;
   onSearch: () => void;
   onAddMemory: () => void;
+  onUploadDocument: () => void;
   onDeleteMemory: (id: string) => void;
   onLoadMore: () => void;
 }
@@ -60,245 +54,273 @@ export function MemoryScreen({
   setMemoryDraft,
   memoryBusy,
   loadingView,
+  lastRetentionTrace,
+  lastSession,
+  lastUploadedDocument,
   onSearch,
   onAddMemory,
+  onUploadDocument,
   onDeleteMemory,
   onLoadMore,
 }: MemoryScreenProps) {
-  const [filter, setFilter] = useState<MemoryFilter>('All');
 
-  const filtered =
-    filter === 'All'
-      ? memories
-      : memories.filter((m) => (m.memory_type || 'episodic').toLowerCase() === filter.toLowerCase());
+  const confirmDelete = (id: string) => {
+    Alert.alert(
+      'Delete Memory',
+      'Are you sure you want to delete this memory?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: () => onDeleteMemory(id) },
+      ],
+    );
+  };
+
+  const formatDate = (ts: number | string) => {
+    const d = new Date(typeof ts === 'string' ? ts : ts);
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  };
 
   return (
     <View style={styles.container}>
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        {/* Header */}
-        <View style={styles.header}>
-          <Text style={styles.title}>Memory Browser</Text>
-          <Text style={styles.subtitle}>{memories.length} memories stored</Text>
-        </View>
-
-        {/* Search */}
-        <TextInput
-          placeholder="Semantic search memories…"
+      {/* Search bar */}
+      <View style={styles.searchSection}>
+        <SearchBar
           value={memorySearch}
           onChangeText={setMemorySearch}
-          onSubmitEditing={onSearch}
-          pill
-          returnKeyType="search"
-          icon={<AppIcon name="magnify" size={14} color={NEURAL.onSurfaceVariant} />}
-          style={styles.searchBar}
+          onSubmit={onSearch}
+          placeholder="Search memories..."
         />
+        <Badge
+          label={`${memories.length} memories`}
+          variant="primary"
+          size="sm"
+        />
+      </View>
 
-        {/* Type filter chips */}
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
-          {MEMORY_TYPES.map((t) => (
-            <TouchableOpacity
-              key={t}
-              onPress={() => setFilter(t)}
-              style={[styles.filterChip, filter === t && styles.filterChipActive]}
-            >
-              <Text style={[styles.filterChipText, filter === t && styles.filterChipTextActive]}>
-                {t}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
+      {/* Add memory input */}
+      <View style={styles.addSection}>
+        <TextInput
+          value={memoryDraft}
+          onChangeText={setMemoryDraft}
+          placeholder="Add a new memory..."
+          multiline
+          style={styles.addInput}
+        />
+        <Button
+          label={memoryBusy ? 'Adding...' : 'Add Memory'}
+          onPress={onAddMemory}
+          size="sm"
+          disabled={!memoryDraft.trim() || memoryBusy}
+          loading={memoryBusy}
+          icon={<AppIcon name="plus" size={14} color="#ffffff" />}
+        />
+        <Button
+          label="Upload PDF to Memory"
+          onPress={onUploadDocument}
+          size="sm"
+          variant="outline"
+          disabled={memoryBusy}
+          icon={<AppIcon name="file-upload-outline" size={14} color="#6366f1" />}
+        />
+      </View>
 
-        {/* Add Memory composer */}
-        <Card variant="outlined" style={styles.composerCard}>
-          <Text style={styles.composerTitle}>Add Memory</Text>
-          <TextInput
-            placeholder="Store an important thought, decision, or event…"
-            value={memoryDraft}
-            onChangeText={setMemoryDraft}
-            multiline
-            style={styles.composerInput}
-          />
-          <Button
-            label={memoryBusy ? 'Saving…' : 'Save Memory'}
-            onPress={onAddMemory}
-            disabled={memoryBusy || !memoryDraft.trim()}
-            fullWidth
-            loading={memoryBusy}
-          />
-        </Card>
-
-        {/* Memory list */}
-        {loadingView ? (
-          <ActivityIndicator color={NEURAL.primary} size="large" style={styles.loader} />
-        ) : filtered.length === 0 ? (
-          <View style={styles.empty}>
-            <Text style={styles.emptyTitle}>No memories found</Text>
-            <Text style={styles.emptyBody}>Start conversations to build your memory store.</Text>
-          </View>
-        ) : (
-          <View style={styles.memList}>
-            {filtered.map((mem) => (
-              <MemoryCard key={mem.id} mem={mem} onDelete={onDeleteMemory} />
-            ))}
-          </View>
-        )}
-
-        {/* Pagination */}
-        {filtered.length > 0 && (
-          <TouchableOpacity style={styles.loadMoreBtn} onPress={onLoadMore} disabled={memoryBusy}>
-            <Text style={styles.loadMoreText}>
-              {memoryBusy ? 'Loading…' : 'Load 50 more'}
+      {lastRetentionTrace ? (
+        <View style={styles.intakeSection}>
+          <Card variant="accent" padding="md">
+            <View style={styles.intakeHeader}>
+              <Text style={styles.intakeTitle}>Latest intake</Text>
+              <Badge
+                label={lastRetentionTrace.memory_decision || 'structured'}
+                variant={lastRetentionTrace.memory_decision === 'priority' ? 'success' : 'primary'}
+                size="sm"
+              />
+            </View>
+            <Text style={styles.intakeCopy}>
+              {lastUploadedDocument
+                ? `Document "${lastUploadedDocument}" was queued for PageIndex retrieval and memory refinement.`
+                : 'This memory was sessionized, tagged, and stored through the same retention pipeline used by the companion flow.'}
             </Text>
-          </TouchableOpacity>
-        )}
-      </ScrollView>
+            <View style={styles.intakeMeta}>
+              {lastRetentionTrace.tags?.slice(0, 4).map((tag) => (
+                <Badge key={tag} label={tag} variant="default" size="sm" />
+              ))}
+            </View>
+            {lastSession?.session_id ? (
+              <Text style={styles.intakeSession}>Session {lastSession.session_id.slice(0, 18)}…</Text>
+            ) : null}
+          </Card>
+        </View>
+      ) : null}
+
+      {/* Memory list */}
+      {loadingView ? (
+        <LoadingSpinner fullScreen message="Loading memories..." />
+      ) : (
+        <FlatList
+          data={memories}
+          keyExtractor={(m) => m.id}
+          contentContainerStyle={styles.list}
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={false}
+              onRefresh={onLoadMore}
+              tintColor="#6366f1"
+              colors={['#6366f1']}
+            />
+          }
+          renderItem={({ item }) => (
+            <Card variant="default" padding="md" style={styles.memoryCard}>
+              <View style={styles.memoryHeader}>
+                <View style={styles.memoryMeta}>
+                  <Badge
+                    label={item.source || 'manual'}
+                    variant={item.source === 'ambient' ? 'violet' : item.source === 'chat' ? 'primary' : 'default'}
+                    size="sm"
+                  />
+                  {item.importance !== undefined && (
+                    <Badge
+                      label={`★ ${(item.importance * 100).toFixed(0)}%`}
+                      variant={item.importance > 0.7 ? 'success' : 'default'}
+                      size="sm"
+                    />
+                  )}
+                </View>
+                <TouchableOpacity onPress={() => confirmDelete(item.id)} style={styles.deleteBtn}>
+                  <AppIcon name="delete-outline" size={16} color="#f43f5e" />
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.memoryContent} numberOfLines={4}>
+                {item.content}
+              </Text>
+
+              <View style={styles.memoryFooter}>
+                <Text style={styles.memoryDate}>
+                  {item.timestamp ? formatDate(item.timestamp) : ''}
+                </Text>
+                {item.id && (
+                  <Text style={styles.memoryId} numberOfLines={1}>
+                    {item.id.slice(0, 12)}...
+                  </Text>
+                )}
+              </View>
+            </Card>
+          )}
+          ListEmptyComponent={
+            <EmptyState
+              icon="brain"
+              title="No memories yet"
+              message="Add your first memory above, or ingest content through the chat."
+            />
+          }
+        />
+      )}
     </View>
   );
 }
 
-function MemoryCard({ mem, onDelete }: { mem: MemoryObject; onDelete: (id: string) => void }) {
-  const typeBadge = TYPE_BADGE[mem.memory_type?.toLowerCase() || 'episodic'] || 'primary';
-  const imp = typeof mem.importance === 'number' ? mem.importance : 0;
-  const entities = (mem.entities as string[]) || [];
-  const topics = (mem.topics as string[]) || [];
-
-  return (
-    <Card variant="default" style={styles.memCard} leftAccent={true} leftAccentColor={NEURAL.primary}>
-      {/* Top: type + emotion */}
-      <View style={styles.memMeta}>
-        <Badge label={mem.memory_type || 'episodic'} variant={typeBadge} small />
-        {mem.emotion ? <Badge label={mem.emotion} variant="ghost" small /> : null}
-        <Text style={styles.memSource}>
-          {mem.source ? `via ${mem.source}` : ''}
-        </Text>
-      </View>
-
-      {/* Importance progress */}
-      <ProgressBar
-        value={imp}
-        label="Importance"
-        style={styles.importanceBar}
-      />
-
-      {/* Content */}
-      <Text style={styles.memText}>{mem.content}</Text>
-
-      {/* Entity tags */}
-      {entities.length > 0 && (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tagRow}>
-          {entities.slice(0, 6).map((e, i) => (
-            <View key={i} style={styles.entityTag}>
-              <Text style={styles.entityTagText}>@{e}</Text>
-            </View>
-          ))}
-        </ScrollView>
-      )}
-
-      {/* Topic pills */}
-      {topics.length > 0 && (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tagRow}>
-          {topics.slice(0, 5).map((t, i) => (
-            <View key={i} style={styles.topicTag}>
-              <Text style={styles.topicTagText}>#{ t}</Text>
-            </View>
-          ))}
-        </ScrollView>
-      )}
-
-      {/* Footer */}
-      <View style={styles.memFooter}>
-        <Text style={styles.memDate}>{formatDate(mem.timestamp)}</Text>
-        <TouchableOpacity onPress={() => onDelete(mem.id)} style={styles.deleteBtn}>
-          <Text style={styles.deleteText}>Delete</Text>
-        </TouchableOpacity>
-      </View>
-    </Card>
-  );
-}
-
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: NEURAL.background },
-  scrollContent: { paddingBottom: SPACING['5xl'] },
-  header: { paddingHorizontal: SPACING.lg, paddingTop: SPACING.lg, paddingBottom: SPACING.md },
-  title: { fontSize: FONT_SIZE['2xl'], fontWeight: FONT_WEIGHT.bold, color: NEURAL.onSurface, letterSpacing: -0.5 },
-  subtitle: { fontSize: FONT_SIZE.sm, color: NEURAL.onSurfaceVariant, marginTop: 2 },
-
-  searchBar: { marginHorizontal: SPACING.lg, marginBottom: SPACING.md },
-
-  filterRow: { paddingHorizontal: SPACING.lg, gap: SPACING.sm, marginBottom: SPACING.md },
-  filterChip: {
-    paddingHorizontal: SPACING.md,
-    paddingVertical: 5,
-    borderRadius: RADIUS.full,
-    backgroundColor: NEURAL.surfaceContainerHigh,
-    borderWidth: 1,
-    borderColor: NEURAL.outlineVariant,
+  container: {
+    flex: 1,
+    backgroundColor: '#f8fafc',
   },
-  filterChipActive: {
-    backgroundColor: `${NEURAL.primary}26`,
-    borderColor: `${NEURAL.primary}60`,
-  },
-  filterChipText: { fontSize: FONT_SIZE.sm, color: NEURAL.onSurfaceVariant, fontWeight: FONT_WEIGHT.medium },
-  filterChipTextActive: { color: NEURAL.primary, fontWeight: FONT_WEIGHT.bold },
-
-  composerCard: { marginHorizontal: SPACING.lg, marginBottom: SPACING.lg, gap: SPACING.sm },
-  composerTitle: { fontSize: FONT_SIZE.base, fontWeight: FONT_WEIGHT.semibold, color: NEURAL.onSurface },
-  composerInput: { marginBottom: 0 },
-
-  loader: { marginTop: SPACING['4xl'] },
-  empty: { alignItems: 'center', paddingVertical: SPACING['3xl'], paddingHorizontal: SPACING.lg },
-  emptyTitle: { fontSize: FONT_SIZE.lg, fontWeight: FONT_WEIGHT.semibold, color: NEURAL.onSurface, marginBottom: SPACING.sm },
-  emptyBody: { fontSize: FONT_SIZE.base, color: NEURAL.onSurfaceVariant, textAlign: 'center' },
-
-  memList: { gap: SPACING.sm, paddingHorizontal: SPACING.lg },
-
-  memCard: { gap: SPACING.sm },
-  memMeta: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm },
-  memSource: { marginLeft: 'auto', fontSize: FONT_SIZE.xs, color: NEURAL.onSurfaceVariant },
-  importanceBar: { marginVertical: SPACING.xs },
-  memText: { fontSize: FONT_SIZE.base, color: NEURAL.onSurface, lineHeight: FONT_SIZE.base * 1.6 },
-
-  tagRow: { gap: SPACING.sm },
-  entityTag: {
-    backgroundColor: `${NEURAL.secondary}22`,
-    borderRadius: RADIUS.full,
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: 2,
-    borderWidth: 1,
-    borderColor: `${NEURAL.secondary}40`,
-  },
-  entityTagText: { fontSize: FONT_SIZE.xs, color: NEURAL.secondary, fontWeight: FONT_WEIGHT.medium },
-  topicTag: {
-    backgroundColor: `${NEURAL.primary}18`,
-    borderRadius: RADIUS.full,
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: 2,
-    borderWidth: 1,
-    borderColor: `${NEURAL.primary}30`,
-  },
-  topicTagText: { fontSize: FONT_SIZE.xs, color: NEURAL.primary, fontWeight: FONT_WEIGHT.medium },
-
-  memFooter: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: SPACING.xs },
-  memDate: { fontSize: FONT_SIZE.xs, color: NEURAL.outline },
-  deleteBtn: {
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: 3,
-    borderRadius: RADIUS.full,
-    backgroundColor: `${NEURAL.error}22`,
-    borderWidth: 1,
-    borderColor: `${NEURAL.error}40`,
-  },
-  deleteText: { fontSize: FONT_SIZE.xs, color: NEURAL.error, fontWeight: FONT_WEIGHT.semibold },
-
-  loadMoreBtn: {
-    marginHorizontal: SPACING.lg,
-    marginTop: SPACING.xl,
-    backgroundColor: NEURAL.surfaceContainerHigh,
-    borderRadius: RADIUS.full,
-    paddingVertical: SPACING.md,
+  searchSection: {
+    flexDirection: 'row',
     alignItems: 'center',
-    borderWidth: 1,
-    borderColor: NEURAL.outlineVariant,
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: SPACING.md,
+    gap: SPACING.sm,
+    backgroundColor: '#ffffff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
   },
-  loadMoreText: { fontSize: FONT_SIZE.sm, color: NEURAL.primary, fontWeight: FONT_WEIGHT.semibold },
+  addSection: {
+    paddingHorizontal: SPACING.lg,
+    paddingVertical: SPACING.md,
+    backgroundColor: '#ffffff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+    gap: SPACING.sm,
+  },
+  intakeSection: {
+    paddingHorizontal: SPACING.lg,
+    paddingTop: SPACING.md,
+  },
+  intakeHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: SPACING.sm,
+    marginBottom: SPACING.sm,
+  },
+  intakeTitle: {
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.bold,
+    color: '#0f172a',
+  },
+  intakeCopy: {
+    fontSize: FONT_SIZE.sm,
+    color: '#334155',
+    lineHeight: 18,
+  },
+  intakeMeta: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: SPACING.xs,
+    marginTop: SPACING.sm,
+  },
+  intakeSession: {
+    marginTop: SPACING.sm,
+    fontSize: FONT_SIZE.xs,
+    color: '#64748b',
+  },
+  addInput: {
+    flex: 1,
+  },
+  list: {
+    padding: SPACING.lg,
+    gap: SPACING.md,
+    paddingBottom: SPACING['5xl'],
+  },
+  memoryCard: {
+    marginBottom: 0,
+  },
+  memoryHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: SPACING.sm,
+  },
+  memoryMeta: {
+    flexDirection: 'row',
+    gap: 4,
+    flexWrap: 'wrap',
+    flex: 1,
+  },
+  deleteBtn: {
+    padding: SPACING.xs,
+    borderRadius: RADIUS.sm,
+  },
+  memoryContent: {
+    fontSize: FONT_SIZE.base,
+    color: '#1e293b',
+    lineHeight: 20,
+    marginBottom: SPACING.sm,
+  },
+  memoryFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  memoryDate: {
+    fontSize: 10,
+    color: '#94a3b8',
+    fontWeight: FONT_WEIGHT.medium,
+  },
+  memoryId: {
+    fontSize: 10,
+    color: '#cbd5e1',
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
+  },
 });

@@ -127,6 +127,8 @@ class HybridRetriever:
             _timed("sparse", self._sparse_retrieve(query, top_k * 2)),
             _timed("graph", self._graph_retrieve(query, top_k * 2)),
             _timed("temporal", self._temporal_retrieve(query, top_k * 2)),
+            _timed("raptor", self._raptor_retrieve(query, top_k * 2)),
+            _timed("community", self._community_retrieve(query, top_k * 2)),
         ]
         # Only add proposition channel if local (not API) embeddings available
         if getattr(self.embeddings, '_backend', 'stub') == 'local':
@@ -444,21 +446,188 @@ class HybridRetriever:
     # ─── Legacy Compatibility Channels ────────────────────────────────
 
     async def _raptor_retrieve(self, query: MemoryQuery, top_k: int) -> List[Tuple[str, float]]:
-        """Compatibility stub for legacy RAPTOR channel contracts.
+        """Retrieve RAPTOR summary nodes and expand to their child memories.
 
-        The current runtime does not maintain RAPTOR cluster indexes by default,
-        so this method returns an empty result set until a RAPTOR index backend
-        is wired in.
+        This channel scores hierarchical summary memories (`raptor_level > 0`) and
+        projects relevance down to the summary's child IDs.
         """
-        return []
+        try:
+            # Keep this bounded; RAPTOR summaries should be sparse compared to leaves.
+            scan_limit = max(200, min(top_k * 30, 2000))
+            candidates = self.metadata.get_all_memories(limit=scan_limit)
+        except Exception:
+            return []
+
+        raptor_nodes = [
+            m for m in candidates
+            if m.raptor_level > 0 or str(m.source).lower() == "raptor" or bool(m.raptor_children)
+        ]
+        if not raptor_nodes:
+            return []
+
+        query_tokens = set(self._tokenize(query.raw_query))
+        query_emb = None
+        if query.embedding is not None:
+            query_emb = np.array(query.embedding, dtype=np.float32)
+            qnorm = float(np.linalg.norm(query_emb))
+            if qnorm > 0:
+                query_emb = query_emb / qnorm
+            else:
+                query_emb = None
+
+        requested_entities = {str(entity).strip().lower() for entity in (query.entities or []) if entity}
+        requested_topics = {str(topic).strip().lower() for topic in (query.topics or []) if topic}
+        scored: Dict[str, float] = {}
+
+        def _token_overlap(text: str) -> float:
+            if not query_tokens:
+                return 0.0
+            text_tokens = set(self._tokenize(text))
+            if not text_tokens:
+                return 0.0
+            return len(query_tokens & text_tokens) / max(len(query_tokens), 1)
+
+        for summary in raptor_nodes:
+            if query.time_start and summary.timestamp and summary.timestamp < query.time_start:
+                continue
+            if query.time_end and summary.timestamp and summary.timestamp > query.time_end:
+                continue
+
+            lexical = _token_overlap(summary.content)
+
+            summary_entities = {str(entity).strip().lower() for entity in (summary.entities or []) if entity}
+            entity_hits = 0.0
+            if requested_entities:
+                entity_hits = sum(
+                    1
+                    for entity in requested_entities
+                    if entity in summary_entities or entity in summary.content.lower()
+                ) / max(len(requested_entities), 1)
+
+            summary_topics = {str(topic).strip().lower() for topic in (summary.topics or []) if topic}
+            topic_hits = 0.0
+            if requested_topics:
+                topic_hits = sum(
+                    1
+                    for topic in requested_topics
+                    if topic in summary_topics
+                ) / max(len(requested_topics), 1)
+
+            semantic = 0.0
+            if query_emb is not None:
+                summary_emb = None
+                if summary.embedding is not None:
+                    summary_emb = np.array(summary.embedding, dtype=np.float32)
+                else:
+                    summary_emb = self.vectors.vectors.get(summary.id)
+
+                if summary_emb is not None:
+                    summary_emb = np.array(summary_emb, dtype=np.float32)
+                    snorm = float(np.linalg.norm(summary_emb))
+                    if snorm > 0:
+                        semantic = float(np.dot(query_emb, summary_emb / snorm))
+                        semantic = max(semantic, 0.0)
+
+            base_score = (
+                0.15
+                + (0.45 * semantic)
+                + (0.25 * lexical)
+                + (0.10 * float(summary.importance or 0.0))
+                + (0.03 * topic_hits)
+                + (0.02 * entity_hits)
+            )
+
+            if base_score > 0:
+                scored[summary.id] = max(scored.get(summary.id, 0.0), base_score)
+
+            for child_rank, child_id in enumerate((summary.raptor_children or [])[:10]):
+                child = self.metadata.get_memory(child_id)
+                if child is None:
+                    continue
+                if query.time_start and child.timestamp and child.timestamp < query.time_start:
+                    continue
+                if query.time_end and child.timestamp and child.timestamp > query.time_end:
+                    continue
+
+                child_lexical = _token_overlap(child.content)
+                rank_discount = max(0.55, 0.88 - (child_rank * 0.04))
+                child_score = (base_score * rank_discount) + (0.08 * child_lexical)
+                if child_score > 0:
+                    scored[child_id] = max(scored.get(child_id, 0.0), child_score)
+
+        ranked = sorted(scored.items(), key=lambda item: item[1], reverse=True)
+        return ranked[:top_k]
 
     async def _community_retrieve(self, query: MemoryQuery, top_k: int) -> List[Tuple[str, float]]:
-        """Compatibility stub for legacy community retrieval contracts.
+        """Retrieve memories via graph community summaries.
 
-        Community-level retrieval can be activated by a graph community backend.
-        Until then, it safely returns no matches.
+        Communities are coarse topical clusters. This channel maps the query to
+        relevant clusters and returns member memory IDs with graded relevance.
         """
-        return []
+        try:
+            communities = self.graph.get_community_summaries()
+        except Exception:
+            return []
+
+        if not communities:
+            return []
+
+        query_tokens = set(self._tokenize(query.raw_query))
+        requested_entities = {str(entity).strip().lower() for entity in (query.entities or []) if entity}
+        requested_topics = {str(topic).strip().lower() for topic in (query.topics or []) if topic}
+
+        scored: Dict[str, float] = {}
+
+        for community in communities:
+            members = [str(member) for member in (community.get("members", []) or []) if member]
+            memory_ids = [str(memory_id) for memory_id in (community.get("memory_ids", []) or []) if memory_id]
+            if not memory_ids:
+                continue
+
+            member_blob = " ".join(members)
+            member_tokens = set(self._tokenize(member_blob))
+            lexical = 0.0
+            if query_tokens and member_tokens:
+                lexical = len(query_tokens & member_tokens) / max(len(query_tokens), 1)
+
+            entity_hit_score = 0.0
+            if requested_entities:
+                member_blob_lower = member_blob.lower()
+                entity_hit_score = sum(
+                    1
+                    for entity in requested_entities
+                    if entity in member_blob_lower
+                ) / max(len(requested_entities), 1)
+
+            size = float(community.get("size", 0) or 0)
+            community_score = 0.12 + (0.35 * lexical) + (0.30 * entity_hit_score) + min(size / 25.0, 0.12)
+
+            for rank, memory_id in enumerate(memory_ids[: max(top_k, 8)]):
+                memory = self.metadata.get_memory(memory_id)
+                if memory is None:
+                    continue
+                if query.time_start and memory.timestamp and memory.timestamp < query.time_start:
+                    continue
+                if query.time_end and memory.timestamp and memory.timestamp > query.time_end:
+                    continue
+
+                memory_tokens = set(self._tokenize(memory.content))
+                overlap = 0.0
+                if query_tokens and memory_tokens:
+                    overlap = len(query_tokens & memory_tokens) / max(len(query_tokens), 1)
+
+                topic_hits = 0.0
+                if requested_topics:
+                    memory_topics = {str(topic).strip().lower() for topic in (memory.topics or []) if topic}
+                    topic_hits = sum(1 for topic in requested_topics if topic in memory_topics) / max(len(requested_topics), 1)
+
+                rank_discount = 1.0 / (1.0 + (rank * 0.25))
+                score = (community_score * rank_discount) + (0.25 * overlap) + (0.10 * topic_hits)
+                if score > 0:
+                    scored[memory_id] = max(scored.get(memory_id, 0.0), score)
+
+        ranked = sorted(scored.items(), key=lambda item: item[1], reverse=True)
+        return ranked[:top_k]
 
     # ─── Channel 5: Proposition Retrieval ────────────────────────────────
 
@@ -635,7 +804,7 @@ class HybridRetriever:
 
         except Exception as e:
             print(f"  ⚠ PageIndex channel failed: {e}")
-            return []  # Graceful degradation — other 5 channels still work
+            return []  # Graceful degradation — other local channels still work
 
     # ─── RRF Fusion ──────────────────────────────────────────────────────
 

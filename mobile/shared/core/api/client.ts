@@ -3,7 +3,10 @@ import {
   AgentQueryResponse,
   AgentSessionInfo,
   AmbientConfig,
+  AmbientClientAudioResponse,
+  AmbientClientSessionInfo,
   AmbientLiveStatus,
+  AmbientRetentionTrace,
   AmbientState,
   ChatSettings,
   ConversationRecord,
@@ -39,6 +42,27 @@ import {
 
 export interface ApiConfig {
   baseUrl: string;
+}
+
+export type ApiBaseSource =
+  | "env"
+  | "canonical"
+  | "persisted"
+  | "same-origin"
+  | "local-dev";
+
+export interface ApiBaseCandidate {
+  url: string;
+  source: ApiBaseSource;
+}
+
+export interface ApiBaseResolution {
+  baseUrl: string;
+  source: ApiBaseSource;
+  reachable: boolean;
+  checkedCandidates: ApiBaseCandidate[];
+  status?: string;
+  error?: string;
 }
 
 export interface ChatCompletion {
@@ -95,6 +119,15 @@ export interface PageIndexUsage {
   queries_limit: number;
   pages_limit: number;
   month: string;
+}
+
+export interface MemoryIngestResponse {
+  status: string;
+  memory: MemoryObject;
+  session?: AmbientClientSessionInfo | null;
+  session_id?: string;
+  retention_trace?: AmbientRetentionTrace;
+  session_created?: boolean;
 }
 
 interface LLMProviderResponse {
@@ -188,6 +221,58 @@ export interface RuntimeTaskStreamHandlers {
   onError?: (error: Error) => void;
 }
 
+export interface RuntimeTaskCreatePayload {
+  taskId?: string;
+  parentTaskId?: string;
+  permissionScope?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface RuntimeSafetyEvaluatePayload {
+  requestId?: string;
+  toolName: string;
+  commandText?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SessionForgeRunPayload {
+  sessionId?: string;
+  lookbackDays?: number;
+}
+
+export interface SessionForgeSummaryPayload {
+  sessionId?: string;
+  windowDays?: number;
+}
+
+export interface ChronicleObservationPayload {
+  note?: string;
+  location?: Record<string, unknown>;
+  peoplePresent?: string[];
+  tags?: string[];
+  mediaRef?: string;
+  source?: string;
+  emotionHint?: string;
+}
+
+export interface ChronicleSavePayload {
+  title?: string;
+  windowSeconds?: number;
+  retrievalHint?: string;
+  lifeDomain?: string;
+}
+
+export interface FeedbackPayload {
+  query?: string;
+  answer?: string;
+  rating?: number;
+  comment?: string;
+  session_id?: string;
+  type?: string;
+  content?: string;
+  context?: Record<string, unknown>;
+}
+
 function normalizeBaseUrl(rawBaseUrl: string): string {
   return rawBaseUrl.endsWith("/") ? rawBaseUrl.slice(0, -1) : rawBaseUrl;
 }
@@ -224,11 +309,169 @@ function isAndroidEmulatorHost(rawUrl: string): boolean {
   return extractHostname(rawUrl) === "10.0.2.2";
 }
 
+function isLoopbackHost(rawUrl: string): boolean {
+  const hostname = extractHostname(rawUrl);
+  return hostname === "localhost" || hostname === "127.0.0.1";
+}
+
+function isLocalDevHost(rawUrl: string): boolean {
+  return isAndroidEmulatorHost(rawUrl) || isLoopbackHost(rawUrl);
+}
+
+const CANONICAL_PRODUCTION_API_BASE = ensureApiPath(
+  "https://cortex-backend-dbcv.onrender.com",
+);
+
+function pushUniqueCandidate(
+  candidates: ApiBaseCandidate[],
+  seen: Set<string>,
+  source: ApiBaseSource,
+  rawUrl: string | null | undefined,
+) {
+  const trimmed = rawUrl?.trim();
+  if (!trimmed) {
+    return;
+  }
+
+  const normalized = ensureApiPath(trimmed);
+  if (seen.has(normalized)) {
+    return;
+  }
+
+  seen.add(normalized);
+  candidates.push({ url: normalized, source });
+}
+
+export function getApiBaseCandidates(
+  persistedUrl?: string | null,
+): ApiBaseCandidate[] {
+  const candidates: ApiBaseCandidate[] = [];
+  const seen = new Set<string>();
+  const envBase =
+    typeof process !== "undefined"
+      ? process.env.EXPO_PUBLIC_API_BASE_URL || process.env.NEXT_PUBLIC_API_BASE_URL
+      : undefined;
+
+  pushUniqueCandidate(candidates, seen, "env", envBase);
+  pushUniqueCandidate(candidates, seen, "canonical", CANONICAL_PRODUCTION_API_BASE);
+
+  if (persistedUrl?.trim() && !isLocalDevHost(persistedUrl)) {
+    pushUniqueCandidate(candidates, seen, "persisted", persistedUrl);
+  }
+
+  if (typeof window !== "undefined" && window.location?.origin) {
+    pushUniqueCandidate(candidates, seen, "same-origin", window.location.origin);
+  }
+
+  if (persistedUrl?.trim() && isLocalDevHost(persistedUrl)) {
+    pushUniqueCandidate(candidates, seen, "persisted", persistedUrl);
+  }
+
+  pushUniqueCandidate(candidates, seen, "local-dev", "http://10.0.2.2:8000");
+  pushUniqueCandidate(candidates, seen, "local-dev", "http://localhost:8000");
+  pushUniqueCandidate(candidates, seen, "local-dev", "http://127.0.0.1:8000");
+
+  return candidates;
+}
+
+export async function probeApiBaseUrl(
+  baseUrl: string,
+  timeoutMs: number = 10000,
+): Promise<{ reachable: boolean; status?: string; error?: string }> {
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timeout =
+    controller !== null
+      ? setTimeout(() => {
+          controller.abort();
+        }, timeoutMs)
+      : null;
+
+  try {
+    const res = await fetch(`${ensureApiPath(baseUrl)}/health`, {
+      signal: controller?.signal,
+    });
+
+    if (!res.ok) {
+      return {
+        reachable: false,
+        error: `Health check failed with status ${res.status}`,
+      };
+    }
+
+    const payload = await res.json().catch(() => ({}));
+    return {
+      reachable: true,
+      status: typeof payload?.status === "string" ? payload.status : "ok",
+    };
+  } catch (error) {
+    return {
+      reachable: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    if (timeout !== null) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+export async function resolveHealthyApiBaseUrl(
+  persistedUrl?: string | null,
+  timeoutMs: number = 10000,
+): Promise<ApiBaseResolution> {
+  const candidates = getApiBaseCandidates(persistedUrl);
+  let lastError: string | undefined;
+
+  for (const candidate of candidates) {
+    const probe = await probeApiBaseUrl(candidate.url, timeoutMs);
+    if (probe.reachable) {
+      return {
+        baseUrl: candidate.url,
+        source: candidate.source,
+        reachable: true,
+        checkedCandidates: candidates,
+        status: probe.status,
+      };
+    }
+    lastError = probe.error;
+  }
+
+  const fallback = candidates[0] ?? {
+    url: CANONICAL_PRODUCTION_API_BASE,
+    source: "canonical" as const,
+  };
+
+  return {
+    baseUrl: fallback.url,
+    source: fallback.source,
+    reachable: false,
+    checkedCandidates: candidates,
+    error: lastError,
+  };
+}
+
 async function parseError(res: Response): Promise<Error> {
-  const detail = await res
-    .json()
-    .then((data) => (typeof data?.detail === "string" ? data.detail : undefined))
-    .catch(() => undefined);
+  let detail: string | undefined;
+
+  try {
+    const raw = await res.text();
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        detail =
+          typeof parsed?.detail === "string"
+            ? parsed.detail
+            : typeof parsed?.error === "string"
+              ? parsed.error
+              : undefined;
+      } catch {
+        detail = raw.trim();
+      }
+    }
+  } catch {
+    detail = undefined;
+  }
+
   return new Error(detail || `Request failed with status ${res.status}`);
 }
 
@@ -349,8 +592,29 @@ export function createApiClient(config: ApiConfig) {
         }),
       });
 
-      if (!res.ok || !res.body) {
+      if (!res.ok) {
         throw await parseError(res);
+      }
+
+      if (!res.body || typeof res.body.getReader !== "function") {
+        const fallback = await sendMessage({
+          ...payload,
+          settings: {
+            ...settings,
+            stream: false,
+          },
+        });
+        handlers.onMeta?.({
+          evidence: fallback.evidence,
+          agents_used: fallback.agents_used,
+          confidence: fallback.confidence,
+          query_analysis: fallback.query_analysis,
+          thinking: fallback.thinking,
+          pipeline_trace: fallback.pipeline_trace || null,
+        });
+        handlers.onReplace?.(fallback.content);
+        handlers.onDone();
+        return;
       }
 
       const reader = res.body.getReader();
@@ -486,6 +750,22 @@ export function createApiClient(config: ApiConfig) {
     return res.json();
   }
 
+  async function getRuntimeToolContracts(): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/runtime/tool-contracts`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function getRuntimeInterfaces(): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/runtime/interfaces`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
   async function getRuntimeSafetyPermissions(): Promise<RuntimePermissionsResponse> {
     const res = await fetch(`${baseUrl}/runtime/safety/permissions`);
     if (!res.ok) {
@@ -530,6 +810,23 @@ export function createApiClient(config: ApiConfig) {
     return res.json();
   }
 
+  async function createRuntimeTask(payload: RuntimeTaskCreatePayload): Promise<RuntimeTaskResponse> {
+    const res = await fetch(`${baseUrl}/runtime/tasks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        task_id: payload.taskId || "",
+        parent_task_id: payload.parentTaskId || "",
+        permission_scope: payload.permissionScope,
+        metadata: payload.metadata || {},
+      }),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
   async function getRuntimeTask(taskId: string): Promise<RuntimeTaskResponse> {
     const res = await fetch(`${baseUrl}/runtime/tasks/${encodeURIComponent(taskId)}`);
     if (!res.ok) {
@@ -548,6 +845,33 @@ export function createApiClient(config: ApiConfig) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ reason, propagate }),
     });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function evaluateRuntimeSafetyOperation(
+    payload: RuntimeSafetyEvaluatePayload,
+  ): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/runtime/safety/evaluate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request_id: payload.requestId || "",
+        tool_name: payload.toolName,
+        command_text: payload.commandText || "",
+        metadata: payload.metadata || {},
+      }),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function getRuntimeSafetyAudit(limit: number = 100): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/runtime/safety/audit?limit=${limit}`);
     if (!res.ok) {
       throw await parseError(res);
     }
@@ -644,11 +968,22 @@ export function createApiClient(config: ApiConfig) {
   async function ingestMemory(
     content: string,
     source: string = "manual",
-  ): Promise<{ status: string; memory: MemoryObject }> {
+    options?: {
+      sessionId?: string;
+      platform?: string;
+      forceKeep?: boolean;
+    },
+  ): Promise<MemoryIngestResponse> {
     const res = await fetch(`${baseUrl}/memories/ingest`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content, source }),
+      body: JSON.stringify({
+        content,
+        source,
+        session_id: options?.sessionId || "",
+        platform: options?.platform || "mobile",
+        force_keep: options?.forceKeep !== false,
+      }),
     });
     if (!res.ok) {
       throw await parseError(res);
@@ -663,6 +998,16 @@ export function createApiClient(config: ApiConfig) {
     if (!res.ok) {
       throw await parseError(res);
     }
+  }
+
+  async function purgeChatQueryMemories(): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/memories/purge/chat-queries`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
   }
 
   async function getGraphData(): Promise<GraphData> {
@@ -812,6 +1157,93 @@ export function createApiClient(config: ApiConfig) {
     return res.json();
   }
 
+  async function startAmbientClientSession(body?: {
+    platform?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<{
+    success: boolean;
+    session_id: string;
+    platform: string;
+    metadata: Record<string, unknown>;
+    session: AmbientClientSessionInfo;
+  }> {
+    const res = await fetch(`${baseUrl}/ambient/client/session/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        platform: body?.platform || "mobile",
+        metadata: body?.metadata || {},
+      }),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function stopAmbientClientSession(body: {
+    sessionId: string;
+    reason?: string;
+  }): Promise<{
+    success: boolean;
+    session: AmbientClientSessionInfo;
+    triggered_agents?: string[];
+  }> {
+    const res = await fetch(`${baseUrl}/ambient/client/session/stop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: body.sessionId,
+        reason: body.reason || "user_request",
+      }),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function getAmbientClientSessions(): Promise<{
+    active_session_id: string;
+    followup_until: number;
+    active_sessions: AmbientClientSessionInfo[];
+    sessions: AmbientClientSessionInfo[];
+  }> {
+    const res = await fetch(`${baseUrl}/ambient/client/sessions`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function processAmbientClientAudio(body: {
+    sessionId?: string;
+    audioBase64: string;
+    mimeType: string;
+    platform?: string;
+    language?: string;
+    estimatedDurationS?: number;
+    metadata?: Record<string, unknown>;
+  }): Promise<AmbientClientAudioResponse> {
+    const res = await fetch(`${baseUrl}/ambient/client/process-audio`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: body.sessionId || "",
+        audio_base64: body.audioBase64,
+        mime_type: body.mimeType,
+        platform: body.platform || "mobile",
+        language: body.language,
+        estimated_duration_s: body.estimatedDurationS || 0,
+        metadata: body.metadata || {},
+      }),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
   async function injectAmbientLiveAudio(
     audioBase64: string,
     sampleRateHz: number = 16000,
@@ -862,6 +1294,34 @@ export function createApiClient(config: ApiConfig) {
 
   async function getVoiceProviders(): Promise<VoiceProviders> {
     const res = await fetch(`${baseUrl}/ambient/voice-providers`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function enableWakeWord(): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/ambient/wake-word/enable`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function disableWakeWord(): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/ambient/wake-word/disable`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function getWakeWordStatus(): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/ambient/wake-word/status`);
     if (!res.ok) {
       throw await parseError(res);
     }
@@ -1223,7 +1683,23 @@ export function createApiClient(config: ApiConfig) {
     return res.json();
   }
 
-  async function getClaimStats(): Promise<{ total: number; active: number; topics: number }> {
+  async function getClaimStats(): Promise<{
+    total: number;
+    active: number;
+    topics: number;
+    claims: Array<{
+      id: string;
+      text: string;
+      confidence: number;
+      source_ids: string[];
+      topic: string;
+      created_at: string;
+      updated_at: string;
+      reinforcement_count?: number;
+      contradiction_ids?: string[];
+      is_active?: boolean;
+    }>;
+  }> {
     const res = await fetch(`${baseUrl}/wiki/claims`);
     if (!res.ok) {
       throw await parseError(res);
@@ -1329,6 +1805,10 @@ export function createApiClient(config: ApiConfig) {
     return res.json();
   }
 
+  // Backward-compatible aliases used by existing screens.
+  const getWikiPages = listWikiPages;
+  const rebuildWiki = rebuildWikiFromMemories;
+
   async function deleteDocument(docId: string): Promise<{ status: string; doc_id: string }> {
     const res = await fetch(`${baseUrl}/documents/${docId}`, { method: "DELETE" });
     if (!res.ok) {
@@ -1381,6 +1861,282 @@ export function createApiClient(config: ApiConfig) {
     return res.json();
   }
 
+  // ── Deep Applications: Session Memory Forge ──────────────────────────────
+  async function getSessionForgeStatus(): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/deep/session-forge/status`);
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  async function triggerCrystallize(): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/deep/session-forge/crystallize`, { method: "POST" });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  async function triggerSummaryForge(payload?: SessionForgeSummaryPayload | string): Promise<Record<string, unknown>> {
+    const body =
+      typeof payload === "string"
+        ? { session_id: payload }
+        : {
+            session_id: payload?.sessionId,
+            window_days: payload?.windowDays,
+          };
+
+    const res = await fetch(`${baseUrl}/deep/session-forge/summary`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  async function triggerGapMapper(payload?: SessionForgeRunPayload | string): Promise<Record<string, unknown>> {
+    const body =
+      typeof payload === "string"
+        ? { session_id: payload }
+        : {
+            session_id: payload?.sessionId,
+            lookback_days: payload?.lookbackDays,
+          };
+
+    const res = await fetch(`${baseUrl}/deep/session-forge/gaps`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  async function triggerBeliefDetector(payload?: SessionForgeRunPayload | string): Promise<Record<string, unknown>> {
+    const body =
+      typeof payload === "string"
+        ? { session_id: payload }
+        : {
+            session_id: payload?.sessionId,
+            lookback_days: payload?.lookbackDays,
+          };
+
+    const res = await fetch(`${baseUrl}/deep/session-forge/beliefs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  async function getForgeArtifacts(artifactType: string): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/deep/session-forge/artifacts/${encodeURIComponent(artifactType)}`);
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  // ── Deep Applications: Life Chronicle ──────────────────────────────────
+  async function enableChroniclePassive(
+    consent: boolean = true,
+    consentActor: string = "mobile-user",
+  ): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/chronicle/passive/enable`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ consent, consent_actor: consentActor }),
+    });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  async function disableChroniclePassive(): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/chronicle/passive/disable`, { method: "POST" });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  async function getChroniclePassiveStatus(): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/chronicle/passive/status`);
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  async function addChronicleObservation(
+    observation: string | ChronicleObservationPayload,
+  ): Promise<Record<string, unknown>> {
+    const body =
+      typeof observation === "string"
+        ? { note: observation }
+        : {
+            note: observation.note || "",
+            location: observation.location || {},
+            people_present: observation.peoplePresent || [],
+            tags: observation.tags || [],
+            media_ref: observation.mediaRef || "",
+            source: observation.source || "passive_notification",
+            emotion_hint: observation.emotionHint || "",
+          };
+
+    const res = await fetch(`${baseUrl}/chronicle/passive/observe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  async function saveChronicleWindow(payload?: ChronicleSavePayload): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/chronicle/passive/save`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: payload?.title || "",
+        window_seconds: payload?.windowSeconds,
+        retrieval_hint: payload?.retrievalHint || "",
+        life_domain: payload?.lifeDomain || "everyday",
+      }),
+    });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  async function listChronicleMoments(): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/chronicle/moments`);
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  async function getChronicleMoment(memoryId: string): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/chronicle/moments/${encodeURIComponent(memoryId)}`);
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  // ── Scheduler ──────────────────────────────────────────────────────────
+  async function getSchedulerStatus(): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/agent/scheduler/status`);
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  async function enableScheduledAgent(agentId: string): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/agent/scheduler/${encodeURIComponent(agentId)}/enable`, { method: "POST" });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  async function disableScheduledAgent(agentId: string): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/agent/scheduler/${encodeURIComponent(agentId)}/disable`, { method: "POST" });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  // ── Cache Stats ────────────────────────────────────────────────────────
+  async function getCacheStats(): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/agent/cache/stats`);
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  // ── Memory Operations ──────────────────────────────────────────────────
+  async function consolidateMemories(): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/memories/consolidate`, { method: "POST" });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  async function createMemoryExtractionJob(payload?: {
+    limit?: number;
+    offset?: number;
+    dryRun?: boolean;
+  }): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/runtime/memory-extraction/jobs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        limit: payload?.limit ?? 500,
+        offset: payload?.offset ?? 0,
+        dry_run: payload?.dryRun ?? true,
+      }),
+    });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  async function listMemoryExtractionJobs(limit: number = 20): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/runtime/memory-extraction/jobs?limit=${limit}`);
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  async function getMemoryExtractionJob(jobId: string): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/runtime/memory-extraction/jobs/${encodeURIComponent(jobId)}`);
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  async function evaluateMemoryQuality(payload?: {
+    queries?: string[];
+    topK?: number;
+  }): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/runtime/memory-quality/evaluate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        queries: payload?.queries || [],
+        top_k: payload?.topK ?? 5,
+      }),
+    });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  async function getMemoryQualityHistory(limit: number = 50): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/runtime/memory-quality/history?limit=${limit}`);
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  // ── Feedback ───────────────────────────────────────────────────────────
+  async function submitFeedback(feedback: FeedbackPayload): Promise<Record<string, unknown>> {
+    const context = feedback.context || {};
+    const query = feedback.query || String(context.query || "");
+    const answer = feedback.answer || String(context.answer || "");
+    const rating =
+      typeof feedback.rating === "number"
+        ? feedback.rating
+        : Number(context.rating || 0);
+    const comment =
+      feedback.comment || feedback.content || String(context.comment || "");
+
+    const res = await fetch(`${baseUrl}/feedback`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query,
+        answer,
+        rating,
+        comment,
+        session_id: feedback.session_id || String(context.session_id || ""),
+      }),
+    });
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  async function getFeedbackStats(): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/feedback/stats`);
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
+  // ── System ─────────────────────────────────────────────────────────────
+  async function getGPUInfo(): Promise<Record<string, unknown>> {
+    const res = await fetch(`${baseUrl}/system/gpu`);
+    if (!res.ok) throw await parseError(res);
+    return res.json();
+  }
+
   return {
     getModelStatus,
     sendMessage,
@@ -1392,10 +2148,15 @@ export function createApiClient(config: ApiConfig) {
     getRuntimeProviders,
     setRuntimeProviders,
     getRuntimeHealth,
+    getRuntimeToolContracts,
+    getRuntimeInterfaces,
     getRuntimeSafetyPermissions,
     getRuntimeSafetyExecutorStatus,
+    getRuntimeSafetyAudit,
+    evaluateRuntimeSafetyOperation,
     resolveRuntimeSafetyPermission,
     getRuntimeTasks,
+    createRuntimeTask,
     getRuntimeTask,
     cancelRuntimeTask,
     subscribeRuntimeTaskEvents,
@@ -1405,6 +2166,13 @@ export function createApiClient(config: ApiConfig) {
     searchMemories,
     ingestMemory,
     deleteMemory,
+    purgeChatQueryMemories,
+    consolidateMemories,
+    createMemoryExtractionJob,
+    listMemoryExtractionJobs,
+    getMemoryExtractionJob,
+    evaluateMemoryQuality,
+    getMemoryQualityHistory,
     getGraphData,
     listDocuments,
     uploadDocument,
@@ -1423,10 +2191,17 @@ export function createApiClient(config: ApiConfig) {
     startAmbientLive,
     stopAmbientLive,
     getAmbientLiveStatus,
+    startAmbientClientSession,
+    stopAmbientClientSession,
+    getAmbientClientSessions,
+    processAmbientClientAudio,
     injectAmbientLiveAudio,
     getAmbientConfig,
     updateAmbientConfig,
     getVoiceProviders,
+    enableWakeWord,
+    disableWakeWord,
+    getWakeWordStatus,
     setSTTProvider,
     setTTSProvider,
     setSpeakerAlias,
@@ -1450,45 +2225,45 @@ export function createApiClient(config: ApiConfig) {
     followUpAgent,
     abortAgent,
     listAgentConfigs,
+    getSchedulerStatus,
+    enableScheduledAgent,
+    disableScheduledAgent,
+    getCacheStats,
+    getWikiPages,
     listWikiPages,
     getWikiPage,
     searchWiki,
     getClaimStats,
     searchClaims,
+    rebuildWiki,
     rebuildWikiFromMemories,
     getWikiLintLatest,
     runWikiLint,
     getWikiCompactionLatest,
     runWikiCompaction,
+    // Deep Applications
+    getSessionForgeStatus,
+    triggerCrystallize,
+    triggerSummaryForge,
+    triggerGapMapper,
+    triggerBeliefDetector,
+    getForgeArtifacts,
+    enableChroniclePassive,
+    disableChroniclePassive,
+    getChroniclePassiveStatus,
+    addChronicleObservation,
+    saveChronicleWindow,
+    listChronicleMoments,
+    getChronicleMoment,
+    // System / Feedback
+    submitFeedback,
+    getFeedbackStats,
+    getGPUInfo,
   };
 }
 
 export type ApiClient = ReturnType<typeof createApiClient>;
 
 export function getDefaultApiBaseUrl(): string {
-  const envBase =
-    typeof process !== "undefined"
-      ? process.env.EXPO_PUBLIC_API_BASE_URL || process.env.NEXT_PUBLIC_API_BASE_URL
-      : undefined;
-
-  const normalizedEnvBase = envBase?.trim() ? ensureApiPath(envBase.trim()) : undefined;
-
-  // In web builds, prefer same-host backend because 10.0.2.2 is Android-emulator only.
-  if (typeof window !== "undefined" && window.location?.hostname) {
-    if (normalizedEnvBase && !isAndroidEmulatorHost(normalizedEnvBase)) {
-      return normalizedEnvBase;
-    }
-
-    const protocol = window.location.protocol === "https:" ? "https:" : "http:";
-    const host = window.location.hostname;
-    return ensureApiPath(`${protocol}//${host}:8000`);
-  }
-
-  if (normalizedEnvBase) {
-    return normalizedEnvBase;
-  }
-
-  // Android emulator: use 10.0.2.2. iOS simulator can use localhost.
-  // For physical devices, set EXPO_PUBLIC_API_BASE_URL to your machine LAN IP.
-  return ensureApiPath("http://10.0.2.2:8000");
+  return getApiBaseCandidates()[0]?.url || CANONICAL_PRODUCTION_API_BASE;
 }

@@ -1,106 +1,70 @@
 /**
- * Badge — Neural Dark chip/badge component
- * Used for: type labels, status indicators, confidence chips
+ * Badge — Cortex Aurora status / label badges
  */
 import React from 'react';
 import { View, Text, StyleSheet, ViewStyle } from 'react-native';
-import { NEURAL, RADIUS, FONT_SIZE, FONT_WEIGHT } from '../../theme/colors';
+import { FONT_SIZE, FONT_WEIGHT, RADIUS } from '../../theme/colors';
 
-export type BadgeVariant =
-  | 'primary'
-  | 'secondary'
-  | 'success'
-  | 'warning'
-  | 'error'
-  | 'info'
-  | 'ghost'
-  | 'tertiary';
+export type BadgeVariant = 'default' | 'primary' | 'success' | 'warning' | 'error' | 'info' | 'violet';
 
 interface BadgeProps {
   label: string;
   variant?: BadgeVariant;
-  small?: boolean;
-  dot?: boolean;
+  size?: 'sm' | 'md';
   style?: ViewStyle;
+  dot?: boolean;
 }
 
-const BG: Record<BadgeVariant, string> = {
-  primary:   `${NEURAL.primary}26`,    // 15% opacity
-  secondary: `${NEURAL.secondary}26`,
-  success:   `${NEURAL.tertiary}26`,
-  warning:   '#f59e0b26',
-  error:     `${NEURAL.error}26`,
-  info:      `${NEURAL.primary}1a`,
-  ghost:     NEURAL.outlineVariant + '22',
-  tertiary:  `${NEURAL.tertiary}26`,
+const BADGE_CONFIG: Record<BadgeVariant, { bg: string; text: string; border: string; dot: string }> = {
+  default: { bg: '#f1f5f9', text: '#475569', border: '#e2e8f0', dot: '#94a3b8' },
+  primary: { bg: '#eef2ff', text: '#4338ca', border: '#c7d2fe', dot: '#6366f1' },
+  success: { bg: '#f0fdf4', text: '#065f46', border: '#bbf7d0', dot: '#10b981' },
+  warning: { bg: '#fffbeb', text: '#92400e', border: '#fde68a', dot: '#f59e0b' },
+  error:   { bg: '#fff1f2', text: '#9f1239', border: '#fecdd3', dot: '#f43f5e' },
+  info:    { bg: '#eff6ff', text: '#1e40af', border: '#bfdbfe', dot: '#3b82f6' },
+  violet:  { bg: '#f5f3ff', text: '#5b21b6', border: '#ddd6fe', dot: '#8b5cf6' },
 };
 
-const FG: Record<BadgeVariant, string> = {
-  primary:   NEURAL.primary,
-  secondary: NEURAL.secondary,
-  success:   NEURAL.tertiary,
-  warning:   '#f59e0b',
-  error:     NEURAL.error,
-  info:      NEURAL.primary,
-  ghost:     NEURAL.onSurfaceVariant,
-  tertiary:  NEURAL.tertiary,
-};
-
-const BORDER: Record<BadgeVariant, string> = {
-  primary:   `${NEURAL.primary}40`,
-  secondary: `${NEURAL.secondary}40`,
-  success:   `${NEURAL.tertiary}40`,
-  warning:   '#f59e0b40',
-  error:     `${NEURAL.error}40`,
-  info:      `${NEURAL.primary}30`,
-  ghost:     NEURAL.outlineVariant,
-  tertiary:  `${NEURAL.tertiaryDim}60`,
-};
-
-export function Badge({ label, variant = 'primary', small = false, dot = false, style }: BadgeProps) {
-  const fs = small ? FONT_SIZE.xs : FONT_SIZE.sm;
-  const px = small ? 8 : 10;
-  const py = small ? 2 : 4;
+export function Badge({ label, variant = 'default', size = 'sm', style, dot = false }: BadgeProps) {
+  const cfg = BADGE_CONFIG[variant];
+  const isSmall = size === 'sm';
 
   return (
-    <View
-      style={[
-        styles.base,
-        {
-          backgroundColor: BG[variant],
-          borderColor: BORDER[variant],
-          paddingHorizontal: px,
-          paddingVertical: py,
-        },
-        style,
-      ]}
-    >
-      {dot && (
-        <View
-          style={[styles.dot, { backgroundColor: FG[variant] }]}
-        />
-      )}
-      <Text style={[styles.label, { fontSize: fs, color: FG[variant] }]}>{label}</Text>
+    <View style={[
+      styles.badge,
+      {
+        backgroundColor: cfg.bg,
+        borderColor: cfg.border,
+        paddingHorizontal: isSmall ? 6 : 10,
+        paddingVertical: isSmall ? 2 : 4,
+      },
+      style,
+    ]}>
+      {dot && <View style={[styles.dot, { backgroundColor: cfg.dot }]} />}
+      <Text style={[
+        styles.text,
+        { color: cfg.text, fontSize: isSmall ? 10 : FONT_SIZE.xs },
+      ]}>
+        {label}
+      </Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  base: {
+  badge: {
     flexDirection: 'row',
     alignItems: 'center',
     borderRadius: RADIUS.full,
     borderWidth: 1,
-    alignSelf: 'flex-start',
+    gap: 4,
   },
   dot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    marginRight: 5,
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
   },
-  label: {
+  text: {
     fontWeight: FONT_WEIGHT.semibold,
-    letterSpacing: 0.2,
   },
 });

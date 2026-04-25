@@ -31,6 +31,7 @@ class MetadataStore:
         self.conn = None
         self._use_duckdb = False
         self._fallback: Dict[str, Dict] = {}  # memory_id -> dict
+        self._fallback_conversations: List[Dict[str, Any]] = []
         self._fallback_path = self._derive_fallback_path(db_path)
 
         if HAS_DUCKDB:
@@ -549,25 +550,51 @@ class MetadataStore:
     # ─── Conversation Storage ────────────────────────────────────────────
 
     def store_conversation_turn(self, session_id: str, role: str, content: str,
-                                 thinking: str = "", memory_id: str = None):
+                                 thinking: str = "", memory_id: str = None,
+                                 metadata: Optional[Dict[str, Any]] = None):
         """Store a conversation turn."""
         turn_id = f"{session_id}-{role}-{datetime.now().timestamp()}"
         if self._use_duckdb:
             self.conn.execute(
                 "INSERT INTO conversations VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 [turn_id, session_id, role, content, thinking, memory_id or "",
-                 datetime.now(), json.dumps({})]
+                 datetime.now(), json.dumps(metadata or {})]
             )
+            return
+
+        self._fallback_conversations.append({
+            "id": turn_id,
+            "session_id": session_id,
+            "role": role,
+            "content": content,
+            "thinking": thinking,
+            "memory_id": memory_id or "",
+            "timestamp": datetime.now().isoformat(),
+            "metadata": dict(metadata or {}),
+        })
+        self._save_fallback_to_disk()
 
     def get_conversation(self, session_id: str) -> List[Dict]:
         """Get all turns in a conversation."""
         if self._use_duckdb:
             rows = self.conn.execute(
-                "SELECT role, content, thinking, timestamp FROM conversations WHERE session_id = ? ORDER BY timestamp",
+                "SELECT role, content, thinking, timestamp, metadata FROM conversations WHERE session_id = ? ORDER BY timestamp",
                 [session_id]
             ).fetchall()
-            return [{"role": r[0], "content": r[1], "thinking": r[2], "timestamp": str(r[3])} for r in rows]
-        return []
+            return [{
+                "role": r[0],
+                "content": r[1],
+                "thinking": r[2],
+                "timestamp": str(r[3]),
+                "metadata": json.loads(r[4]) if isinstance(r[4], str) else (r[4] or {}),
+            } for r in rows]
+        rows = [
+            dict(row)
+            for row in self._fallback_conversations
+            if str(row.get("session_id", "")) == session_id
+        ]
+        rows.sort(key=lambda row: str(row.get("timestamp", "")))
+        return rows
 
     # ─── Entity Storage ──────────────────────────────────────────────────
 
@@ -677,6 +704,7 @@ class MetadataStore:
             }
         return {
             "memories": len(self._fallback),
+            "conversations": len(self._fallback_conversations),
             "backend": "in-memory",
         }
 
@@ -735,7 +763,29 @@ class MetadataStore:
         try:
             with open(self._fallback_path, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
-            if isinstance(loaded, dict):
+            if isinstance(loaded, dict) and (
+                "memories" in loaded or "conversations" in loaded
+            ):
+                raw_memories = loaded.get("memories", {})
+                raw_conversations = loaded.get("conversations", [])
+                if isinstance(raw_memories, dict):
+                    self._fallback = {
+                        str(mid): value
+                        for mid, value in raw_memories.items()
+                        if isinstance(value, dict)
+                    }
+                if isinstance(raw_conversations, list):
+                    self._fallback_conversations = [
+                        dict(item)
+                        for item in raw_conversations
+                        if isinstance(item, dict)
+                    ]
+                print(
+                    "  ✓ Metadata fallback loaded: "
+                    f"{len(self._fallback)} memories, "
+                    f"{len(self._fallback_conversations)} conversations"
+                )
+            elif isinstance(loaded, dict):
                 self._fallback = {
                     str(mid): value
                     for mid, value in loaded.items()
@@ -752,7 +802,14 @@ class MetadataStore:
             os.makedirs(os.path.dirname(self._fallback_path) if os.path.dirname(self._fallback_path) else ".", exist_ok=True)
             tmp_path = f"{self._fallback_path}.tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(self._fallback, f, ensure_ascii=False)
+                json.dump(
+                    {
+                        "memories": self._fallback,
+                        "conversations": self._fallback_conversations,
+                    },
+                    f,
+                    ensure_ascii=False,
+                )
             os.replace(tmp_path, self._fallback_path)
         except Exception as e:
             print(f"  ⚠ Failed to save metadata fallback: {e}")

@@ -390,6 +390,37 @@ export interface AmbientLiveStatus {
   last_error?: string | null;
 }
 
+export interface AmbientClientSessionInfo {
+  session_id: string;
+  mode: string;
+  start_time: string;
+  end_time?: string | null;
+  user_detected?: boolean;
+  metadata: Record<string, unknown>;
+  retention_summary: {
+    discarded: number;
+    session_only: number;
+    structured: number;
+    priority: number;
+  };
+  agent_tags: string[];
+}
+
+export interface AmbientRetentionTrace {
+  decision?: string;
+  memory_decision?: string;
+  archive_policy?: string;
+  reason?: string;
+  score?: number;
+  tags?: string[];
+  direct_address?: boolean;
+  retrieval_intent?: boolean;
+  reply_expected?: boolean;
+  source?: string;
+  platform?: string;
+  session_id?: string;
+}
+
 export interface VoiceProviders {
   stt_provider: VoiceProviderType;
   tts_provider: VoiceProviderType;
@@ -427,6 +458,12 @@ export interface AmbientState {
     traditional_tts: boolean;
   };
   live?: AmbientLiveStatus;
+  client_session?: {
+    active_session_id: string;
+    followup_until: number;
+    active_sessions: AmbientClientSessionInfo[];
+    sessions: AmbientClientSessionInfo[];
+  };
   vad?: {
     threshold: number;
     speech_active: boolean;
@@ -478,6 +515,9 @@ export interface AmbientConfig {
   energy_gate_threshold?: number;
   energy_min_speech_ms?: number;
   energy_silence_ms?: number;
+  assistant_name?: string;
+  assistant_aliases?: string[];
+  companion_followup_window_s?: number;
 }
 
 export interface ConversationTurn {
@@ -488,7 +528,9 @@ export interface ConversationTurn {
   confidence: number;
   speaker_confidence?: number;
   live_turn_id?: string;
-  retention_trace?: Record<string, unknown>;
+  session_id?: string;
+  source_platform?: string;
+  retention_trace?: AmbientRetentionTrace;
 }
 
 export interface ConversationRecord {
@@ -511,6 +553,40 @@ export interface VoiceQueryResult {
   stt_confidence: number;
   stt_provider?: VoiceProviderType;
   tts_provider?: VoiceProviderType;
+}
+
+export interface AmbientClientAudioResponse {
+  success: boolean;
+  session_id: string;
+  transcript: string;
+  analysis: {
+    direct_address: boolean;
+    retrieval_intent: boolean;
+    reply_expected: boolean;
+    followup_active?: boolean;
+    assistant_alias?: string;
+    query_text?: string;
+  };
+  retention_trace: {
+    decision: string;
+    memory_decision: string;
+    archive_policy?: string;
+    reason?: string;
+    score?: number;
+    tags: string[];
+    direct_address?: boolean;
+    retrieval_intent?: boolean;
+    reply_expected?: boolean;
+    source?: string;
+    platform?: string;
+    session_id?: string;
+  };
+  assistant_text: string;
+  assistant_audio_base64: string;
+  assistant_name?: string;
+  stt_confidence?: number;
+  language?: string;
+  session?: AmbientClientSessionInfo | null;
 }
 
 // ── Observability Analytics Types ───────────────────────────────
