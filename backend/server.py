@@ -1193,6 +1193,9 @@ class HealthResponse(BaseModel):
     graph_nodes: int = 0
     graph_edges: int = 0
     memories_backend: str = "unknown"
+    data_dir: str = ""
+    data_dir_source: str = ""
+    bundled_graph_seed_present: bool = False
 
 # ── RAG Schemas ──────────────────────────────────────────────────────────────
 
@@ -2507,6 +2510,16 @@ async def health():
         graph_nodes=graph_nodes,
         graph_edges=graph_edges,
         memories_backend=memories_backend,
+        data_dir=getattr(rag_engine, "data_dir", ""),
+        data_dir_source=getattr(rag_engine, "_data_dir_source", ""),
+        bundled_graph_seed_present=os.path.exists(
+            os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "data",
+                "graph",
+                "knowledge_graph.json",
+            )
+        ),
     )
 
 
