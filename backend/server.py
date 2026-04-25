@@ -67,6 +67,7 @@ from src.runtime.memory_personalization import (
     select_prompt_evidence,
 )
 from src.runtime.manual_memory_intake import prepare_manual_memory_session
+from src.runtime.session_manager import runtime_session_manager
 from src.runtime.task_manager import RuntimeTaskManager
 from src.runtime.event_bus import runtime_events
 from src.applications import session_memory_forge_service, life_chronicle_service
