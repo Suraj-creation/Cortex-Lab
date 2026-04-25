@@ -83,6 +83,12 @@ class _DummyGraph:
         return list(self._community_summaries)
 
 
+class _MissingGraphMethods:
+    """Simulates a retriever booted without a usable graph backend."""
+
+    pass
+
+
 def _build_memory(memory_id: str, content: str, **kwargs) -> CausalMemoryObject:
     return CausalMemoryObject(
         id=memory_id,
@@ -213,3 +219,25 @@ async def test_retrieve_pipeline_executes_raptor_and_community_channels(monkeypa
 
     assert "raptor" in seen_channels
     assert "community" in seen_channels
+
+
+@pytest.mark.asyncio
+async def test_graph_channels_gracefully_skip_when_graph_backend_is_missing():
+    memory = _build_memory("dense-1", "Fallback memory about retrieval stability.")
+    retriever = HybridRetriever(
+        _DummyEmbeddingModel(),
+        _DummyVectorStore(),
+        _DummyMetadataStore([memory]),
+        _MissingGraphMethods(),
+    )
+
+    query = MemoryQuery(
+        raw_query="What happened to Cortex retrieval quality?",
+        entities=["Cortex"],
+    )
+
+    graph_results = await retriever._graph_retrieve(query, top_k=5)
+    community_results = await retriever._community_retrieve(query, top_k=5)
+
+    assert graph_results == []
+    assert community_results == []

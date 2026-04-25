@@ -834,6 +834,30 @@ class CortexRAGEngine:
         if self.hybrid_retriever:
             self.hybrid_retriever.invalidate_caches()
 
+        # Keep the personal wiki and claim store in sync for durable,
+        # user-authored memories without waiting for a separate rebuild job.
+        materialization_sources = {
+            "manual",
+            "manual_memory",
+            "document_memory",
+            "pageindex_document",
+            "ambient",
+            "ambient_capture",
+            "client_companion",
+            "assistant_companion",
+            "voice",
+            "api",
+            "test",
+        }
+        source_key = str(source or "manual").strip().lower()
+        if source_key in materialization_sources:
+            try:
+                from src.wiki.materializer import materialize_memory_into_wiki
+
+                materialize_memory_into_wiki(memory)
+            except Exception as wiki_error:
+                print(f"  ⚠ Wiki materialization skipped for {source_key}: {wiki_error}")
+
         # Persist immediately so manual memories survive restarts.
         if self.metadata_store:
             self.metadata_store.flush()

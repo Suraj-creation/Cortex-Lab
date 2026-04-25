@@ -11,6 +11,9 @@ import {
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import * as DocumentPicker from 'expo-document-picker';
+import { useFonts } from 'expo-font';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { File as DeviceFile } from 'expo-file-system';
 import {
   createDownloadResumable,
   documentDirectory,
@@ -29,6 +32,7 @@ import {
 } from './shared/core/api';
 import type {
   AmbientConfig,
+  AmbientClientAudioResponse,
   AmbientClientSessionInfo,
   AmbientLiveStatus,
   AmbientRetentionTrace,
@@ -45,11 +49,13 @@ import type {
   RAGStats,
   AmbientState,
   LivePipelineEvent,
+  LocalMemoryJournalEntry,
   LLMProviderType,
   VoiceProviders,
 } from './shared/core/types';
 import { DEFAULT_SETTINGS } from './shared/core/types';
 import {
+  getMemoryJournal,
   getAllConversations,
   getConversation,
   getCurrentConversationId,
@@ -58,6 +64,7 @@ import {
   getOnboardingCompleted,
   initializeStorage,
   loadChatSettings,
+  prependMemoryJournalEntry,
   saveModelpackInstalls,
   saveChatSettings,
   saveConversation,
@@ -115,6 +122,40 @@ function inferTitle(messages: ChatMessage[]): string {
   if (!first) return 'New Chat';
   const raw = first.content.trim();
   return raw.length > 40 ? `${raw.slice(0, 40)}…` : raw;
+}
+
+function buildMemoryJournalEntry(params: {
+  kind: LocalMemoryJournalEntry['kind'];
+  source: string;
+  preview: string;
+  tags?: string[];
+  sessionId?: string;
+  memoryId?: string;
+  filename?: string;
+  note?: string;
+  status?: LocalMemoryJournalEntry['status'];
+}): LocalMemoryJournalEntry {
+  const title =
+    params.kind === 'document'
+      ? params.filename || 'Document memory'
+      : params.kind === 'ambient'
+        ? 'Ambient capture'
+        : 'Manual memory';
+
+  return {
+    id: `${params.kind}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    kind: params.kind,
+    title,
+    preview: params.preview.trim().slice(0, 280),
+    source: params.source,
+    createdAt: Date.now(),
+    status: params.status || 'synced',
+    tags: (params.tags || []).slice(0, 6),
+    sessionId: params.sessionId,
+    memoryId: params.memoryId,
+    filename: params.filename,
+    note: params.note,
+  };
 }
 
 interface ConvSummary { id: string; title: string; timestamp: number; }
@@ -234,6 +275,7 @@ function AppContent() {
   const [memorySearch, setMemorySearch] = useState('');
   const [memoryDraft, setMemoryDraft] = useState('');
   const [memoryBusy, setMemoryBusy] = useState(false);
+  const [memoryJournal, setMemoryJournal] = useState<LocalMemoryJournalEntry[]>([]);
   const [lastMemoryRetention, setLastMemoryRetention] = useState<AmbientRetentionTrace | null>(null);
   const [lastMemorySession, setLastMemorySession] = useState<AmbientClientSessionInfo | null>(null);
   const [lastMemoryDocument, setLastMemoryDocument] = useState('');
@@ -278,6 +320,11 @@ function AppContent() {
   }, [api]);
 
   useEffect(() => { messagesRef.current = messages; }, [messages]);
+
+  const recordMemoryJournal = useCallback(async (entry: LocalMemoryJournalEntry) => {
+    const next = await prependMemoryJournalEntry(entry);
+    setMemoryJournal(next);
+  }, []);
 
   const refreshModelStatus = useCallback(async (client: ApiClient = apiRef.current) => {
     try {
@@ -376,9 +423,11 @@ function AppContent() {
         await initializeStorage();
         const ls = await loadChatSettings();
         const savedModelpacks = await loadModelpackInstalls();
+        const savedMemoryJournal = await getMemoryJournal();
         if (mounted) {
           setSettings(ls);
           setModelpackInstalls(savedModelpacks);
+          setMemoryJournal(savedMemoryJournal);
         }
 
         const onboardingCompleted = await getOnboardingCompleted();
@@ -561,6 +610,36 @@ function AppContent() {
     finally { setLoadingView(false); }
   }, [api]);
 
+  const handleAmbientCaptureStored = useCallback(async (response: AmbientClientAudioResponse) => {
+    const transcript = response.transcript?.trim();
+    const decision = String(response.retention_trace?.memory_decision || 'session_only').toLowerCase();
+
+    if (!transcript) {
+      return;
+    }
+
+    if (!['session_only', 'structured', 'priority'].includes(decision)) {
+      return;
+    }
+
+    await recordMemoryJournal(
+      buildMemoryJournalEntry({
+        kind: 'ambient',
+        source: 'ambient_client_companion',
+        preview: transcript,
+        tags: response.retention_trace?.tags || [],
+        sessionId: response.session?.session_id || response.session_id,
+        note: response.assistant_text?.trim()
+          ? `Reply: ${response.assistant_text.trim().slice(0, 140)}`
+          : 'Captured by the ambient companion and mirrored to device storage.',
+      }),
+    );
+
+    if (decision === 'structured' || decision === 'priority') {
+      void loadMemories();
+    }
+  }, [loadMemories, recordMemoryJournal]);
+
   const searchMemories = useCallback(async () => {
     if (!memorySearch.trim()) { await loadMemories(); return; }
     setMemoryBusy(true);
@@ -570,27 +649,49 @@ function AppContent() {
   }, [api, loadMemories, memorySearch]);
 
   const addMemory = useCallback(async () => {
-    if (!memoryDraft.trim()) return;
+    const draft = memoryDraft.trim();
+    if (!draft) return;
     setMemoryBusy(true);
     try {
       const result = await api.ingestMemory(
-        memoryDraft.trim(),
+        draft,
         'manual_memory',
         {
           platform: Platform.OS,
           forceKeep: true,
         },
       );
+      if (result.status !== 'ok' || !result.memory?.id) {
+        throw new Error(
+          result.status === 'pending_approval'
+            ? 'This memory intake is waiting for backend approval before it can be stored.'
+            : 'The backend did not return a stored memory for this intake.',
+        );
+      }
       setLastMemoryRetention(result.retention_trace || null);
       setLastMemorySession(result.session || null);
       setLastMemoryDocument('');
       setMemoryDraft('');
-      await loadMemories();
+      setMemories((prev) => {
+        const next = [result.memory, ...prev.filter((item) => item.id !== result.memory.id)];
+        return next.slice(0, 80);
+      });
+      await recordMemoryJournal(
+        buildMemoryJournalEntry({
+          kind: 'manual',
+          source: result.memory.source || 'manual_memory',
+          preview: result.memory.content || draft,
+          tags: result.retention_trace?.tags || [],
+          sessionId: result.session?.session_id || result.session_id,
+          memoryId: result.memory.id,
+          note: 'Stored through the manual intake pipeline.',
+        }),
+      );
       setGlobalError('');
     }
     catch (e) { setGlobalError(e instanceof Error ? e.message : String(e)); }
     finally { setMemoryBusy(false); }
-  }, [api, loadMemories, memoryDraft]);
+  }, [api, memoryDraft, recordMemoryJournal]);
 
   const removeMemory = useCallback(async (id: string) => {
     setMemoryBusy(true);
@@ -735,34 +836,99 @@ function AppContent() {
   const uploadDocument = useCallback(async (surface: 'documents' | 'memory' = 'documents') => {
     try {
       setDocumentsBusy(true);
-      const picked = await DocumentPicker.getDocumentAsync({ type: 'application/pdf', copyToCacheDirectory: true, multiple: false });
+      const pickerTypes =
+        surface === 'memory'
+          ? ['application/pdf', 'text/plain', 'text/markdown', 'application/json', 'text/csv']
+          : ['application/pdf'];
+      const picked = await DocumentPicker.getDocumentAsync({
+        type: pickerTypes,
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
       if (picked.canceled || picked.assets.length === 0) return;
-      const asset = picked.assets[0] as DocumentPicker.DocumentPickerAsset & { file?: Blob };
-      const form = new FormData();
-      if (asset.file) form.append('file', asset.file, asset.name || 'document.pdf');
-      else form.append('file', { uri: asset.uri, name: asset.name || 'document.pdf', type: 'application/pdf' } as unknown as Blob);
-      const uploaded = await api.uploadDocument(form);
+      const asset = picked.assets[0] as DocumentPicker.DocumentPickerAsset & { file?: Blob; mimeType?: string };
+      const filename = asset.name || 'document';
+      const lowerName = filename.toLowerCase();
+      const isPdf = lowerName.endsWith('.pdf') || asset.mimeType === 'application/pdf';
 
-      if (surface === 'memory') {
+      if (surface === 'memory' && !isPdf) {
+        const localFile = new DeviceFile(asset.uri);
+        const rawText = (await localFile.text()).replace(/\u0000/g, '').trim();
+        if (!rawText || rawText.length < 8) {
+          throw new Error('This file could not be read as text on mobile yet. Use PDF, TXT, Markdown, JSON, or CSV for memory intake.');
+        }
+
         const intake = await api.ingestMemory(
-          `Uploaded document "${uploaded.filename || asset.name || 'document.pdf'}" into PageIndex for long-term retrieval and memory refinement.`,
-          'pageindex_document',
+          `Document memory from ${filename}\n\n${rawText.slice(0, 12000)}`,
+          'document_memory',
           {
             platform: Platform.OS,
             forceKeep: true,
           },
         );
+        if (intake.status !== 'ok' || !intake.memory?.id) {
+          throw new Error('The backend accepted the file but did not return a stored document memory.');
+        }
+
         setLastMemoryRetention(intake.retention_trace || null);
         setLastMemorySession(intake.session || null);
-        setLastMemoryDocument(uploaded.filename || asset.name || 'document.pdf');
-        await loadMemories();
-      }
+        setLastMemoryDocument(filename);
+        setMemories((prev) => [intake.memory, ...prev.filter((item) => item.id !== intake.memory.id)].slice(0, 80));
+        await recordMemoryJournal(
+          buildMemoryJournalEntry({
+            kind: 'document',
+            source: intake.memory.source || 'document_memory',
+            preview: rawText,
+            tags: intake.retention_trace?.tags || [],
+            sessionId: intake.session?.session_id || intake.session_id,
+            memoryId: intake.memory.id,
+            filename,
+            note: 'Parsed on-device as text and stored through the memory intake pipeline.',
+          }),
+        );
+      } else {
+        const form = new FormData();
+        if (asset.file) form.append('file', asset.file, filename);
+        else form.append('file', { uri: asset.uri, name: filename, type: 'application/pdf' } as unknown as Blob);
+        const uploaded = await api.uploadDocument(form);
 
-      await loadDocuments();
+        if (surface === 'memory') {
+          const intake = await api.ingestMemory(
+            `Uploaded document "${uploaded.filename || filename}" into PageIndex for long-term retrieval and memory refinement.`,
+            'pageindex_document',
+            {
+              platform: Platform.OS,
+              forceKeep: true,
+            },
+          );
+          if (intake.status !== 'ok' || !intake.memory?.id) {
+            throw new Error('The PDF upload completed, but the backend did not return a stored memory receipt.');
+          }
+
+          setLastMemoryRetention(intake.retention_trace || null);
+          setLastMemorySession(intake.session || null);
+          setLastMemoryDocument(uploaded.filename || filename);
+          setMemories((prev) => [intake.memory, ...prev.filter((item) => item.id !== intake.memory.id)].slice(0, 80));
+          await recordMemoryJournal(
+            buildMemoryJournalEntry({
+              kind: 'document',
+              source: intake.memory.source || 'pageindex_document',
+              preview: `PDF ${uploaded.filename || filename} indexed for retrieval and memory refinement.`,
+              tags: intake.retention_trace?.tags || [],
+              sessionId: intake.session?.session_id || intake.session_id,
+              memoryId: intake.memory.id,
+              filename: uploaded.filename || filename,
+              note: 'Sent to PageIndex and mirrored into the memory journal.',
+            }),
+          );
+        }
+
+        await loadDocuments();
+      }
       setGlobalError('');
     } catch (e) { setGlobalError(e instanceof Error ? e.message : String(e)); }
     finally { setDocumentsBusy(false); }
-  }, [api, loadDocuments, loadMemories]);
+  }, [api, loadDocuments, recordMemoryJournal]);
 
   const installModelpack = useCallback(async (pack: ModelpackEntry) => {
     if (Platform.OS === 'web') {
@@ -1013,6 +1179,7 @@ function AppContent() {
           {activeView === 'memories' && (
             <MemoryScreen
               memories={memories}
+              memoryJournal={memoryJournal}
               memorySearch={memorySearch}
               setMemorySearch={setMemorySearch}
               memoryDraft={memoryDraft}
@@ -1065,6 +1232,9 @@ function AppContent() {
               onStopListening={() => runAmbientLiveAction('stop')}
               onPauseAmbient={() => runAmbientAction('pause')}
               onResumeAmbient={() => runAmbientAction('resume')}
+              onSetVoiceProvider={setAmbientProvider}
+              onAmbientCaptureStored={handleAmbientCaptureStored}
+              ambientBusy={ambientBusy}
               api={api}
             />
           )}
@@ -1109,6 +1279,12 @@ function AppContent() {
 }
 
 export default function App() {
+  const [fontsLoaded] = useFonts(MaterialCommunityIcons.font);
+
+  if (!fontsLoaded) {
+    return null;
+  }
+
   return (
     <SafeAreaProvider>
       <NetworkProvider>

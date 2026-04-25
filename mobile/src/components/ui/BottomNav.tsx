@@ -64,11 +64,13 @@ export function BottomNav({ items, activeKey, onSelect }: BottomNavProps) {
               accessibilityRole="button"
               accessibilityLabel={item.label}
             >
-              <AppIcon
-                name={item.iconName}
-                size={20}
-                color={isActive ? '#6366f1' : '#94a3b8'}
-              />
+              <View style={[styles.tabIconWrap, isActive && styles.tabIconWrapActive]}>
+                <AppIcon
+                  name={item.iconName}
+                  size={20}
+                  color={isActive ? '#4f5fe2' : '#7f8aa4'}
+                />
+              </View>
               <Text style={[styles.label, isActive && styles.labelActive]}>
                 {item.label}
               </Text>
@@ -85,11 +87,13 @@ export function BottomNav({ items, activeKey, onSelect }: BottomNavProps) {
           accessibilityRole="button"
           accessibilityLabel="More options"
         >
-          <AppIcon
-            name="dots-horizontal"
-            size={20}
-            color={isMoreActive ? '#6366f1' : '#94a3b8'}
-          />
+          <View style={[styles.tabIconWrap, isMoreActive && styles.tabIconWrapActive]}>
+            <AppIcon
+              name="dots-horizontal"
+              size={20}
+              color={isMoreActive ? '#4f5fe2' : '#7f8aa4'}
+            />
+          </View>
           <Text style={[styles.label, isMoreActive && styles.labelActive]}>
             More
           </Text>
@@ -148,28 +152,47 @@ export function BottomNav({ items, activeKey, onSelect }: BottomNavProps) {
 const styles = StyleSheet.create({
   container: {
     flexDirection: 'row',
-    backgroundColor: '#ffffff',
-    paddingBottom: Platform.OS === 'ios' ? 0 : SPACING.sm,
-    paddingTop: SPACING.xs,
-    borderTopWidth: 1,
-    borderTopColor: '#f1f5f9',
-    ...SHADOWS.sm,
+    backgroundColor: '#e9eef8',
+    paddingHorizontal: SPACING.md,
+    paddingBottom: Platform.OS === 'ios' ? SPACING.xs : SPACING.sm,
+    paddingTop: SPACING.sm,
+    gap: SPACING.xs,
   },
   tab: {
     flex: 1,
     alignItems: 'center',
     paddingVertical: SPACING.sm,
+    borderRadius: RADIUS['2xl'],
     position: 'relative',
   },
-  tabActive: {},
+  tabActive: {
+    backgroundColor: '#edf2fb',
+    borderWidth: 1,
+    borderColor: '#ffffff',
+    ...SHADOWS.md,
+  },
+  tabIconWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: 14,
+    backgroundColor: '#edf2fb',
+    borderWidth: 1,
+    borderColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...SHADOWS.md,
+  },
+  tabIconWrapActive: {
+    backgroundColor: '#eef1ff',
+  },
   label: {
     fontSize: 10,
-    color: '#94a3b8',
+    color: '#7f8aa4',
     fontWeight: FONT_WEIGHT.medium,
-    marginTop: 2,
+    marginTop: 4,
   },
   labelActive: {
-    color: '#6366f1',
+    color: '#4f5fe2',
     fontWeight: FONT_WEIGHT.bold,
   },
   indicator: {
@@ -190,7 +213,7 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
   },
   moreSheet: {
-    backgroundColor: '#ffffff',
+    backgroundColor: '#e9eef8',
     borderTopLeftRadius: RADIUS['3xl'],
     borderTopRightRadius: RADIUS['3xl'],
     paddingTop: SPACING.md,
@@ -225,19 +248,24 @@ const styles = StyleSheet.create({
     marginBottom: SPACING.xs,
   },
   moreItemActive: {
-    backgroundColor: '#eef2ff',
+    backgroundColor: '#edf2fb',
+    borderWidth: 1,
+    borderColor: '#ffffff',
   },
   moreIconContainer: {
     width: 40,
     height: 40,
     borderRadius: RADIUS.lg,
-    backgroundColor: '#f1f5f9',
+    backgroundColor: '#edf2fb',
+    borderWidth: 1,
+    borderColor: '#ffffff',
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: SPACING.md,
+    ...SHADOWS.md,
   },
   moreIconContainerActive: {
-    backgroundColor: '#e0e7ff',
+    backgroundColor: '#eef1ff',
   },
   moreLabel: {
     fontSize: FONT_SIZE.md,

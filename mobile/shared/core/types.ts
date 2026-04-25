@@ -159,6 +159,35 @@ export interface MemoryObject {
   score?: number;
 }
 
+export type LocalIntakeStatus = "synced" | "pending" | "error";
+
+export interface LocalMemoryJournalEntry {
+  id: string;
+  kind: "manual" | "document" | "ambient";
+  title: string;
+  preview: string;
+  source: string;
+  createdAt: number;
+  status: LocalIntakeStatus;
+  tags: string[];
+  sessionId?: string;
+  memoryId?: string;
+  filename?: string;
+  note?: string;
+}
+
+export interface LocalAmbientCaptureEntry {
+  id: string;
+  sessionId: string;
+  transcript: string;
+  assistantReply: string;
+  createdAt: number;
+  retentionDecision: string;
+  tags: string[];
+  sourcePlatform?: string;
+  chunkCount?: number;
+}
+
 export interface GraphData {
   nodes: GraphNode[];
   edges: GraphEdge[];

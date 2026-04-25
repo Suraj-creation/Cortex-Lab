@@ -378,20 +378,28 @@ class HybridRetriever:
     async def _graph_retrieve(self, query: MemoryQuery, top_k: int) -> List[Tuple[str, float]]:
         """Knowledge graph traversal."""
         results = []
+        graph_backend = self.graph
 
-        if not query.entities:
+        if (
+            not query.entities
+            or graph_backend is None
+            or not hasattr(graph_backend, "find_entity_by_name")
+            or not hasattr(graph_backend, "get_entity_memories")
+            or not hasattr(graph_backend, "get_neighbors")
+            or not hasattr(graph_backend, "get_causal_chain")
+        ):
             return results
 
         for entity_name in query.entities:
-            entity_id = self.graph.find_entity_by_name(entity_name)
+            entity_id = graph_backend.find_entity_by_name(entity_name)
             if entity_id:
                 # Get entity's memories
-                memory_ids = self.graph.get_entity_memories(entity_id)
+                memory_ids = graph_backend.get_entity_memories(entity_id)
                 for mid in memory_ids:
                     results.append((mid, 0.8))
 
                 # Get neighbors' memories (2-hop)
-                neighbors = self.graph.get_neighbors(entity_id, max_hops=2)
+                neighbors = graph_backend.get_neighbors(entity_id, max_hops=2)
                 for neighbor in neighbors:
                     n_mids = neighbor.get("memory_ids", [])
                     hop_discount = 1.0 / (neighbor.get("hop_distance", 1) + 1)
@@ -401,9 +409,9 @@ class HybridRetriever:
         # For causal queries, also trace causal chains
         if query.intent == QueryIntent.CAUSAL:
             for entity_name in query.entities:
-                entity_id = self.graph.find_entity_by_name(entity_name)
+                entity_id = graph_backend.find_entity_by_name(entity_name)
                 if entity_id:
-                    chain = self.graph.get_causal_chain(entity_id, direction="backward")
+                    chain = graph_backend.get_causal_chain(entity_id, direction="backward")
                     for node in chain:
                         for mid in node.get("memory_ids", []):
                             results.append((mid, 0.9))
@@ -564,8 +572,12 @@ class HybridRetriever:
         Communities are coarse topical clusters. This channel maps the query to
         relevant clusters and returns member memory IDs with graded relevance.
         """
+        graph_backend = self.graph
+        if graph_backend is None or not hasattr(graph_backend, "get_community_summaries"):
+            return []
+
         try:
-            communities = self.graph.get_community_summaries()
+            communities = graph_backend.get_community_summaries()
         except Exception:
             return []
 

@@ -50,30 +50,34 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   default: {
-    backgroundColor: '#ffffff',
+    backgroundColor: '#edf2fb',
     borderWidth: 1,
-    borderColor: '#f1f5f9',
-    ...SHADOWS.sm,
-  },
-  elevated: {
-    backgroundColor: '#ffffff',
+    borderColor: '#ffffff',
     ...SHADOWS.lg,
   },
-  outlined: {
-    backgroundColor: '#ffffff',
+  elevated: {
+    backgroundColor: '#eef3fb',
     borderWidth: 1,
-    borderColor: '#e2e8f0',
+    borderColor: '#ffffff',
+    ...SHADOWS.xl,
+  },
+  outlined: {
+    backgroundColor: '#edf2fb',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.94)',
+    ...SHADOWS.md,
   },
   glass: {
-    backgroundColor: 'rgba(255, 255, 255, 0.75)',
+    backgroundColor: 'rgba(245, 248, 255, 0.82)',
     borderWidth: 1,
-    borderColor: 'rgba(241, 245, 249, 0.8)',
-    ...SHADOWS.sm,
+    borderColor: 'rgba(255, 255, 255, 0.92)',
+    ...SHADOWS.md,
   },
   accent: {
-    backgroundColor: '#eef2ff',
+    backgroundColor: '#e7edff',
     borderWidth: 1,
-    borderColor: '#c7d2fe',
+    borderColor: '#ffffff',
+    ...SHADOWS.lg,
   },
   leftAccentBase: {
     paddingLeft: 14,

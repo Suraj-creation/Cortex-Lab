@@ -93,12 +93,13 @@ const styles = StyleSheet.create({
   container: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#f8fafc',
+    backgroundColor: '#edf2fb',
     borderRadius: RADIUS.xl,
     paddingHorizontal: 14,
     paddingVertical: 10,
     borderWidth: 1,
-    borderColor: '#e2e8f0',
+    borderColor: '#ffffff',
+    ...SHADOWS.md,
   },
   pill: {
     borderRadius: RADIUS.full,
@@ -109,7 +110,7 @@ const styles = StyleSheet.create({
   },
   focused: {
     borderColor: '#6366f1',
-    backgroundColor: '#ffffff',
+    backgroundColor: '#f8fbff',
     ...SHADOWS.glow,
   },
   errorBorder: {
@@ -135,7 +136,7 @@ const styles = StyleSheet.create({
   clearButton: {
     marginLeft: 8,
     padding: 4,
-    backgroundColor: '#e2e8f0',
+    backgroundColor: '#ffffff',
     borderRadius: 10,
     width: 20,
     height: 20,

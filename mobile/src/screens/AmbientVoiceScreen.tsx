@@ -37,8 +37,13 @@ import type {
   AmbientState,
   ConversationRecord,
   ConversationTurn,
+  LocalAmbientCaptureEntry,
   VoiceProviders,
 } from '../../shared/core/types';
+import {
+  getAmbientCaptureJournal,
+  prependAmbientCaptureEntry,
+} from '../../shared/core/storage';
 
 type AmbientTab = 'live' | 'conversations' | 'settings';
 type CompanionMode = 'idle' | 'requesting' | 'listening' | 'processing' | 'speaking' | 'error';
@@ -57,6 +62,14 @@ function inferMimeType(uri: string): string {
   return 'audio/mp4';
 }
 
+function formatCaptureAge(createdAt: number): string {
+  const ageMinutes = Math.max(1, Math.round((Date.now() - createdAt) / 60000));
+  if (ageMinutes < 60) return `${ageMinutes}m ago`;
+  const ageHours = Math.round(ageMinutes / 60);
+  if (ageHours < 24) return `${ageHours}h ago`;
+  return `${Math.round(ageHours / 24)}d ago`;
+}
+
 interface AmbientVoiceScreenProps {
   ambientState: AmbientState | null;
   ambientConfig: AmbientConfig | null;
@@ -66,6 +79,9 @@ interface AmbientVoiceScreenProps {
   onStopListening: () => void;
   onPauseAmbient: () => void;
   onResumeAmbient: () => void;
+  onSetVoiceProvider: (kind: 'stt' | 'tts', provider: 'traditional' | 'local' | 'gemini') => void;
+  onAmbientCaptureStored?: (response: AmbientClientAudioResponse) => void | Promise<void>;
+  ambientBusy?: boolean;
   api: any;
 }
 
@@ -74,10 +90,13 @@ export function AmbientVoiceScreen({
   ambientConfig,
   ambientLiveStatus,
   voiceProviders,
-  onStartListening: _onStartListening,
-  onStopListening: _onStopListening,
-  onPauseAmbient: _onPauseAmbient,
-  onResumeAmbient: _onResumeAmbient,
+  onStartListening,
+  onStopListening,
+  onPauseAmbient,
+  onResumeAmbient,
+  onSetVoiceProvider,
+  onAmbientCaptureStored,
+  ambientBusy = false,
   api,
 }: AmbientVoiceScreenProps) {
   const [activeTab, setActiveTab] = useState<AmbientTab>('live');
@@ -95,6 +114,10 @@ export function AmbientVoiceScreen({
   const [followupWindowDraft, setFollowupWindowDraft] = useState('45');
   const [savingCompanionSettings, setSavingCompanionSettings] = useState(false);
   const [companionSettingsMessage, setCompanionSettingsMessage] = useState('');
+  const [localCaptures, setLocalCaptures] = useState<LocalAmbientCaptureEntry[]>([]);
+  const [ttsDraft, setTtsDraft] = useState('Eva, give me a quick voice systems check.');
+  const [ttsTestBusy, setTtsTestBusy] = useState(false);
+  const [ttsTestMessage, setTtsTestMessage] = useState('');
 
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const recorderState = useAudioRecorderState(recorder, 250);
@@ -124,6 +147,11 @@ export function AmbientVoiceScreen({
     } catch {}
   }, [api]);
 
+  const appendLocalCapture = useCallback(async (entry: LocalAmbientCaptureEntry) => {
+    await prependAmbientCaptureEntry(entry);
+    setLocalCaptures((prev) => [entry, ...prev.filter((item) => item.id !== entry.id)].slice(0, 60));
+  }, []);
+
   const tabs: { key: AmbientTab; label: string; icon: string }[] = [
     { key: 'live', label: 'Live', icon: 'microphone-outline' },
     { key: 'conversations', label: 'History', icon: 'history' },
@@ -143,6 +171,19 @@ export function AmbientVoiceScreen({
     ambientConfig?.assistant_name,
     ambientConfig?.companion_followup_window_s,
   ]);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const cached = await getAmbientCaptureJournal();
+      if (mounted) {
+        setLocalCaptures(cached);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -188,7 +229,44 @@ export function AmbientVoiceScreen({
 
       player.remove();
       playerRef.current = null;
+      setCompanionMode(loopActiveRef.current ? 'listening' : 'idle');
     } catch {}
+  }, []);
+
+  const playAudioBytes = useCallback(async (bytes: Uint8Array, extension: string = 'wav') => {
+    if (!bytes || bytes.length === 0) return;
+
+    try {
+      const file = new File(Paths.cache, `ambient-preview-${Date.now()}.${extension}`);
+      file.write(bytes);
+
+      playerRef.current?.remove();
+      const player = createAudioPlayer({ uri: file.uri }, { updateInterval: 200 });
+      playerRef.current = player;
+      setCompanionMode('speaking');
+      player.play();
+
+      await new Promise<void>((resolve) => {
+        const startedAt = Date.now();
+        const interval = setInterval(() => {
+          if (!player.playing && player.currentTime > 0) {
+            clearInterval(interval);
+            resolve();
+            return;
+          }
+          if (Date.now() - startedAt > 20000) {
+            clearInterval(interval);
+            resolve();
+          }
+        }, 180);
+      });
+
+      player.remove();
+      playerRef.current = null;
+      setCompanionMode(loopActiveRef.current ? 'listening' : 'idle');
+    } catch (error) {
+      setTtsTestMessage(error instanceof Error ? error.message : String(error));
+    }
   }, []);
 
   const processRecordedChunk = useCallback(async (recordingUri: string, durationMs: number) => {
@@ -214,8 +292,27 @@ export function AmbientVoiceScreen({
     setLastTranscript(response.transcript || '');
     setLastAssistantReply(response.assistant_text || '');
     setLastRetention(response.retention_trace || null);
+    setCompanionError('');
     if (response.session_id && response.session_id !== activeSessionId) {
       setClientSessionId(response.session_id);
+    }
+
+    if (response.transcript?.trim()) {
+      await appendLocalCapture({
+        id: `ambient-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        sessionId: response.session?.session_id || response.session_id || activeSessionId,
+        transcript: response.transcript.trim(),
+        assistantReply: String(response.assistant_text || '').trim(),
+        createdAt: Date.now(),
+        retentionDecision:
+          response.retention_trace?.memory_decision ||
+          response.retention_trace?.decision ||
+          'session_only',
+        tags: response.retention_trace?.tags || [],
+        sourcePlatform: 'mobile',
+        chunkCount: capturedChunks + 1,
+      });
+      await onAmbientCaptureStored?.(response);
     }
 
     await refreshAmbientViews();
@@ -223,26 +320,24 @@ export function AmbientVoiceScreen({
     if (response.assistant_audio_base64) {
       await playAssistantAudio(response.assistant_audio_base64);
     }
-  }, [api, playAssistantAudio, refreshAmbientViews]);
+  }, [api, appendLocalCapture, capturedChunks, onAmbientCaptureStored, playAssistantAudio, refreshAmbientViews]);
 
   const recordingLoop = useCallback(async () => {
     while (loopActiveRef.current) {
       try {
         setCompanionMode('listening');
         await recorder.prepareToRecordAsync();
-        recorder.record();
+        recorder.record({ forDuration: MOBILE_CAPTURE_MS / 1000 });
 
         const startedAt = Date.now();
-        await wait(MOBILE_CAPTURE_MS);
-        if (!recorderState.isRecording) {
-          await wait(120);
-        }
-        if (recorder.getStatus().isRecording) {
+        await wait(MOBILE_CAPTURE_MS + 260);
+        const status = recorder.getStatus();
+        if (status.isRecording) {
           await recorder.stop();
         }
 
         const durationMs = Math.max(Date.now() - startedAt, 1);
-        const recordedUri = recorder.uri || recorder.getStatus().url || '';
+        const recordedUri = recorder.uri || status.url || '';
         if (recordedUri && loopActiveRef.current) {
           setCompanionMode('processing');
           await processRecordedChunk(recordedUri, durationMs);
@@ -257,7 +352,7 @@ export function AmbientVoiceScreen({
     if (loopActiveRef.current) {
       setCompanionMode('listening');
     }
-  }, [processRecordedChunk, recorder, recorderState.isRecording]);
+  }, [processRecordedChunk, recorder]);
 
   const startCompanion = useCallback(async () => {
     if (isClientActive) return;
@@ -350,6 +445,29 @@ export function AmbientVoiceScreen({
       setSavingCompanionSettings(false);
     }
   }, [api, assistantAliasesDraft, assistantNameDraft, followupWindowDraft]);
+
+  const runTtsPreview = useCallback(async () => {
+    const text = ttsDraft.trim();
+    if (!text) {
+      return;
+    }
+
+    setTtsTestBusy(true);
+    setTtsTestMessage('');
+
+    try {
+      const bytes = await api.synthesizeSpeech(text);
+      const payload = new Uint8Array(bytes);
+      await playAudioBytes(payload, 'wav');
+      setTtsTestMessage(
+        `Played ${payload.byteLength} bytes using ${voiceProviders?.tts_provider || ambientConfig?.tts_provider || 'the active'} TTS provider.`,
+      );
+    } catch (error) {
+      setTtsTestMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTtsTestBusy(false);
+    }
+  }, [ambientConfig?.tts_provider, api, playAudioBytes, ttsDraft, voiceProviders?.tts_provider]);
 
   const retainedAs =
     lastRetention?.memory_decision === 'priority'
@@ -510,6 +628,51 @@ export function AmbientVoiceScreen({
           </Card>
 
           <Card variant="outlined" padding="lg">
+            <SectionHeader
+              title="Device Capture Journal"
+              subtitle="Recent voice receipts mirrored to this phone"
+              icon={<AppIcon name="cellphone-arrow-down" size={16} color="#6366f1" />}
+            />
+            {localCaptures.length === 0 ? (
+              <Text style={styles.noData}>
+                Captured turns will appear here after the first chunk is transcribed and stored.
+              </Text>
+            ) : (
+              localCaptures.slice(0, 6).map((entry) => (
+                <View key={entry.id} style={styles.captureRow}>
+                  <View style={styles.captureIcon}>
+                    <AppIcon name="waveform" size={16} color="#6366f1" />
+                  </View>
+                  <View style={styles.captureBody}>
+                    <View style={styles.captureTitleRow}>
+                      <Text style={styles.captureTitle} numberOfLines={1}>
+                        {entry.transcript}
+                      </Text>
+                      <Badge label={entry.retentionDecision} variant="info" size="sm" />
+                    </View>
+                    {entry.assistantReply ? (
+                      <Text style={styles.captureReply} numberOfLines={2}>
+                        {entry.assistantReply}
+                      </Text>
+                    ) : null}
+                    <View style={styles.captureMetaRow}>
+                      <Text style={styles.captureMeta}>{entry.sessionId.slice(0, 14)}...</Text>
+                      <Text style={styles.captureMeta}>{formatCaptureAge(entry.createdAt)}</Text>
+                    </View>
+                    {entry.tags.length > 0 ? (
+                      <View style={styles.tagWrap}>
+                        {entry.tags.slice(0, 4).map((tag) => (
+                          <Badge key={`${entry.id}-${tag}`} label={tag.replace(/_/g, ' ')} variant="default" size="sm" />
+                        ))}
+                      </View>
+                    ) : null}
+                  </View>
+                </View>
+              ))
+            )}
+          </Card>
+
+          <Card variant="outlined" padding="lg">
             <SectionHeader title="Live Transcript" action={{ label: 'Refresh', onPress: loadTranscript }} />
             {transcript.length === 0 ? (
               <Text style={styles.noData}>No transcript segments available</Text>
@@ -636,6 +799,91 @@ export function AmbientVoiceScreen({
             ) : null}
           </Card>
 
+          <Card variant="outlined" padding="lg">
+            <SectionHeader title="Voice Runtime Controls" icon={<AppIcon name="waveform" size={16} color="#6366f1" />} />
+            <View style={styles.controlButtons}>
+              <Button
+                label={ambientLiveStatus?.running ? 'Stop Live Runtime' : 'Start Live Runtime'}
+                onPress={ambientLiveStatus?.running ? onStopListening : onStartListening}
+                variant={ambientLiveStatus?.running ? 'error' : 'secondary'}
+                style={styles.controlBtn}
+                disabled={ambientBusy}
+              />
+              <Button
+                label={ambientLiveStatus?.paused ? 'Resume Ambient' : 'Pause Ambient'}
+                onPress={ambientLiveStatus?.paused ? onResumeAmbient : onPauseAmbient}
+                variant="secondary"
+                style={styles.controlBtn}
+                disabled={ambientBusy}
+              />
+            </View>
+          </Card>
+
+          <Card variant="outlined" padding="lg">
+            <SectionHeader title="Provider Controls" icon={<AppIcon name="server-network" size={16} color="#8b5cf6" />} />
+            <Text style={styles.providerLabel}>Speech to text</Text>
+            <View style={styles.providerRow}>
+              {(['gemini', 'local', 'traditional'] as const).map((provider) => {
+                const selected = (voiceProviders?.stt_provider || ambientConfig?.stt_provider) === provider;
+                return (
+                  <TouchableOpacity
+                    key={`stt-${provider}`}
+                    style={[styles.providerPill, selected && styles.providerPillActive]}
+                    onPress={() => onSetVoiceProvider('stt', provider)}
+                    disabled={ambientBusy}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={[styles.providerPillText, selected && styles.providerPillTextActive]}>
+                      {provider === 'traditional' ? 'Traditional' : provider === 'local' ? 'Local' : 'Gemini'}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            <Text style={styles.providerLabel}>Text to speech</Text>
+            <View style={styles.providerRow}>
+              {(['gemini', 'local', 'traditional'] as const).map((provider) => {
+                const selected = (voiceProviders?.tts_provider || ambientConfig?.tts_provider) === provider;
+                return (
+                  <TouchableOpacity
+                    key={`tts-${provider}`}
+                    style={[styles.providerPill, selected && styles.providerPillActive]}
+                    onPress={() => onSetVoiceProvider('tts', provider)}
+                    disabled={ambientBusy}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={[styles.providerPillText, selected && styles.providerPillTextActive]}>
+                      {provider === 'traditional' ? 'Traditional' : provider === 'local' ? 'Local' : 'Gemini'}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </Card>
+
+          <Card variant="outlined" padding="lg">
+            <SectionHeader title="Speech Reply Test" icon={<AppIcon name="account-voice" size={16} color="#6366f1" />} />
+            <TextInput
+              label="Preview Text"
+              value={ttsDraft}
+              onChangeText={setTtsDraft}
+              placeholder="Eva, give me a quick systems check."
+              multiline
+              style={styles.fieldSpacing}
+            />
+            <Button
+              label={ttsTestBusy ? 'Synthesizing...' : 'Play TTS Preview'}
+              onPress={runTtsPreview}
+              loading={ttsTestBusy}
+              fullWidth
+              disabled={ambientBusy}
+            />
+            {ttsTestMessage ? (
+              <Text style={styles.settingsMessage}>{ttsTestMessage}</Text>
+            ) : null}
+          </Card>
+
           {voiceProviders ? (
             <Card variant="outlined" padding="lg">
               <SectionHeader title="Providers" icon={<AppIcon name="server-network" size={16} color="#8b5cf6" />} />
@@ -660,18 +908,16 @@ export function AmbientVoiceScreen({
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f8fafc' },
+  container: { flex: 1, backgroundColor: '#e9eef8' },
   scrollView: { flex: 1 },
   scrollContent: { padding: SPACING.lg, paddingBottom: SPACING['5xl'], gap: SPACING.md },
 
   tabBar: {
     flexDirection: 'row',
-    backgroundColor: '#ffffff',
+    backgroundColor: '#e9eef8',
     paddingHorizontal: SPACING.lg,
     paddingVertical: SPACING.sm,
     gap: SPACING.sm,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f1f5f9',
   },
   tab: {
     flex: 1,
@@ -681,8 +927,11 @@ const styles = StyleSheet.create({
     gap: SPACING.xs,
     paddingVertical: SPACING.sm,
     borderRadius: RADIUS.lg,
+    backgroundColor: '#edf2fb',
+    borderWidth: 1,
+    borderColor: '#ffffff',
   },
-  tabActive: { backgroundColor: '#eef2ff' },
+  tabActive: { backgroundColor: '#eef1ff' },
   tabLabel: { fontSize: FONT_SIZE.sm, fontWeight: FONT_WEIGHT.medium, color: '#94a3b8' },
   tabLabelActive: { color: '#6366f1', fontWeight: FONT_WEIGHT.semibold },
 
@@ -771,6 +1020,50 @@ const styles = StyleSheet.create({
     gap: SPACING.xs,
     marginTop: SPACING.sm,
   },
+  captureRow: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+    paddingVertical: SPACING.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: '#edf2fb',
+  },
+  captureIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#eef1ff',
+  },
+  captureBody: {
+    flex: 1,
+    gap: 4,
+  },
+  captureTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+  },
+  captureTitle: {
+    flex: 1,
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: '#0f172a',
+  },
+  captureReply: {
+    fontSize: FONT_SIZE.sm,
+    lineHeight: 18,
+    color: '#475569',
+  },
+  captureMetaRow: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+    flexWrap: 'wrap',
+  },
+  captureMeta: {
+    fontSize: FONT_SIZE.xs,
+    color: '#94a3b8',
+  },
 
   convTitle: { fontSize: FONT_SIZE.md, fontWeight: FONT_WEIGHT.semibold, color: '#0f172a', marginBottom: SPACING.xs },
   convMeta: { flexDirection: 'row', gap: SPACING.md, marginBottom: SPACING.xs, flexWrap: 'wrap' },
@@ -789,4 +1082,36 @@ const styles = StyleSheet.create({
   },
   configLabel: { fontSize: FONT_SIZE.sm, color: '#475569', fontWeight: FONT_WEIGHT.medium, flex: 1 },
   configValue: { fontSize: FONT_SIZE.sm, color: '#0f172a', fontWeight: FONT_WEIGHT.semibold, flex: 1, textAlign: 'right' },
+  providerLabel: {
+    fontSize: FONT_SIZE.sm,
+    color: '#475569',
+    fontWeight: FONT_WEIGHT.semibold,
+    marginTop: SPACING.sm,
+    marginBottom: SPACING.xs,
+  },
+  providerRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: SPACING.sm,
+  },
+  providerPill: {
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    borderRadius: RADIUS.full,
+    backgroundColor: '#edf2fb',
+    borderWidth: 1,
+    borderColor: '#ffffff',
+  },
+  providerPillActive: {
+    backgroundColor: '#eef1ff',
+    borderColor: '#c7d2fe',
+  },
+  providerPillText: {
+    fontSize: FONT_SIZE.xs,
+    color: '#64748b',
+    fontWeight: FONT_WEIGHT.semibold,
+  },
+  providerPillTextActive: {
+    color: '#4f46e5',
+  },
 });

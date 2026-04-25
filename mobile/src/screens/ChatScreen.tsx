@@ -1,8 +1,7 @@
 /**
- * ChatScreen — Cortex Aurora AI Chat
- * Features: Provider pills, quick prompts, message list, streaming input bar
+ * ChatScreen — mobile chat surface with keyboard-safe composer.
  */
-import React, { useCallback, useRef, useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   FlatList,
@@ -12,9 +11,11 @@ import {
   KeyboardAvoidingView,
   Platform,
   ScrollView,
+  Keyboard,
   TextInput as RNTextInput,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { SPACING, RADIUS, FONT_SIZE, FONT_WEIGHT, SHADOWS } from '../theme/colors';
 import { MessageBubble } from '../components/MessageBubble';
 import { NeuralPulse } from '../components/ui/NeuralPulse';
@@ -52,17 +53,19 @@ export function ChatScreen({
   sending,
   streamingMessageId,
   settings,
-  modelStatus,
   globalError,
   onSend,
   onToggleProvider,
   onToggleRAG,
   onToggleStream,
   providerBusy,
-  localModelAvailable,
 }: ChatScreenProps) {
   const flatRef = useRef<FlatList>(null);
   const inputRef = useRef<RNTextInput>(null);
+  const insets = useSafeAreaInsets();
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const composerLift = Platform.OS === 'android' ? Math.max(0, keyboardHeight - insets.bottom) : 0;
+  const listBottomPadding = 152 + (composerLift > 0 ? composerLift : insets.bottom);
 
   useEffect(() => {
     if (messages.length > 0) {
@@ -70,17 +73,36 @@ export function ChatScreen({
     }
   }, [messages.length]);
 
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+
+    const showSub = Keyboard.addListener(showEvent, (event) => {
+      setKeyboardHeight(event.endCoordinates?.height || 0);
+    });
+    const hideSub = Keyboard.addListener(hideEvent, () => {
+      setKeyboardHeight(0);
+    });
+
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+
   const providerLabel = providerBusy
-    ? 'Switching…'
+    ? 'Switching...'
     : settings.llmProvider === 'gemini'
-    ? 'Gemini'
-    : 'Local';
+      ? 'Gemini'
+      : 'Local';
 
   return (
-    <View style={styles.container}>
-      {/* ── Control bar ─ */}
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top + 6 : 0}
+    >
       <View style={styles.topBar}>
-        {/* Provider + RAG + Stream pills */}
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -96,13 +118,15 @@ export function ChatScreen({
           >
             <AppIcon
               name={settings.llmProvider === 'gemini' ? 'cloud-outline' : 'chip'}
-              size={12}
-              color={settings.llmProvider === 'gemini' ? '#3b82f6' : '#8b5cf6'}
+              size={13}
+              color={settings.llmProvider === 'gemini' ? '#2b6cf6' : '#6f51f2'}
             />
-            <Text style={[
-              styles.pillText,
-              { color: settings.llmProvider === 'gemini' ? '#2563eb' : '#7c3aed' },
-            ]}>
+            <Text
+              style={[
+                styles.pillText,
+                { color: settings.llmProvider === 'gemini' ? '#2357c8' : '#5f46d3' },
+              ]}
+            >
               {providerLabel}
             </Text>
           </TouchableOpacity>
@@ -112,10 +136,12 @@ export function ChatScreen({
             style={[styles.pill, settings.useRAG ? styles.pillGreen : styles.pillNeutral]}
           >
             <View style={[styles.pillDot, { backgroundColor: settings.useRAG ? '#10b981' : '#94a3b8' }]} />
-            <Text style={[
-              styles.pillText,
-              { color: settings.useRAG ? '#065f46' : '#64748b' },
-            ]}>
+            <Text
+              style={[
+                styles.pillText,
+                { color: settings.useRAG ? '#0a7e58' : '#64748b' },
+              ]}
+            >
               {settings.useRAG ? 'RAG On' : 'RAG Off'}
             </Text>
           </TouchableOpacity>
@@ -124,39 +150,41 @@ export function ChatScreen({
             onPress={onToggleStream}
             style={[styles.pill, settings.stream ? styles.pillAmber : styles.pillNeutral]}
           >
-            <Text style={[
-              styles.pillText,
-              { color: settings.stream ? '#92400e' : '#64748b' },
-            ]}>
-              {settings.stream ? '⚡ Stream' : 'Batch'}
+            <Text
+              style={[
+                styles.pillText,
+                { color: settings.stream ? '#b26a00' : '#64748b' },
+              ]}
+            >
+              {settings.stream ? 'Live Stream' : 'Batch'}
             </Text>
           </TouchableOpacity>
         </ScrollView>
 
-        {/* Quick prompts */}
-        {messages.length <= 1 && (
+        {messages.length <= 1 ? (
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
             contentContainerStyle={styles.quickRow}
           >
-            {QUICK_PROMPTS.map((p) => (
-              <TouchableOpacity key={p} onPress={() => setInput(p)} style={styles.quickChip}>
-                <AppIcon name="lightning-bolt-outline" size={12} color="#6366f1" />
-                <Text style={styles.quickText} numberOfLines={1}>{p}</Text>
+            {QUICK_PROMPTS.map((prompt) => (
+              <TouchableOpacity key={prompt} onPress={() => setInput(prompt)} style={styles.quickChip}>
+                <AppIcon name="lightning-bolt-outline" size={12} color="#5164e8" />
+                <Text style={styles.quickText} numberOfLines={1}>{prompt}</Text>
               </TouchableOpacity>
             ))}
           </ScrollView>
-        )}
+        ) : null}
       </View>
 
-      {/* ── Messages ─ */}
       <FlatList
         ref={flatRef}
         data={messages}
         keyExtractor={(m) => m.id}
-        contentContainerStyle={styles.msgList}
+        contentContainerStyle={[styles.msgList, { paddingBottom: listBottomPadding }]}
         showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+        ListFooterComponent={<View style={styles.listFooter} />}
         renderItem={({ item }) => (
           <MessageBubble
             role={item.role}
@@ -173,15 +201,16 @@ export function ChatScreen({
         ListEmptyComponent={
           <View style={styles.empty}>
             <View style={styles.emptyIconContainer}>
-              <AppIcon name="chat-processing-outline" size={36} color="#a5b4fc" />
+              <AppIcon name="chat-processing-outline" size={36} color="#9aa7ff" />
             </View>
             <Text style={styles.emptyTitle}>Start a conversation</Text>
-            <Text style={styles.emptyBody}>Ask Cortex Lab anything about your memories, knowledge, and experiences…</Text>
+            <Text style={styles.emptyBody}>
+              Ask Cortex Lab about your memories, knowledge graph, documents, or active projects.
+            </Text>
           </View>
         }
       />
 
-      {/* ── Error banner ─ */}
       {globalError ? (
         <View style={styles.errorBanner}>
           <AppIcon name="alert-circle-outline" size={14} color="#e11d48" />
@@ -189,15 +218,20 @@ export function ChatScreen({
         </View>
       ) : null}
 
-      {/* ── Input area ─ */}
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={16}>
+      <View
+        style={[
+          styles.composerShell,
+          { paddingBottom: Math.max(insets.bottom, SPACING.sm) },
+          composerLift ? { marginBottom: composerLift } : null,
+        ]}
+      >
         <View style={styles.inputBar}>
           <View style={styles.inputWrap}>
-            <AppIcon name="microphone-outline" size={16} color="#94a3b8" style={{ paddingBottom: 2 }} />
+            <AppIcon name="microphone-outline" size={16} color="#8a94ab" style={styles.leadingIcon} />
             <RNTextInput
               ref={inputRef}
               style={styles.input}
-              placeholder="Message Cortex Lab…"
+              placeholder="Message Cortex Lab..."
               placeholderTextColor="#94a3b8"
               value={input}
               onChangeText={setInput}
@@ -206,10 +240,9 @@ export function ChatScreen({
               editable={!sending}
               selectionColor="#6366f1"
             />
-            <AppIcon name="paperclip" size={16} color="#94a3b8" style={{ paddingBottom: 2 }} />
+            <AppIcon name="paperclip" size={16} color="#8a94ab" style={styles.leadingIcon} />
           </View>
 
-          {/* Send button */}
           <TouchableOpacity
             onPress={onSend}
             disabled={!input.trim() || sending}
@@ -221,7 +254,7 @@ export function ChatScreen({
               </View>
             ) : (
               <LinearGradient
-                colors={['#6366f1', '#4f46e5']}
+                colors={['#6c7dff', '#5262df']}
                 start={{ x: 0, y: 0 }}
                 end={{ x: 1, y: 1 }}
                 style={styles.sendBtnGradient}
@@ -232,59 +265,58 @@ export function ChatScreen({
           </TouchableOpacity>
         </View>
 
-        {/* Meta row */}
         <View style={styles.metaRow}>
           <Text style={styles.metaText}>
-            {settings.llmProvider.toUpperCase()} · {settings.useRAG ? 'RAG' : 'No RAG'} · {settings.stream ? 'Stream' : 'Batch'} · T {settings.temperature} · P {settings.topP}
+            {`${settings.llmProvider.toUpperCase()} | ${settings.useRAG ? 'RAG' : 'No RAG'} | ${settings.stream ? 'Stream' : 'Batch'} | T ${settings.temperature} | P ${settings.topP}`}
           </Text>
         </View>
-      </KeyboardAvoidingView>
-    </View>
+      </View>
+    </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f8fafc' },
-
-  // Top control bar
+  container: {
+    flex: 1,
+    backgroundColor: '#e9eef8',
+  },
   topBar: {
-    backgroundColor: '#ffffff',
-    paddingTop: SPACING.sm,
+    backgroundColor: '#e9eef8',
+    paddingTop: SPACING.md,
     paddingBottom: SPACING.sm,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f1f5f9',
+    gap: SPACING.sm,
   },
   pillRow: {
     paddingHorizontal: SPACING.lg,
     gap: SPACING.sm,
-    paddingBottom: SPACING.sm,
+    paddingBottom: SPACING.xs,
   },
   pill: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: SPACING.md,
-    paddingVertical: 5,
+    paddingVertical: 8,
     borderRadius: RADIUS.full,
     borderWidth: 1,
-    gap: 4,
+    gap: 5,
+    backgroundColor: '#edf2fb',
+    borderColor: '#ffffff',
+    ...SHADOWS.md,
   },
   pillDot: {
     width: 6,
     height: 6,
     borderRadius: 3,
   },
-  pillBlue:    { backgroundColor: '#eff6ff',   borderColor: '#bfdbfe' },
-  pillViolet:  { backgroundColor: '#f5f3ff',   borderColor: '#ddd6fe' },
-  pillGreen:   { backgroundColor: '#f0fdf4',   borderColor: '#bbf7d0' },
-  pillAmber:   { backgroundColor: '#fffbeb',   borderColor: '#fde68a' },
-  pillNeutral: { backgroundColor: '#f1f5f9',   borderColor: '#e2e8f0' },
+  pillBlue: { backgroundColor: '#edf5ff', borderColor: '#ffffff' },
+  pillViolet: { backgroundColor: '#f1eeff', borderColor: '#ffffff' },
+  pillGreen: { backgroundColor: '#eefbf5', borderColor: '#ffffff' },
+  pillAmber: { backgroundColor: '#fff8ea', borderColor: '#ffffff' },
+  pillNeutral: { backgroundColor: '#edf2fb', borderColor: '#ffffff' },
   pillText: {
     fontSize: FONT_SIZE.xs,
     fontWeight: FONT_WEIGHT.semibold,
-    color: '#475569',
   },
-
-  // Quick prompts
   quickRow: {
     paddingHorizontal: SPACING.lg,
     gap: SPACING.sm,
@@ -292,25 +324,26 @@ const styles = StyleSheet.create({
   quickChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#eef2ff',
+    backgroundColor: '#edf2fb',
     borderRadius: RADIUS.full,
     borderWidth: 1,
-    borderColor: '#c7d2fe',
+    borderColor: '#ffffff',
     paddingHorizontal: SPACING.md,
-    paddingVertical: 6,
-    maxWidth: 240,
+    paddingVertical: 8,
+    maxWidth: 250,
     gap: 4,
+    ...SHADOWS.md,
   },
   quickText: {
     fontSize: FONT_SIZE.xs,
-    color: '#4338ca',
+    color: '#4557d6',
     fontWeight: FONT_WEIGHT.medium,
   },
-
-  // Messages
   msgList: {
-    paddingVertical: SPACING.md,
-    paddingBottom: SPACING['4xl'],
+    paddingTop: SPACING.sm,
+  },
+  listFooter: {
+    height: SPACING.md,
   },
   empty: {
     alignItems: 'center',
@@ -321,10 +354,11 @@ const styles = StyleSheet.create({
     width: 72,
     height: 72,
     borderRadius: RADIUS['2xl'],
-    backgroundColor: '#eef2ff',
+    backgroundColor: '#eef3fb',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: SPACING.lg,
+    ...SHADOWS.md,
   },
   emptyTitle: {
     fontSize: FONT_SIZE.xl,
@@ -338,27 +372,27 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 20,
   },
-
-  // Error
   errorBanner: {
     flexDirection: 'row',
     alignItems: 'center',
     marginHorizontal: SPACING.lg,
     marginBottom: SPACING.sm,
-    backgroundColor: '#fff1f2',
+    backgroundColor: '#fff4f5',
     borderWidth: 1,
-    borderColor: '#fecdd3',
+    borderColor: '#ffffff',
     borderRadius: RADIUS.lg,
     padding: SPACING.md,
     gap: SPACING.sm,
+    ...SHADOWS.md,
   },
   errorText: {
     flex: 1,
     fontSize: FONT_SIZE.sm,
     color: '#e11d48',
   },
-
-  // Input
+  composerShell: {
+    backgroundColor: '#e9eef8',
+  },
   inputBar: {
     flexDirection: 'row',
     alignItems: 'flex-end',
@@ -366,22 +400,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: SPACING.lg,
     paddingTop: SPACING.md,
     paddingBottom: SPACING.sm,
-    backgroundColor: '#ffffff',
-    borderTopWidth: 1,
-    borderTopColor: '#f1f5f9',
+    backgroundColor: '#e9eef8',
   },
   inputWrap: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'flex-end',
-    backgroundColor: '#f8fafc',
+    backgroundColor: '#edf2fb',
     borderRadius: RADIUS['2xl'],
     borderWidth: 1,
-    borderColor: '#e2e8f0',
+    borderColor: '#ffffff',
     paddingHorizontal: SPACING.md,
     paddingVertical: SPACING.sm,
     gap: SPACING.sm,
-    minHeight: 46,
+    minHeight: 48,
+    ...SHADOWS.md,
   },
   input: {
     flex: 1,
@@ -392,41 +425,45 @@ const styles = StyleSheet.create({
     margin: 0,
     paddingVertical: 2,
   },
+  leadingIcon: {
+    paddingBottom: 2,
+  },
   sendBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 46,
+    height: 46,
+    borderRadius: 23,
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
   },
   sendBtnDisabled: { opacity: 0.4 },
   sendBtnLoading: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: '#eef2ff',
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: '#edf2fb',
     alignItems: 'center',
     justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#ffffff',
+    ...SHADOWS.md,
   },
   sendBtnGradient: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 46,
+    height: 46,
+    borderRadius: 23,
     alignItems: 'center',
     justifyContent: 'center',
     ...SHADOWS.glow,
   },
-
-  // Meta row
   metaRow: {
-    backgroundColor: '#ffffff',
+    backgroundColor: '#e9eef8',
     paddingHorizontal: SPACING.lg,
     paddingBottom: SPACING.sm,
   },
   metaText: {
     fontSize: 10,
-    color: '#94a3b8',
+    color: '#8390aa',
     textAlign: 'right',
     letterSpacing: 0.3,
   },

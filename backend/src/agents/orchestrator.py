@@ -95,6 +95,34 @@ AVAILABLE_TOOLS = [
 ]
 
 
+def normalize_function_call_result(fc_result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Normalize local/Gemini function-call payloads to one contract."""
+    if not isinstance(fc_result, dict):
+        return {"tool_name": "none", "arguments": {}}
+
+    tool_name = fc_result.get("tool_name")
+    if tool_name in (None, ""):
+        tool_name = fc_result.get("tool")
+
+    if tool_name in (None, "", False):
+        tool_name = "none"
+
+    arguments = fc_result.get("arguments")
+    if not isinstance(arguments, dict):
+        arguments = {}
+
+    normalized: Dict[str, Any] = {
+        "tool_name": str(tool_name),
+        "arguments": arguments,
+    }
+
+    reasoning = fc_result.get("reasoning")
+    if isinstance(reasoning, str) and reasoning.strip():
+        normalized["reasoning"] = reasoning.strip()
+
+    return normalized
+
+
 class AgentOrchestrator:
     """
     Central orchestrator implementing Adaptive-RAG with fine-tuned model integration.
@@ -2099,7 +2127,9 @@ Improved answer (focus on {weak}):"""
         """
         try:
             # Ask the LLM which tool to use
-            fc_result = self.llm.call_function(query.raw_query, AVAILABLE_TOOLS)
+            fc_result = normalize_function_call_result(
+                self.llm.call_function(query.raw_query, AVAILABLE_TOOLS)
+            )
             tool_name = fc_result.get("tool_name", "none")
             arguments = fc_result.get("arguments", {})
 
@@ -2163,11 +2193,13 @@ Improved answer (focus on {weak}):"""
 
             elif tool_name == "find_entity":
                 entity_name = arguments.get("entity_name", "")
-                if entity_name:
-                    entity_id = self.retriever.graph.find_entity_by_name(entity_name)
-                    if entity_id and self.retriever.graph.graph:
+                graph_backend = getattr(self.retriever, "graph", None)
+                if entity_name and graph_backend and hasattr(graph_backend, "find_entity_by_name"):
+                    entity_id = graph_backend.find_entity_by_name(entity_name)
+                    native_graph = getattr(graph_backend, "graph", None)
+                    if entity_id and native_graph:
                         # Get all memories linked to this entity
-                        node_data = self.retriever.graph.graph.nodes.get(entity_id, {})
+                        node_data = native_graph.nodes.get(entity_id, {})
                         memory_ids = node_data.get("memory_ids", [])
                         memories = []
                         for mid in memory_ids[:10]:

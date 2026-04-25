@@ -92,13 +92,14 @@ export function Button({
       >
         {({ pressed }) => (
           <LinearGradient
-            colors={['#6366f1', '#4f46e5']}
+            colors={['#6d7dff', '#5463df']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
             style={[
               styles.inner,
               { paddingHorizontal: cfg.px, paddingVertical: cfg.py, borderRadius: cfg.radius },
               pressed && styles.pressed,
+              styles.primarySurface,
               SHADOWS.glow,
             ]}
           >
@@ -139,6 +140,10 @@ const styles = StyleSheet.create({
     color: '#0f172a',
     letterSpacing: 0.2,
   },
+  primarySurface: {
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.35)',
+  },
   iconWrap: { marginRight: 6 },
   disabled: { opacity: 0.45 },
   disabledText: { color: '#94a3b8' },
@@ -148,11 +153,11 @@ const styles = StyleSheet.create({
 
 const variantStyles: Record<ButtonVariant, ViewStyle> = {
   primary:   { backgroundColor: '#6366f1' },
-  secondary: { backgroundColor: '#f1f5f9', borderWidth: 1, borderColor: '#e2e8f0' },
-  outline:   { backgroundColor: 'transparent', borderWidth: 1, borderColor: '#e2e8f0' },
-  ghost:     { backgroundColor: 'transparent' },
-  error:     { backgroundColor: '#fff1f2', borderWidth: 1, borderColor: '#fecdd3' },
-  success:   { backgroundColor: '#f0fdf4', borderWidth: 1, borderColor: '#bbf7d0' },
+  secondary: { backgroundColor: '#edf2fb', borderWidth: 1, borderColor: '#ffffff', ...SHADOWS.md },
+  outline:   { backgroundColor: '#eef3fb', borderWidth: 1, borderColor: '#ffffff', ...SHADOWS.md },
+  ghost:     { backgroundColor: 'rgba(255,255,255,0.4)' },
+  error:     { backgroundColor: '#fff4f5', borderWidth: 1, borderColor: '#ffffff', ...SHADOWS.md },
+  success:   { backgroundColor: '#eefbf5', borderWidth: 1, borderColor: '#ffffff', ...SHADOWS.md },
 };
 
 const variantTextStyles: Record<ButtonVariant, TextStyle> = {

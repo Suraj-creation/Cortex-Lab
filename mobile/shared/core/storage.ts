@@ -4,7 +4,14 @@
  * Platform-agnostic interface for persistence
  */
 
-import { ChatMessage, ChatSettings, DEFAULT_SETTINGS, ModelpackInstallState } from './types';
+import {
+  ChatMessage,
+  ChatSettings,
+  DEFAULT_SETTINGS,
+  LocalAmbientCaptureEntry,
+  LocalMemoryJournalEntry,
+  ModelpackInstallState,
+} from './types';
 
 // Storage keys
 const STORAGE_KEYS = {
@@ -15,6 +22,8 @@ const STORAGE_KEYS = {
   ONBOARDING_COMPLETED: 'onboarding_completed',
   SYNC_METADATA: 'sync_metadata',
   MODELPACK_INSTALLS: 'modelpack_installs',
+  MEMORY_JOURNAL: 'memory_journal',
+  AMBIENT_CAPTURE_JOURNAL: 'ambient_capture_journal',
 };
 
 interface StoredConversation {
@@ -232,6 +241,62 @@ export async function loadModelpackInstalls(): Promise<Record<string, ModelpackI
     console.error('Failed to load modelpack installs:', error);
     return {};
   }
+}
+
+export async function getMemoryJournal(): Promise<LocalMemoryJournalEntry[]> {
+  try {
+    const data = await StorageBackend.getItem(STORAGE_KEYS.MEMORY_JOURNAL);
+    const parsed = data ? JSON.parse(data) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    console.error('Failed to load memory journal:', error);
+    return [];
+  }
+}
+
+export async function saveMemoryJournal(entries: LocalMemoryJournalEntry[]): Promise<void> {
+  await StorageBackend.setItem(
+    STORAGE_KEYS.MEMORY_JOURNAL,
+    JSON.stringify(entries.slice(0, 80)),
+  );
+}
+
+export async function prependMemoryJournalEntry(
+  entry: LocalMemoryJournalEntry,
+): Promise<LocalMemoryJournalEntry[]> {
+  const existing = await getMemoryJournal();
+  const next = [entry, ...existing.filter((item) => item.id !== entry.id)].slice(0, 80);
+  await saveMemoryJournal(next);
+  return next;
+}
+
+export async function getAmbientCaptureJournal(): Promise<LocalAmbientCaptureEntry[]> {
+  try {
+    const data = await StorageBackend.getItem(STORAGE_KEYS.AMBIENT_CAPTURE_JOURNAL);
+    const parsed = data ? JSON.parse(data) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    console.error('Failed to load ambient capture journal:', error);
+    return [];
+  }
+}
+
+export async function saveAmbientCaptureJournal(
+  entries: LocalAmbientCaptureEntry[],
+): Promise<void> {
+  await StorageBackend.setItem(
+    STORAGE_KEYS.AMBIENT_CAPTURE_JOURNAL,
+    JSON.stringify(entries.slice(0, 160)),
+  );
+}
+
+export async function prependAmbientCaptureEntry(
+  entry: LocalAmbientCaptureEntry,
+): Promise<LocalAmbientCaptureEntry[]> {
+  const existing = await getAmbientCaptureJournal();
+  const next = [entry, ...existing.filter((item) => item.id !== entry.id)].slice(0, 160);
+  await saveAmbientCaptureJournal(next);
+  return next;
 }
 
 /**

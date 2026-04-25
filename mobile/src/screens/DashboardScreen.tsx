@@ -181,7 +181,7 @@ export function DashboardScreen({
       }
     >
       <LinearGradient
-        colors={['#0f172a', '#312e81', '#4338ca']}
+        colors={['#f8fbff', '#e7eeff', '#dce5ff']}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
         style={styles.hero}
@@ -334,7 +334,7 @@ export function DashboardScreen({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f8fafc',
+    backgroundColor: '#e9eef8',
   },
   content: {
     padding: SPACING.lg,
@@ -359,28 +359,29 @@ const styles = StyleSheet.create({
   heroEyebrow: {
     fontSize: FONT_SIZE.xs,
     fontWeight: FONT_WEIGHT.semibold,
-    color: 'rgba(255,255,255,0.72)',
+    color: '#5b67d8',
     textTransform: 'uppercase',
     letterSpacing: 0.8,
   },
   heroTitle: {
     fontSize: FONT_SIZE['2xl'],
     fontWeight: FONT_WEIGHT.extrabold,
-    color: '#ffffff',
+    color: '#111b32',
     lineHeight: 28,
   },
   heroBody: {
     fontSize: FONT_SIZE.sm,
     lineHeight: 20,
-    color: 'rgba(255,255,255,0.84)',
+    color: '#475569',
   },
   heroOrb: {
     width: 52,
     height: 52,
     borderRadius: 18,
-    backgroundColor: 'rgba(255,255,255,0.18)',
+    backgroundColor: '#f8fbff',
     alignItems: 'center',
     justifyContent: 'center',
+    ...SHADOWS.md,
   },
   heroBadgeRow: {
     flexDirection: 'row',
@@ -388,12 +389,12 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
   },
   heroInfoCard: {
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: 'rgba(255,255,255,0.55)',
     borderRadius: RADIUS.xl,
     padding: SPACING.md,
     gap: SPACING.sm,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+    borderColor: 'rgba(255,255,255,0.92)',
   },
   heroInfoRow: {
     flexDirection: 'row',
@@ -403,7 +404,7 @@ const styles = StyleSheet.create({
   heroInfoLabel: {
     flex: 1,
     fontSize: FONT_SIZE.xs,
-    color: 'rgba(255,255,255,0.72)',
+    color: '#64748b',
     textTransform: 'uppercase',
     letterSpacing: 0.6,
   },
@@ -412,7 +413,7 @@ const styles = StyleSheet.create({
     textAlign: 'right',
     fontSize: FONT_SIZE.sm,
     fontWeight: FONT_WEIGHT.semibold,
-    color: '#ffffff',
+    color: '#111b32',
   },
   metricsRow: {
     flexDirection: 'row',
@@ -440,12 +441,15 @@ const styles = StyleSheet.create({
     marginBottom: SPACING.md,
   },
   featureIconWrap: {
-    width: 38,
-    height: 38,
-    borderRadius: RADIUS.lg,
-    backgroundColor: '#eef2ff',
+    width: 42,
+    height: 42,
+    borderRadius: RADIUS.xl,
+    backgroundColor: '#f5f8ff',
+    borderWidth: 1,
+    borderColor: '#ffffff',
     alignItems: 'center',
     justifyContent: 'center',
+    ...SHADOWS.md,
   },
   featureTitle: {
     fontSize: FONT_SIZE.md,
