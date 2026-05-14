@@ -21,6 +21,28 @@ services:
         value: ^https://.*\.onrender\.com$|^https://.*\.trycloudflare\.com$|^https?://(localhost|127\.0\.0\.1)(:\d+)?$
       - key: GOOGLE_API_KEY
         sync: false
+      - key: CORTEX_AUTH_SECRET
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        value: https://cortex-backend-dbcv.onrender.com/api/auth/google/callback
+      - key: GOOGLE_SCOPES
+        value: openid email profile https://www.googleapis.com/auth/drive.file
+      - key: CORTEX_GOOGLE_DRIVE_ROOT
+        value: Cortex Lab Backups
+      - key: SUPABASE_DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        value: https://lqqokdustkkixwgvsowo.supabase.co
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_BACKUP_BUCKET
+        value: cortex-backups
 
   - type: web
     name: cortex-frontend
