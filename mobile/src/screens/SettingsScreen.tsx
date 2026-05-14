@@ -24,6 +24,8 @@ import { ModelRecommendationCard } from '../components/modelpacks/ModelRecommend
 import { OfflineReadinessBadge } from '../components/modelpacks/OfflineReadinessBadge';
 
 import type {
+  AuthStatus,
+  BackupStatus,
   ChatSettings,
   LLMProviderType,
   ModelpackEntry,
@@ -47,6 +49,13 @@ interface SettingsScreenProps {
   modelpackError: string;
   onRefreshModelpacks: () => void;
   onInstallModelpack: (pack: ModelpackEntry) => void;
+  authStatus: AuthStatus | null;
+  backupStatus: BackupStatus | null;
+  authBusy: boolean;
+  backupBusy: boolean;
+  onStartGoogleSignIn: () => void;
+  onLogoutAuth: () => void;
+  onRunBackup: () => void;
 }
 
 const MODELPACK_DOCS_FALLBACK =
@@ -167,6 +176,13 @@ export function SettingsScreen({
   modelpackError,
   onRefreshModelpacks,
   onInstallModelpack,
+  authStatus,
+  backupStatus,
+  authBusy,
+  backupBusy,
+  onStartGoogleSignIn,
+  onLogoutAuth,
+  onRunBackup,
 }: SettingsScreenProps) {
   const [maxTokensDraft, setMaxTokensDraft] = useState(String(settings.maxTokens ?? ''));
   const [modelpackLinkError, setModelpackLinkError] = useState('');
@@ -424,6 +440,90 @@ export function SettingsScreen({
               />
             </View>
           ))}
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Account & Backup</Text>
+          <View style={styles.connectionCard}>
+            <View style={styles.connectionHeader}>
+              <View style={styles.connectionIconWrap}>
+                <AppIcon
+                  name={authStatus?.authenticated ? 'account-check-outline' : 'account-outline'}
+                  size={16}
+                  color={authStatus?.authenticated ? NEURAL.tertiary : NEURAL.primary}
+                />
+              </View>
+              <View style={styles.connectionMeta}>
+                <Text style={styles.connectionTitle}>
+                  {authStatus?.authenticated
+                    ? authStatus.user?.name || authStatus.user?.email || 'Signed in'
+                    : 'Google sign-in'}
+                </Text>
+                <Text style={styles.connectionBody}>
+                  {authStatus?.authenticated
+                    ? 'Your local-first mobile data can now be packaged and backed up to the cloud.'
+                    : 'Sign in to unlock Supabase-backed cloud backups while keeping device storage authoritative.'}
+                </Text>
+              </View>
+            </View>
+            <View style={styles.connectionEndpointRow}>
+              <Text style={styles.connectionEndpointLabel}>Supabase backup</Text>
+              <Text style={styles.connectionEndpointValue}>
+                {backupStatus?.backup?.supabase_postgres_configured ? 'Configured' : 'Not configured'}
+              </Text>
+            </View>
+            <View style={styles.connectionEndpointRow}>
+              <Text style={styles.connectionEndpointLabel}>Storage bucket</Text>
+              <Text style={styles.connectionEndpointValue}>
+                {backupStatus?.backup?.supabase_storage_configured ? 'Configured' : 'Not configured'}
+              </Text>
+            </View>
+            <View style={styles.connectionEndpointRow}>
+              <Text style={styles.connectionEndpointLabel}>Google Drive</Text>
+              <Text style={styles.connectionEndpointValue}>
+                {backupStatus?.backup?.google_drive_configured ? 'Configured' : 'Not configured'}
+              </Text>
+            </View>
+            <View style={styles.connectionEndpointRow}>
+              <Text style={styles.connectionEndpointLabel}>Last backup</Text>
+              <Text style={styles.connectionEndpointValue}>
+                {backupStatus?.backup?.last_backup_at
+                  ? new Date(backupStatus.backup.last_backup_at).toLocaleString()
+                  : 'Never'}
+              </Text>
+            </View>
+          </View>
+          <View style={styles.actionRow}>
+            {authStatus?.authenticated ? (
+              <>
+                <Button
+                  label={backupBusy ? 'Backing up…' : 'Run Backup'}
+                  variant="primary"
+                  onPress={onRunBackup}
+                  disabled={backupBusy}
+                  loading={backupBusy}
+                  size="sm"
+                />
+                <Button
+                  label={authBusy ? 'Signing out…' : 'Sign Out'}
+                  variant="outline"
+                  onPress={onLogoutAuth}
+                  disabled={authBusy}
+                  loading={authBusy}
+                  size="sm"
+                />
+              </>
+            ) : (
+              <Button
+                label={authBusy ? 'Opening Google…' : 'Sign In with Google'}
+                variant="primary"
+                onPress={onStartGoogleSignIn}
+                disabled={authBusy || !authStatus?.enabled}
+                loading={authBusy}
+                size="sm"
+              />
+            )}
+          </View>
         </View>
 
         <View style={styles.section}>

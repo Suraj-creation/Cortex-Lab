@@ -10,6 +10,7 @@ import {
   ActivityIndicator,
   View,
   Text,
+  Linking,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
@@ -19,7 +20,9 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { File as DeviceFile } from 'expo-file-system';
 import {
   createDownloadResumable,
+  deleteAsync,
   documentDirectory,
+  getInfoAsync,
   makeDirectoryAsync,
 } from 'expo-file-system/legacy';
 
@@ -55,12 +58,17 @@ import type {
   LocalMemoryJournalEntry,
   LLMProviderType,
   VoiceProviders,
+  AuthStatus,
+  BackupStatus,
 } from './shared/core/types';
 import { DEFAULT_SETTINGS } from './shared/core/types';
 import {
   getMemoryJournal,
   getAllConversations,
   getConversation,
+  getAuthSessionToken,
+  clearModelpackInstalls,
+  clearAuthSessionToken,
   getCurrentConversationId,
   getLastApiUrl,
   loadModelpackInstalls,
@@ -73,6 +81,7 @@ import {
   saveConversation,
   saveCurrentConversationId,
   saveLastApiUrl,
+  saveAuthSessionToken,
   saveOnboardingCompleted,
 } from './shared/core/storage';
 
@@ -120,6 +129,7 @@ const NAV_ITEMS = [
 ];
 
 const STARTER_TEXT = 'How can I help you today?';
+const GEMINI_ONLY_MODE = false;
 
 function inferTitle(messages: ChatMessage[]): string {
   const first = messages.find((m) => m.role === 'user');
@@ -180,6 +190,13 @@ interface SettingsPageProps {
   modelpackError: string;
   onRefreshModelpacks: () => void;
   onInstallModelpack: (pack: ModelpackEntry) => void;
+  authStatus: AuthStatus | null;
+  backupStatus: BackupStatus | null;
+  authBusy: boolean;
+  backupBusy: boolean;
+  onStartGoogleSignIn: () => void;
+  onLogoutAuth: () => void;
+  onRunBackup: () => void;
 }
 
 const SettingsPage = require('./src/screens/SettingsScreen').SettingsScreen as React.ComponentType<SettingsPageProps>;
@@ -239,6 +256,15 @@ function buildModelpackArtifactUrl(pack: ModelpackEntry, relativePath: string): 
   return `${base}/resolve/main/${encodedPath}?download=1`;
 }
 
+function normalizeGeminiOnlySettings(settings: ChatSettings): ChatSettings {
+  return {
+    ...settings,
+    llmProvider: 'gemini',
+    inferenceMode: 'cloud',
+    allowCloudFallback: true,
+  };
+}
+
 // ─── Main App Content ─────────────────────────────────────────────────────────
 function AppContent() {
   const [apiBase, setApiBase] = useState<string>(getDefaultApiBaseUrl());
@@ -262,6 +288,10 @@ function AppContent() {
   const [globalError, setGlobalError] = useState('');
   const [settings, setSettings] = useState<ChatSettings>(DEFAULT_SETTINGS);
   const [loadingView, setLoadingView] = useState(false);
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
+  const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [backupBusy, setBackupBusy] = useState(false);
 
   // ── Chat ─────────────────────────────────────────────────────────────────────
   const [conversations, setConversations] = useState<ConvSummary[]>([]);
@@ -269,10 +299,15 @@ function AppContent() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
-  const [localModelAvailable, setLocalModelAvailable] = useState(true);
+  const [localModelAvailable, setLocalModelAvailable] = useState(false);
   const [providerBusy, setProviderBusy] = useState(false);
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
   const messagesRef = useRef<ChatMessage[]>(messages);
+  const installedModelpackAvailable = useMemo(
+    () => Object.values(modelpackInstalls).some((item) => item.status === 'installed'),
+    [modelpackInstalls],
+  );
+  const localSelectionAvailable = localModelAvailable || installedModelpackAvailable;
 
   // ── Memory ───────────────────────────────────────────────────────────────────
   const [memories, setMemories] = useState<MemoryObject[]>([]);
@@ -330,6 +365,22 @@ function AppContent() {
     setMemoryJournal(next);
   }, []);
 
+  const refreshAuthAndBackup = useCallback(async (client: ApiClient = apiRef.current) => {
+    try {
+      const status = await client.getAuthStatus();
+      setAuthStatus(status);
+    } catch {
+      setAuthStatus(null);
+    }
+
+    try {
+      const status = await client.getBackupStatus();
+      setBackupStatus(status);
+    } catch {
+      setBackupStatus(null);
+    }
+  }, []);
+
   const refreshModelStatus = useCallback(async (client: ApiClient = apiRef.current) => {
     try {
       const status = await client.getModelStatus();
@@ -339,18 +390,39 @@ function AppContent() {
     }
   }, []);
 
-  const syncLLMProvider = useCallback(async (client: ApiClient = apiRef.current) => {
+  const syncLLMProvider = useCallback(async (
+    client: ApiClient = apiRef.current,
+    options?: { deviceModelpackInstalled?: boolean },
+  ) => {
     try {
+      const deviceModelpackInstalled = options?.deviceModelpackInstalled ?? installedModelpackAvailable;
       const provider = await client.getLLMProvider();
+      if (GEMINI_ONLY_MODE) {
+        setLocalModelAvailable(false);
+        setSettings((prev) => normalizeGeminiOnlySettings(prev));
+        return;
+      }
       setLocalModelAvailable(provider.local_model_loaded);
       setSettings((prev) => {
+        if (
+          !provider.local_model_loaded &&
+          deviceModelpackInstalled &&
+          (prev.llmProvider === 'local' || prev.llmProvider === 'gemma_local') &&
+          provider.gemini_configured
+        ) {
+          return {
+            ...prev,
+            inferenceMode: 'hybrid',
+            allowCloudFallback: true,
+          };
+        }
         if (provider.provider === 'local' && !provider.local_model_loaded && provider.gemini_configured) {
           return { ...prev, llmProvider: 'gemini' };
         }
         return { ...prev, llmProvider: provider.provider };
       });
     } catch {}
-  }, []);
+  }, [installedModelpackAvailable]);
 
   const loadModelpackManifest = useCallback(async (client: ApiClient = apiRef.current) => {
     try {
@@ -362,7 +434,24 @@ function AppContent() {
     }
   }, []);
 
-  const connectBackend = useCallback(async (persistedUrl?: string | null) => {
+  const clearDownloadedModelpacks = useCallback(async () => {
+    if (!documentDirectory) {
+      return;
+    }
+
+    const modelpackRoot = `${documentDirectory}modelpacks/`;
+    try {
+      const info = await getInfoAsync(modelpackRoot);
+      if (info.exists) {
+        await deleteAsync(modelpackRoot, { idempotent: true });
+      }
+    } catch {}
+  }, []);
+
+  const connectBackend = useCallback(async (
+    persistedUrl?: string | null,
+    options?: { deviceModelpackInstalled?: boolean },
+  ) => {
     setTestingConnection(true);
     setConnectionStatus('Auto-connecting to Cortex backend…');
 
@@ -370,6 +459,10 @@ function AppContent() {
       const resolution = await resolveHealthyApiBaseUrl(persistedUrl);
       const nextBase = resolution.baseUrl;
       const nextClient = createApiClient({ baseUrl: nextBase });
+      const savedAuthToken = await getAuthSessionToken();
+      if (savedAuthToken) {
+        nextClient.setAuthToken(savedAuthToken);
+      }
 
       setApiBase(nextBase);
       setBackendUrlLabel(formatApiEndpointLabel(nextBase));
@@ -381,17 +474,32 @@ function AppContent() {
         setConnectionStatus('Preferred backend selected, but the live service is still warming up.');
       }
 
-      await Promise.allSettled([
-        refreshModelStatus(nextClient),
-        syncLLMProvider(nextClient),
-        loadModelpackManifest(nextClient),
-      ]);
+        await Promise.allSettled([
+          refreshModelStatus(nextClient),
+          syncLLMProvider(nextClient, options),
+          loadModelpackManifest(nextClient),
+          refreshAuthAndBackup(nextClient),
+        ]);
 
-      return nextClient;
-    } finally {
-      setTestingConnection(false);
-    }
-  }, [loadModelpackManifest, refreshModelStatus, syncLLMProvider]);
+        if (GEMINI_ONLY_MODE) {
+          await Promise.allSettled([
+            nextClient.setLLMProvider('gemini'),
+            nextClient.setRuntimeProviders({
+              llmProvider: 'gemini',
+              sttProvider: 'gemini',
+              ttsProvider: 'gemini',
+              allowCloudFallback: true,
+            }),
+          ]);
+          setSettings((prev) => normalizeGeminiOnlySettings(prev));
+          setLocalModelAvailable(false);
+        }
+
+        return nextClient;
+      } finally {
+        setTestingConnection(false);
+      }
+    }, [getAuthSessionToken, loadModelpackManifest, refreshAuthAndBackup, refreshModelStatus, syncLLMProvider]);
 
   const loadConversations = useCallback(async () => {
     try {
@@ -423,16 +531,30 @@ function AppContent() {
   useEffect(() => {
     let mounted = true;
     (async () => {
-      try {
-        await initializeStorage();
-        const ls = await loadChatSettings();
-        const savedModelpacks = await loadModelpackInstalls();
-        const savedMemoryJournal = await getMemoryJournal();
-        if (mounted) {
-          setSettings(ls);
-          setModelpackInstalls(savedModelpacks);
-          setMemoryJournal(savedMemoryJournal);
-        }
+        try {
+          await initializeStorage();
+          const savedAuthToken = await getAuthSessionToken();
+          if (savedAuthToken) {
+            apiRef.current.setAuthToken(savedAuthToken);
+          }
+          if (GEMINI_ONLY_MODE) {
+            await clearDownloadedModelpacks();
+            await clearModelpackInstalls();
+          }
+
+          const loadedSettings = await loadChatSettings();
+          const ls = GEMINI_ONLY_MODE ? normalizeGeminiOnlySettings(loadedSettings) : loadedSettings;
+          const savedModelpacks = GEMINI_ONLY_MODE ? {} : await loadModelpackInstalls();
+          const savedModelpackInstalled = Object.values(savedModelpacks).some(
+            (item) => item.status === 'installed',
+          );
+          const savedMemoryJournal = await getMemoryJournal();
+          if (mounted) {
+            setSettings(ls);
+            setModelpackInstalls(savedModelpacks);
+            setLocalModelAvailable(false);
+            setMemoryJournal(savedMemoryJournal);
+          }
 
         const onboardingCompleted = await getOnboardingCompleted();
         if (mounted) {
@@ -441,16 +563,51 @@ function AppContent() {
 
         const lastApiUrl = await getLastApiUrl();
         if (mounted) {
-          await connectBackend(lastApiUrl);
+          await connectBackend(lastApiUrl, { deviceModelpackInstalled: savedModelpackInstalled });
           await ensureActiveConversation();
         }
       } catch (e) {
         if (mounted) setGlobalError(e instanceof Error ? e.message : String(e));
       }
-    })();
-    const interval = setInterval(() => void refreshModelStatus(), 15000);
-    return () => { mounted = false; clearInterval(interval); };
-  }, [connectBackend, ensureActiveConversation, refreshModelStatus]);
+      })();
+      const interval = setInterval(() => void refreshModelStatus(), 15000);
+      return () => { mounted = false; clearInterval(interval); };
+    }, [clearDownloadedModelpacks, connectBackend, ensureActiveConversation, refreshModelStatus]);
+
+  useEffect(() => {
+    const applyAuthCallback = async (callbackUrl: string) => {
+      try {
+        const parsed = new URL(callbackUrl);
+        const token = parsed.searchParams.get('token');
+        if (!token) {
+          return;
+        }
+        await saveAuthSessionToken(token);
+        apiRef.current.setAuthToken(token);
+        await refreshAuthAndBackup(apiRef.current);
+        setSettingsVisible(true);
+        setGlobalError('');
+      } catch (error) {
+        setGlobalError(error instanceof Error ? error.message : String(error));
+      }
+    };
+
+    const subscription = Linking.addEventListener('url', (event) => {
+      void applyAuthCallback(event.url);
+    });
+
+    Linking.getInitialURL()
+      .then((url) => {
+        if (url) {
+          void applyAuthCallback(url);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      subscription.remove();
+    };
+  }, [refreshAuthAndBackup]);
 
   useEffect(() => {
     if (!settingsVisible) {
@@ -461,8 +618,12 @@ function AppContent() {
     }
   }, [settingsVisible, modelpackManifest, loadModelpackManifest]);
 
-  useEffect(() => { void saveChatSettings(settings); }, [settings]);
-  useEffect(() => { void saveModelpackInstalls(modelpackInstalls); }, [modelpackInstalls]);
+  useEffect(() => {
+    void saveChatSettings(GEMINI_ONLY_MODE ? normalizeGeminiOnlySettings(settings) : settings);
+  }, [settings]);
+  useEffect(() => {
+    void saveModelpackInstalls(GEMINI_ONLY_MODE ? {} : modelpackInstalls);
+  }, [modelpackInstalls]);
 
   // Load active conversation messages
   useEffect(() => {
@@ -503,36 +664,89 @@ function AppContent() {
   }, []);
 
   const selectProvider = useCallback(async (provider: LLMProviderType) => {
-    if ((provider === 'local' || provider === 'gemma_local') && !localModelAvailable) {
-      setGlobalError('Local model unavailable.');
+    if (GEMINI_ONLY_MODE && provider !== 'gemini') {
+      setSettings((prev) => normalizeGeminiOnlySettings(prev));
+      setLocalModelAvailable(false);
+      setGlobalError('Gemini-only mode is active for now. Local model support remains in the app but is currently disabled.');
+      return;
+    }
+    if ((provider === 'local' || provider === 'gemma_local') && !localSelectionAvailable) {
+      setGlobalError('Download a Gemma model pack first, or connect to a backend with a loaded local model.');
       return;
     }
 
     setProviderBusy(true);
     try {
-      await api.setLLMProvider(provider);
-      setSettings((prev) => ({ ...prev, llmProvider: provider }));
-      setGlobalError('');
-      await Promise.all([
-        refreshModelStatus(),
-        syncLLMProvider(),
-      ]);
+      if (provider === 'gemini') {
+        await Promise.allSettled([
+          api.setRuntimeMode('cloud', true),
+          api.setLLMProvider('gemini'),
+        ]);
+        setSettings((prev) => ({
+          ...prev,
+          llmProvider: 'gemini',
+          inferenceMode: 'cloud',
+          allowCloudFallback: true,
+        }));
+        setGlobalError('');
+        await Promise.all([
+          refreshModelStatus(),
+          syncLLMProvider(),
+        ]);
+        return;
+      }
+
+      if (localModelAvailable) {
+        await api.setRuntimeMode('hybrid', true);
+        await api.setLLMProvider(provider);
+        setSettings((prev) => ({
+          ...prev,
+          llmProvider: provider,
+          inferenceMode: 'hybrid',
+          allowCloudFallback: true,
+        }));
+        setGlobalError('');
+        await Promise.all([
+          refreshModelStatus(),
+          syncLLMProvider(),
+        ]);
+        return;
+      }
+
+      await api.setRuntimeMode('hybrid', true).catch(() => undefined);
+      await api.setRuntimeProviders({
+        llmProvider: provider,
+        allowCloudFallback: true,
+      }).catch(() => undefined);
+      setSettings((prev) => ({
+        ...prev,
+        llmProvider: provider,
+        inferenceMode: 'hybrid',
+        allowCloudFallback: true,
+      }));
+      setGlobalError(
+        'Gemma Local is staged from this device. The current build does not include the native LiteRT runtime yet, so live requests will use Gemini fallback instead of failing.',
+      );
     } catch (e) {
       setGlobalError(e instanceof Error ? e.message : String(e));
     } finally {
       setProviderBusy(false);
     }
-  }, [api, localModelAvailable, refreshModelStatus, syncLLMProvider]);
+  }, [api, localModelAvailable, localSelectionAvailable, refreshModelStatus, syncLLMProvider]);
 
   const toggleProvider = useCallback(async () => {
-    const providerCycle: LLMProviderType[] = localModelAvailable
+    if (GEMINI_ONLY_MODE) {
+      await selectProvider('gemini');
+      return;
+    }
+    const providerCycle: LLMProviderType[] = localSelectionAvailable
       ? ['local', 'gemma_local', 'gemini']
       : ['gemini'];
     const currentIndex = providerCycle.indexOf(settings.llmProvider);
     const safeIndex = currentIndex >= 0 ? currentIndex : providerCycle.length - 1;
     const next = providerCycle[(safeIndex + 1) % providerCycle.length];
     await selectProvider(next);
-  }, [localModelAvailable, selectProvider, settings.llmProvider]);
+  }, [localSelectionAvailable, selectProvider, settings.llmProvider]);
 
   const sendChat = useCallback(async () => {
     const text = input.trim();
@@ -935,6 +1149,15 @@ function AppContent() {
   }, [api, loadDocuments, recordMemoryJournal]);
 
   const installModelpack = useCallback(async (pack: ModelpackEntry) => {
+    if (GEMINI_ONLY_MODE) {
+      setModelpackInstalls({});
+      await clearModelpackInstalls();
+      await clearDownloadedModelpacks();
+      setLocalModelAvailable(false);
+      setSettings((prev) => normalizeGeminiOnlySettings(prev));
+      setGlobalError('Gemini-only mode is active for now. Existing local Gemma downloads were cleared and new local model installs are paused.');
+      return;
+    }
     if (Platform.OS === 'web') {
       setGlobalError('In-app model downloads require an installed iOS or Android build.');
       return;
@@ -1005,6 +1228,20 @@ function AppContent() {
           throw new Error(`Download did not produce a local file for ${filename}.`);
         }
 
+        const localInfo = await getInfoAsync(result.uri);
+        if (!localInfo.exists) {
+          throw new Error(`Downloaded file was not found on device storage for ${filename}.`);
+        }
+        const downloadedSize = typeof localInfo.size === 'number' ? localInfo.size : 0;
+        if (file.size_bytes > 0 && downloadedSize < file.size_bytes * 0.98) {
+          throw new Error(`Downloaded file is incomplete for ${filename}.`);
+        }
+        if (file.size_bytes === 0 && downloadedSize < 1024 * 1024) {
+          throw new Error(
+            `Downloaded artifact for ${filename} is too small. The model host may have returned an error page instead of the model file.`,
+          );
+        }
+
         if (file.sha256) {
           const verified = await api.verifyModelpack(result.uri, file.sha256);
           if (!verified.verified) {
@@ -1025,12 +1262,28 @@ function AppContent() {
 
         if (localModelAvailable) {
           await api.setLLMProvider('gemma_local');
-          setSettings((prev) => ({ ...prev, llmProvider: 'gemma_local' }));
+          setSettings((prev) => ({
+            ...prev,
+            llmProvider: 'gemma_local',
+            inferenceMode: 'hybrid',
+            allowCloudFallback: true,
+          }));
           await Promise.all([refreshModelStatus(), syncLLMProvider()]);
           setGlobalError('Gemma Local is ready and has been selected for subsequent chat requests.');
         } else {
+          await api.setRuntimeMode('hybrid', true).catch(() => undefined);
+          await api.setRuntimeProviders({
+            llmProvider: 'gemma_local',
+            allowCloudFallback: true,
+          }).catch(() => undefined);
+          setSettings((prev) => ({
+            ...prev,
+            llmProvider: 'gemma_local',
+            inferenceMode: 'hybrid',
+            allowCloudFallback: true,
+          }));
           setGlobalError(
-            'Model pack downloaded to this device. The current deployed backend is Gemini-only, so chat will stay on Gemini until a native local runtime or local backend is available.',
+            'Model pack downloaded to this device. Gemma Local is staged in hybrid mode; this build will use Gemini fallback until the native LiteRT runtime bridge is present.',
           );
         }
     } catch (e) {
@@ -1040,7 +1293,71 @@ function AppContent() {
       });
       setGlobalError(e instanceof Error ? e.message : String(e));
     }
-  }, [api, localModelAvailable, refreshModelStatus, syncLLMProvider]);
+  }, [api, clearDownloadedModelpacks, localModelAvailable, refreshModelStatus, syncLLMProvider]);
+
+  const startGoogleSignIn = useCallback(async () => {
+    setAuthBusy(true);
+    try {
+      const callbackUrl = 'cortexlab://auth/callback';
+      const url = apiRef.current.buildGoogleMobileAuthStartUrl(callbackUrl);
+      await Linking.openURL(url);
+    } catch (e) {
+      setGlobalError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAuthBusy(false);
+    }
+  }, []);
+
+  const logoutAuth = useCallback(async () => {
+    setAuthBusy(true);
+    try {
+      await apiRef.current.logoutAuth();
+      await clearAuthSessionToken();
+      apiRef.current.setAuthToken('');
+      setAuthStatus({
+        enabled: Boolean(authStatus?.enabled),
+        authenticated: false,
+        user: null,
+        google: authStatus?.google || { configured: false, redirect_uri: '', scopes: [] },
+        session: authStatus?.session || { configured: false, cookie_name: 'cortex_session' },
+        backup: authStatus?.backup || {
+          supabase_postgres_configured: false,
+          supabase_storage_configured: false,
+          google_drive_configured: false,
+        },
+      });
+      await refreshAuthAndBackup(apiRef.current);
+    } catch (e) {
+      setGlobalError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAuthBusy(false);
+    }
+  }, [authStatus, clearAuthSessionToken, refreshAuthAndBackup]);
+
+  const runCloudBackup = useCallback(async () => {
+    setBackupBusy(true);
+    try {
+      const result = await apiRef.current.runCloudBackup({
+        platform: 'mobile',
+        captured_at: new Date().toISOString(),
+        conversation_count: conversations.length,
+        memory_journal_count: memoryJournal.length,
+        modelpacks: Object.values(modelpackInstalls).map((install) => ({
+          pack_id: install.packId,
+          status: install.status,
+          progress: install.progress,
+          updated_at: install.updatedAt,
+          artifact_count: install.artifactPaths?.length || 0,
+        })),
+      });
+      await refreshAuthAndBackup(apiRef.current);
+      setGlobalError(`Backup ${result.backup_id} created successfully.`);
+    } catch (e) {
+      setGlobalError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBackupBusy(false);
+    }
+  }, [conversations.length, memoryJournal.length, modelpackInstalls, refreshAuthAndBackup]);
 
   const deleteDocument = useCallback(async (docId: string) => {
     setDocumentsBusy(true);
@@ -1142,17 +1459,28 @@ function AppContent() {
           reconnecting={testingConnection}
           connectionStatus={connectionStatus}
           backendUrlLabel={backendUrlLabel}
-          localModelAvailable={localModelAvailable}
+          localModelAvailable={localSelectionAvailable}
           modelpackManifest={modelpackManifest}
           modelpackInstalls={modelpackInstalls}
           modelpackCapabilityMessage={
-            localModelAvailable
-              ? 'A local backend/runtime is available. Pick Local or Gemma Local for the next chat request.'
-              : 'The deployed backend is currently Gemini-only. Downloaded model packs stay on-device for the upcoming native runtime bridge, while live chat continues through Gemini.'
+            GEMINI_ONLY_MODE
+              ? 'Gemini-only mode is active for now. The local Gemma runtime code is still preserved, but downloaded modelpacks are cleared and new installs stay disabled until you re-enable local mode.'
+              : localModelAvailable
+              ? 'A backend local runtime is available. Pick Local or Gemma Local for the next chat request.'
+              : installedModelpackAvailable
+              ? 'A Gemma model pack is installed on this device. The app stages Gemma Local in hybrid mode and uses Gemini fallback until the native LiteRT runtime bridge is available.'
+              : 'The deployed backend is currently Gemini-only. Download a Gemma pack to stage device-local mode for the upcoming native runtime bridge.'
           }
           modelpackError={modelpackError}
           onRefreshModelpacks={() => void loadModelpackManifest()}
           onInstallModelpack={(pack: ModelpackEntry) => void installModelpack(pack)}
+          authStatus={authStatus}
+          backupStatus={backupStatus}
+          authBusy={authBusy}
+          backupBusy={backupBusy}
+          onStartGoogleSignIn={() => void startGoogleSignIn()}
+          onLogoutAuth={() => void logoutAuth()}
+          onRunBackup={() => void runCloudBackup()}
         />
       ) : (
         <>
@@ -1182,7 +1510,7 @@ function AppContent() {
               onToggleRAG={() => setSettings((p) => ({ ...p, useRAG: !p.useRAG }))}
               onToggleStream={() => setSettings((p) => ({ ...p, stream: !p.stream }))}
               providerBusy={providerBusy}
-              localModelAvailable={localModelAvailable}
+              localModelAvailable={localSelectionAvailable}
             />
           )}
           {activeView === 'memories' && (

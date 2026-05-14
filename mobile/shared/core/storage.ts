@@ -24,6 +24,7 @@ const STORAGE_KEYS = {
   MODELPACK_INSTALLS: 'modelpack_installs',
   MEMORY_JOURNAL: 'memory_journal',
   AMBIENT_CAPTURE_JOURNAL: 'ambient_capture_journal',
+  AUTH_SESSION_TOKEN: 'auth_session_token',
 };
 
 interface StoredConversation {
@@ -45,6 +46,7 @@ interface SyncMetadata {
 
 // Lazy-loaded storage backend to prevent initialization errors
 let _storageLazyBackend: any = null;
+let _secureStoreLazyBackend: any = null;
 
 function getStorageBackend() {
   if (_storageLazyBackend !== null) {
@@ -74,11 +76,41 @@ function getStorageBackend() {
   return _storageLazyBackend;
 }
 
+function getSecureStoreBackend() {
+  if (_secureStoreLazyBackend !== null) {
+    return _secureStoreLazyBackend;
+  }
+
+  try {
+    const SecureStore = require('expo-secure-store');
+    _secureStoreLazyBackend = {
+      getItemAsync: (key: string) => SecureStore.getItemAsync(key),
+      setItemAsync: (key: string, value: string) => SecureStore.setItemAsync(key, value),
+      deleteItemAsync: (key: string) => SecureStore.deleteItemAsync(key),
+    };
+  } catch (e) {
+    console.warn('SecureStore not available, using AsyncStorage fallback for auth token:', e);
+    _secureStoreLazyBackend = {
+      getItemAsync: (key: string) => StorageBackend.getItem(key),
+      setItemAsync: (key: string, value: string) => StorageBackend.setItem(key, value),
+      deleteItemAsync: (key: string) => StorageBackend.removeItem(key),
+    };
+  }
+
+  return _secureStoreLazyBackend;
+}
+
 export const StorageBackend = {
   getItem: (key: string) => getStorageBackend().getItem(key),
   setItem: (key: string, value: string) => getStorageBackend().setItem(key, value),
   removeItem: (key: string) => getStorageBackend().removeItem(key),
   getAllKeys: () => getStorageBackend().getAllKeys(),
+};
+
+export const SecureStorageBackend = {
+  getItemAsync: (key: string) => getSecureStoreBackend().getItemAsync(key),
+  setItemAsync: (key: string, value: string) => getSecureStoreBackend().setItemAsync(key, value),
+  deleteItemAsync: (key: string) => getSecureStoreBackend().deleteItemAsync(key),
 };
 
 /**
@@ -226,6 +258,28 @@ export async function getOnboardingCompleted(): Promise<boolean> {
   }
 }
 
+export async function saveAuthSessionToken(token: string): Promise<void> {
+  if (!token.trim()) {
+    await SecureStorageBackend.deleteItemAsync(STORAGE_KEYS.AUTH_SESSION_TOKEN);
+    return;
+  }
+  await SecureStorageBackend.setItemAsync(STORAGE_KEYS.AUTH_SESSION_TOKEN, token.trim());
+}
+
+export async function getAuthSessionToken(): Promise<string | null> {
+  try {
+    const token = await SecureStorageBackend.getItemAsync(STORAGE_KEYS.AUTH_SESSION_TOKEN);
+    return token?.trim() || null;
+  } catch (error) {
+    console.error('Failed to load auth session token:', error);
+    return null;
+  }
+}
+
+export async function clearAuthSessionToken(): Promise<void> {
+  await SecureStorageBackend.deleteItemAsync(STORAGE_KEYS.AUTH_SESSION_TOKEN);
+}
+
 export async function saveModelpackInstalls(
   installs: Record<string, ModelpackInstallState>,
 ): Promise<void> {
@@ -241,6 +295,10 @@ export async function loadModelpackInstalls(): Promise<Record<string, ModelpackI
     console.error('Failed to load modelpack installs:', error);
     return {};
   }
+}
+
+export async function clearModelpackInstalls(): Promise<void> {
+  await StorageBackend.removeItem(STORAGE_KEYS.MODELPACK_INSTALLS);
 }
 
 export async function getMemoryJournal(): Promise<LocalMemoryJournalEntry[]> {

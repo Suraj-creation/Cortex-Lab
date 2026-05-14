@@ -302,7 +302,7 @@ export const DEFAULT_SETTINGS: ChatSettings = {
   maxTokens: 4096,
   stream: true,
   useRAG: true,
-  llmProvider: "local",
+  llmProvider: "gemini",
   inferenceMode: "cloud",
   allowCloudFallback: true,
   thinkingMode: true,
@@ -710,6 +710,59 @@ export interface RuntimeApprovalSummary {
   waiting_retry: number;
   failed: number;
   completed: number;
+}
+
+export interface AuthenticatedUser {
+  sub: string;
+  email: string;
+  name: string;
+  picture: string;
+  provider: string;
+}
+
+export interface AuthStatus {
+  enabled: boolean;
+  authenticated: boolean;
+  user: AuthenticatedUser | null;
+  google: {
+    configured: boolean;
+    redirect_uri: string;
+    scopes: string[];
+  };
+  session: {
+    configured: boolean;
+    cookie_name: string;
+  };
+  backup: {
+    supabase_postgres_configured: boolean;
+    supabase_storage_configured?: boolean;
+    google_drive_configured: boolean;
+  };
+}
+
+export interface BackupRecord {
+  backup_id: string;
+  created_at: string;
+  user_sub: string;
+  email: string;
+  size_bytes: number;
+  sha256: string;
+  remote_written: boolean;
+  manifest: Record<string, unknown>;
+}
+
+export interface BackupStatus {
+  authenticated: boolean;
+  user: AuthenticatedUser | null;
+  backup: {
+    enabled: boolean;
+    supabase_postgres_configured: boolean;
+    supabase_storage_configured?: boolean;
+    google_drive_configured: boolean;
+    last_backup_at: string | null;
+    workspace: Record<string, unknown>;
+    history: BackupRecord[];
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

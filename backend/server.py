@@ -28,6 +28,7 @@ import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List
 from contextlib import asynccontextmanager
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 try:
     import torch
@@ -49,7 +50,7 @@ except ImportError:
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, Response, JSONResponse
+from fastapi.responses import StreamingResponse, Response, JSONResponse, RedirectResponse
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field
@@ -71,6 +72,8 @@ from src.runtime.session_manager import runtime_session_manager
 from src.runtime.task_manager import RuntimeTaskManager
 from src.runtime.event_bus import runtime_events
 from src.applications import session_memory_forge_service, life_chronicle_service
+from src.auth import AppAuthService, GoogleOAuthConfig
+from src.cloud_backup import CloudBackupCoordinator, GoogleDriveBackupClient, SupabaseStorageBackupClient
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -111,6 +114,8 @@ MODEL_NAME = os.environ.get("MODEL_NAME", _default_model)
 
 def _count_completed_stages():
     """Count how many training stages have completed."""
+    if not os.path.isdir(FINE_TUNED_BASE):
+        return 0
     count = 0
     for i in range(1, 16):
         stage_dirs = [d for d in os.listdir(FINE_TUNED_BASE) if d.startswith(f"stage{i}_")]
@@ -119,6 +124,30 @@ def _count_completed_stages():
             if os.path.exists(meta):
                 count += 1
     return count
+
+
+def _infer_model_max_context(local_model, fallback: int = 32768) -> int:
+    """Infer model context window from config across common architectures."""
+    candidates = []
+    cfg = getattr(local_model, "config", None)
+    scopes = [cfg, getattr(cfg, "text_config", None)] if cfg is not None else []
+    for scope in scopes:
+        if scope is None:
+            continue
+        for name in (
+            "max_position_embeddings",
+            "n_positions",
+            "max_sequence_length",
+            "seq_length",
+            "model_max_length",
+        ):
+            value = getattr(scope, name, None)
+            if isinstance(value, int) and value > 0:
+                candidates.append(int(value))
+
+    if not candidates:
+        return fallback
+    return max(256, min(max(candidates), 1_048_576))
 
 USE_4BIT   = os.environ.get("USE_4BIT", "true").lower() == "true"   # Default ON for 7B
 USE_8BIT   = os.environ.get("USE_8BIT", "false").lower() == "true"
@@ -974,6 +1003,9 @@ async def lifespan(app: FastAPI):
             load_kwargs["device_map"] = "auto"
         else:
             load_kwargs["torch_dtype"] = torch.float32
+            # Explicit CPU placement avoids accidental accelerator init on GPU-less hosts.
+            load_kwargs["device_map"] = "cpu"
+            load_kwargs["low_cpu_mem_usage"] = True
 
     t0 = time.time()
     model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, **load_kwargs)
@@ -993,13 +1025,15 @@ async def lifespan(app: FastAPI):
         "DeepSeek-R1-7B (Fine-Tuned)" if _fine_tuned_path else "DeepSeek-R1-Distill-Qwen-7B"
     )
 
+    inferred_max_context = _infer_model_max_context(model, fallback=32768)
+
     model_info = {
         "name": model_display_name,
         "parameters": "9B" if _is_qwen else "7B",
         "quantization": quant,
         "device": gpu_name,
         "gpu_memory": gpu_mem,
-        "max_context": 32768,
+        "max_context": inferred_max_context,
         "load_time_seconds": round(elapsed, 1),
         "fine_tuned": _fine_tuned_path is not None,
         "training_stages_completed": completed_stages,
@@ -1084,6 +1118,115 @@ app.add_middleware(
 
 # GZip compression for large responses (§9.6)
 app.add_middleware(GZipMiddleware, minimum_size=500)
+_APP_AUTH_COOKIE_NAME = "cortex_session"
+_BACKEND_ROOT = os.path.dirname(os.path.abspath(__file__))
+_BACKEND_DATA_ROOT = os.path.join(_BACKEND_ROOT, "data")
+_AUTH_DATA_ROOT = os.path.join(_BACKEND_DATA_ROOT, "auth")
+os.makedirs(_AUTH_DATA_ROOT, exist_ok=True)
+
+
+def _compose_supabase_database_url() -> str:
+    direct = (
+        os.environ.get("SUPABASE_DATABASE_URL", "")
+        or os.environ.get("SUPABASE_DB_URL", "")
+        or os.environ.get("DATABASE_URL", "")
+    ).strip()
+    if direct:
+        return direct
+
+    password = os.environ.get("SUPABASE_DB_PASSWORD", "").strip()
+    host = os.environ.get("SUPABASE_DB_HOST", "").strip()
+    port = os.environ.get("SUPABASE_DB_PORT", "5432").strip()
+    database = os.environ.get("SUPABASE_DB_NAME", "postgres").strip()
+    user = os.environ.get("SUPABASE_DB_USER", "postgres").strip()
+    if not password or not host:
+        return ""
+    encoded_user = quote(user, safe="")
+    encoded_password = quote(password, safe="")
+    encoded_database = quote(database, safe="")
+    return f"postgresql://{encoded_user}:{encoded_password}@{host}:{port}/{encoded_database}"
+
+
+def _upsert_query_params(url: str, params: Dict[str, str]) -> str:
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query.update(params)
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def _load_google_account_index() -> Dict[str, Any]:
+    path = os.path.join(_AUTH_DATA_ROOT, "google_accounts.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_google_account_index(data: Dict[str, Any]) -> None:
+    path = os.path.join(_AUTH_DATA_ROOT, "google_accounts.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2, sort_keys=True)
+
+
+def _store_google_account_tokens(profile: Dict[str, Any], token_payload: Dict[str, Any]) -> None:
+    sub = str(profile.get("sub", "")).strip()
+    if not sub:
+        return
+    accounts = _load_google_account_index()
+    accounts[sub] = {
+        "sub": sub,
+        "email": str(profile.get("email", "")),
+        "name": str(profile.get("name", "")),
+        "picture": str(profile.get("picture", "")),
+        "scope": str(token_payload.get("scope", "")),
+        "refresh_token": str(token_payload.get("refresh_token", "")),
+        "last_login_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _save_google_account_index(accounts)
+
+
+def _resolve_google_refresh_token(user_claims: Dict[str, Any]) -> str:
+    sub = str(user_claims.get("sub", "")).strip()
+    if not sub:
+        return ""
+    account = _load_google_account_index().get(sub, {})
+    if not isinstance(account, dict):
+        return ""
+    return str(account.get("refresh_token", "") or "").strip()
+
+
+_app_auth_service = AppAuthService.from_env()
+_google_oauth_config = GoogleOAuthConfig.from_env()
+_google_drive_client = (
+    GoogleDriveBackupClient(
+        root_folder_name=os.environ.get("CORTEX_GOOGLE_DRIVE_ROOT", "Cortex Lab Backups"),
+    )
+    if _google_oauth_config is not None
+    else None
+)
+_supabase_storage_client = (
+    SupabaseStorageBackupClient(
+        supabase_url=os.environ.get("SUPABASE_URL", ""),
+        service_role_key=os.environ.get("SUPABASE_SERVICE_ROLE_KEY", ""),
+        bucket=os.environ.get("SUPABASE_BACKUP_BUCKET", "cortex-backups"),
+    )
+    if os.environ.get("SUPABASE_URL", "").strip()
+    and os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    else None
+)
+_cloud_backup_coordinator = CloudBackupCoordinator(
+    data_root=_BACKEND_DATA_ROOT,
+    history_path=os.path.join(_AUTH_DATA_ROOT, "backup_history.jsonl"),
+    postgres_dsn=_compose_supabase_database_url(),
+    google_oauth_config=_google_oauth_config,
+    google_refresh_token_resolver=_resolve_google_refresh_token,
+    google_drive_client=_google_drive_client,
+    supabase_storage_client=_supabase_storage_client,
+)
 
 # ── API Key Authentication Middleware (§Gap 7) ───────────────────────────────
 
@@ -1091,7 +1234,17 @@ _CORTEX_API_KEY = os.environ.get("CORTEX_API_KEY", "")
 _AUTH_ENABLED = bool(_CORTEX_API_KEY)  # Auto-enable when env var is set
 
 # Paths that don't require authentication
-_PUBLIC_PATHS = {"/api/health", "/docs", "/openapi.json", "/redoc"}
+_PUBLIC_PATHS = {
+    "/api/health",
+    "/api/auth/status",
+    "/api/auth/me",
+    "/api/auth/logout",
+    "/api/auth/google/start",
+    "/api/auth/google/callback",
+    "/docs",
+    "/openapi.json",
+    "/redoc",
+}
 
 
 class APIKeyAuthMiddleware(BaseHTTPMiddleware):
@@ -1136,6 +1289,64 @@ else:
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
 
+def _extract_auth_claims_from_request(request: Request) -> Optional[Dict[str, Any]]:
+    if _app_auth_service is None:
+        return None
+
+    auth_header = request.headers.get("Authorization", "")
+    token = _app_auth_service.extract_bearer_token(auth_header)
+    if not token:
+        token = request.cookies.get(_APP_AUTH_COOKIE_NAME, "") or ""
+    if not token:
+        return None
+
+    try:
+        return _app_auth_service.verify_session_token(token)
+    except Exception:
+        return None
+
+
+def _require_authenticated_user(request: Request) -> Dict[str, Any]:
+    claims = _extract_auth_claims_from_request(request)
+    if not claims:
+        raise HTTPException(401, "Authentication required. Sign in with Google first.")
+    return claims
+
+
+def _auth_status_payload(request: Optional[Request] = None) -> Dict[str, Any]:
+    claims = _extract_auth_claims_from_request(request) if request is not None else None
+    backup_status = _cloud_backup_coordinator.status() if _cloud_backup_coordinator else {}
+    return {
+        "enabled": _app_auth_service is not None,
+        "authenticated": bool(claims),
+        "user": (
+            {
+                "sub": str(claims.get("sub", "")),
+                "email": str(claims.get("email", "")),
+                "name": str(claims.get("name", "")),
+                "picture": str(claims.get("picture", "")),
+                "provider": str(claims.get("provider", "google")),
+            }
+            if claims
+            else None
+        ),
+        "google": {
+            "configured": _google_oauth_config is not None,
+            "redirect_uri": _google_oauth_config.redirect_uri if _google_oauth_config else "",
+            "scopes": list(_google_oauth_config.scopes) if _google_oauth_config else [],
+        },
+        "session": {
+            "configured": _app_auth_service is not None,
+            "cookie_name": _APP_AUTH_COOKIE_NAME,
+        },
+        "backup": {
+            "supabase_postgres_configured": bool(backup_status.get("supabase_postgres_configured", False)),
+            "supabase_storage_configured": bool(backup_status.get("supabase_storage_configured", False)),
+            "google_drive_configured": bool(backup_status.get("google_drive_configured", False)),
+        },
+    }
+
+
 class ChatMessage(BaseModel):
     role: str = Field(..., description="'user' or 'assistant'")
     content: str
@@ -1170,6 +1381,11 @@ class ChatRequest(BaseModel):
     top_p: float = Field(0.95, ge=0.0, le=1.0)
     max_tokens: int = Field(4096, ge=1, le=32768)
     stream: bool = False
+    inference_mode: str = Field(
+        "cloud",
+        description="Runtime mode: cloud | hybrid | local_offline",
+    )
+    allow_cloud_fallback: Optional[bool] = True
     llm_provider: str = Field(
         default_factory=_default_request_llm_provider,
         description="'local'/'gemma_local' for on-device model or 'gemini' for Gemini API",
@@ -1197,6 +1413,10 @@ class HealthResponse(BaseModel):
     data_dir_source: str = ""
     bundled_graph_seed_present: bool = False
 
+
+class BackupRunRequest(BaseModel):
+    client_snapshot: Dict[str, Any] = Field(default_factory=dict)
+
 # ── RAG Schemas ──────────────────────────────────────────────────────────────
 
 class RAGChatRequest(BaseModel):
@@ -1207,6 +1427,10 @@ class RAGChatRequest(BaseModel):
     stream: bool = False
     use_rag: bool = True  # Enable/disable RAG enhancement
     session_id: str = ""
+    inference_mode: str = Field(
+        "cloud",
+        description="Runtime mode: cloud | hybrid | local_offline",
+    )
     llm_provider: str = Field(
         default_factory=_default_request_llm_provider,
         description="'local'/'gemma_local' for on-device model or 'gemini' for Gemini API",
@@ -2061,6 +2285,39 @@ def _resolve_request_llm_provider(provider: Optional[str]) -> str:
     return requested
 
 
+def _resolve_effective_request_llm_provider(
+    provider: Optional[str],
+    *,
+    allow_cloud_fallback: Optional[bool] = True,
+    mode: Optional[str] = None,
+) -> str:
+    requested = _resolve_request_llm_provider(provider)
+    if requested not in SUPPORTED_LLM_PROVIDERS:
+        raise ValueError("unsupported_provider")
+
+    runtime_mode = str(mode or _runtime_selection.get("mode", "cloud") or "cloud").strip().lower()
+    fallback_allowed = bool(allow_cloud_fallback)
+    availability = _llm_provider_availability()
+
+    if requested in ("local", "gemma_local"):
+        if availability.get("local", False):
+            return requested
+        if (
+            runtime_mode == "hybrid"
+            and fallback_allowed
+            and availability.get("gemini", False)
+        ):
+            return "gemini"
+        raise ValueError("local_unavailable")
+
+    if requested == "gemini":
+        if availability.get("gemini", False):
+            return requested
+        raise ValueError("gemini_unavailable")
+
+    return requested
+
+
 def _normalize_voice_provider(provider: str) -> str:
     requested = str(provider or "traditional").strip().lower()
     return _VOICE_PROVIDER_ALIAS_TO_BACKEND.get(requested, requested)
@@ -2324,25 +2581,26 @@ def _apply_ambient_gemini_defaults() -> None:
         print(f"  ⚠ Failed to apply Gemini ambient defaults: {e}")
 
 
-def _set_request_provider(provider: str):
-    """Set the LLM provider for this request. Raises ValueError if the
-    requested provider is unavailable (no silent fallback)."""
-    requested = _resolve_request_llm_provider(provider)
+def _set_request_provider(
+    provider: str,
+    *,
+    allow_cloud_fallback: Optional[bool] = True,
+    mode: Optional[str] = None,
+):
+    """Set the LLM provider for this request with explicit hybrid fallback."""
+    requested = _resolve_effective_request_llm_provider(
+        provider,
+        allow_cloud_fallback=allow_cloud_fallback,
+        mode=mode,
+    )
     normalized = _normalize_llm_provider(requested)
 
     if requested not in SUPPORTED_LLM_PROVIDERS:
         raise ValueError("unsupported_provider")
 
     if rag_engine.initialized and hasattr(rag_engine.llm, "set_provider"):
-        availability = _llm_provider_availability()
-
-        if requested in ("local", "gemma_local") and not availability["local"]:
-            raise ValueError("local_unavailable")
-
-        if requested == "gemini" and not availability["gemini"]:
-            raise ValueError("gemini_unavailable")
-
         rag_engine.llm.set_provider(normalized)
+    return requested
 
 
 def _is_gemini_active() -> bool:
@@ -2362,6 +2620,25 @@ def _effective_max_tokens(req, local_default: int = 8192) -> int:
     if provider in ("local", "gemma_local"):
         return local_default
     return max(1, min(requested, local_default))
+
+
+def _model_context_window(default: int = 4096) -> int:
+    try:
+        value = int((model_info or {}).get("max_context", default) or default)
+    except Exception:
+        value = default
+    return max(256, min(value, 1_048_576))
+
+
+def _input_truncation_limit(req) -> int:
+    context_window = _model_context_window()
+    reserve = min(_effective_max_tokens(req), max(128, context_window // 4))
+    return max(128, min(context_window - 1, context_window - reserve))
+
+
+def _generation_tokens_for_input(req, input_length: int) -> int:
+    remaining = max(1, _model_context_window() - int(input_length) - 1)
+    return max(1, min(_effective_max_tokens(req), remaining))
 
 
 async def _stream_gemini_generate(prompt: str, req):
@@ -2520,6 +2797,131 @@ async def health():
                 "knowledge_graph.json",
             )
         ),
+    )
+
+
+@app.get("/api/auth/status")
+async def auth_status(request: Request):
+    return _auth_status_payload(request)
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    return _auth_status_payload(request)
+
+
+@app.post("/api/auth/logout")
+async def auth_logout():
+    response = JSONResponse({"authenticated": False, "status": "signed_out"})
+    response.delete_cookie(_APP_AUTH_COOKIE_NAME)
+    return response
+
+
+@app.get("/api/auth/google/start")
+async def auth_google_start(
+    platform: str = Query("web"),
+    next_url: str = Query("", alias="next"),
+    mobile_redirect_uri: str = Query("cortexlab://auth/callback"),
+):
+    if _app_auth_service is None or _google_oauth_config is None:
+        raise HTTPException(503, "Google OAuth is not configured yet.")
+
+    state = _app_auth_service.issue_state_token(
+        {
+            "platform": str(platform or "web").strip().lower(),
+            "next_url": str(next_url or "").strip(),
+            "mobile_redirect_uri": str(mobile_redirect_uri or "cortexlab://auth/callback").strip(),
+        }
+    )
+    auth_url = _google_oauth_config.build_authorize_url(state=state, prompt="consent", access_type="offline")
+    return RedirectResponse(auth_url, status_code=307)
+
+
+@app.get("/api/auth/google/callback")
+async def auth_google_callback(code: str = Query(...), state: str = Query(...)):
+    if _app_auth_service is None or _google_oauth_config is None:
+        raise HTTPException(503, "Google OAuth is not configured yet.")
+
+    try:
+        state_payload = _app_auth_service.verify_state_token(state)
+        token_payload = _google_oauth_config.exchange_code_for_tokens(code)
+        access_token = str(token_payload.get("access_token", "")).strip()
+        if not access_token:
+            raise ValueError("missing_google_access_token")
+        profile = _google_oauth_config.fetch_userinfo(access_token)
+        claims = {
+            "sub": str(profile.get("sub", "")),
+            "email": str(profile.get("email", "")),
+            "name": str(profile.get("name", "")),
+            "picture": str(profile.get("picture", "")),
+            "provider": "google",
+        }
+        session_token = _app_auth_service.issue_session_token(claims)
+        if token_payload.get("refresh_token"):
+            _store_google_account_tokens(profile, token_payload)
+    except Exception as exc:
+        raise HTTPException(400, f"Google OAuth callback failed: {exc}") from exc
+
+    platform = str(state_payload.get("platform", "web")).strip().lower()
+    next_url = str(state_payload.get("next_url", "")).strip() or "/"
+    mobile_redirect_uri = str(
+        state_payload.get("mobile_redirect_uri", "cortexlab://auth/callback")
+    ).strip() or "cortexlab://auth/callback"
+
+    if platform == "mobile":
+        target = _upsert_query_params(
+            mobile_redirect_uri,
+            {
+                "token": session_token,
+                "status": "success",
+                "email": claims["email"],
+                "name": claims["name"],
+            },
+        )
+        return RedirectResponse(target, status_code=307)
+
+    redirect_target = _upsert_query_params(next_url, {"auth": "success"})
+    response = RedirectResponse(redirect_target, status_code=307)
+    secure = redirect_target.startswith("https://")
+    response.set_cookie(
+        _APP_AUTH_COOKIE_NAME,
+        session_token,
+        httponly=True,
+        samesite="lax",
+        secure=secure,
+        max_age=60 * 60 * 24 * 14,
+        path="/",
+    )
+    return response
+
+
+@app.get("/api/backup/status")
+async def backup_status(request: Request):
+    auth_payload = _auth_status_payload(request)
+    return {
+        "authenticated": auth_payload["authenticated"],
+        "user": auth_payload["user"],
+        "backup": {
+            **_cloud_backup_coordinator.status(),
+            "history": _cloud_backup_coordinator.list_history(limit=5),
+        },
+    }
+
+
+@app.get("/api/backup/history")
+async def backup_history(request: Request):
+    _require_authenticated_user(request)
+    return {
+        "history": _cloud_backup_coordinator.list_history(limit=20),
+    }
+
+
+@app.post("/api/backup/run")
+async def backup_run(request: Request, body: BackupRunRequest):
+    user_claims = _require_authenticated_user(request)
+    return _cloud_backup_coordinator.create_backup(
+        user_claims,
+        client_snapshot=dict(body.client_snapshot or {}),
     )
 
 
@@ -2842,24 +3244,26 @@ async def verify_modelpack(req: ModelpackVerifyRequest):
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
-    requested_provider = _resolve_request_llm_provider(req.llm_provider)
-    req.llm_provider = requested_provider
-
     # Apply per-request LLM provider switch
     try:
-        _set_request_provider(requested_provider)
+        requested_provider = _set_request_provider(
+            req.llm_provider,
+            allow_cloud_fallback=req.allow_cloud_fallback,
+            mode=req.inference_mode,
+        )
+        req.llm_provider = requested_provider
     except ValueError as e:
         if "unsupported_provider" in str(e):
             raise HTTPException(
                 400,
-                f"Unsupported LLM provider '{requested_provider}'. Supported providers: {', '.join(SUPPORTED_LLM_PROVIDERS)}",
+                f"Unsupported LLM provider '{req.llm_provider}'. Supported providers: {', '.join(SUPPORTED_LLM_PROVIDERS)}",
             )
         if "local_unavailable" in str(e):
             raise HTTPException(
                 503,
-                "Local model is not loaded. Switch to Gemini in settings, or start the server with a local model."
+                "Local model is not loaded. Switch to Gemini, enable hybrid fallback, or start the server with a local model."
             )
-        raise HTTPException(503, f"LLM provider '{requested_provider}' is not available.")
+        raise HTTPException(503, f"LLM provider '{req.llm_provider}' is not available.")
 
     # ── Gemini path (no local model needed) ──────────────────────────────
     if _is_gemini_active():
@@ -2908,7 +3312,7 @@ async def chat(req: ChatRequest):
         )
 
     # ── Non-streaming ────────────────────────────────────────────────────
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096)
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=_input_truncation_limit(req))
     if torch.cuda.is_available():
         inputs = {k: v.cuda() for k, v in inputs.items()}
 
@@ -2928,7 +3332,7 @@ async def chat(req: ChatRequest):
     with torch.no_grad():
         out = model.generate(
             **inputs,
-            max_new_tokens=_effective_max_tokens(req),
+            max_new_tokens=_generation_tokens_for_input(req, input_len),
             temperature=max(req.temperature, 0.01),
             top_p=req.top_p,
             do_sample=req.temperature > 0,
@@ -2969,9 +3373,10 @@ async def chat(req: ChatRequest):
 async def _stream_generate(prompt: str, req: ChatRequest):
     """Yield Server-Sent Events token by token with stop-pattern detection.
     Suppresses <think>…</think> blocks so only the visible answer is streamed."""
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096)
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=_input_truncation_limit(req))
     if torch.cuda.is_available():
         inputs = {k: v.cuda() for k, v in inputs.items()}
+    input_len = inputs["input_ids"].shape[-1]
 
     # Use skip_special_tokens=False so we can detect <think> tags ourselves
     streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=False)
@@ -2988,7 +3393,7 @@ async def _stream_generate(prompt: str, req: ChatRequest):
 
     gen_kwargs = {
         **inputs,
-        "max_new_tokens": _effective_max_tokens(req),
+        "max_new_tokens": _generation_tokens_for_input(req, input_len),
         "temperature": max(req.temperature, 0.01),
         "top_p": req.top_p,
         "do_sample": req.temperature > 0,
@@ -3094,24 +3499,26 @@ async def rag_chat(req: RAGChatRequest):
     if not rag_engine.initialized:
         raise HTTPException(503, "RAG engine is still initializing.")
 
-    requested_provider = _resolve_request_llm_provider(req.llm_provider)
-    req.llm_provider = requested_provider
-
     # Apply per-request LLM provider switch
     try:
-        _set_request_provider(requested_provider)
+        requested_provider = _set_request_provider(
+            req.llm_provider,
+            allow_cloud_fallback=req.allow_cloud_fallback,
+            mode=req.inference_mode,
+        )
+        req.llm_provider = requested_provider
     except ValueError as e:
         if "unsupported_provider" in str(e):
             raise HTTPException(
                 400,
-                f"Unsupported LLM provider '{requested_provider}'. Supported providers: {', '.join(SUPPORTED_LLM_PROVIDERS)}",
+                f"Unsupported LLM provider '{req.llm_provider}'. Supported providers: {', '.join(SUPPORTED_LLM_PROVIDERS)}",
             )
         if "local_unavailable" in str(e):
             raise HTTPException(
                 503,
-                "Local model is not loaded. Switch to Gemini in settings, or start the server with a local model."
+                "Local model is not loaded. Switch to Gemini, enable hybrid fallback, or start the server with a local model."
             )
-        raise HTTPException(503, f"LLM provider '{requested_provider}' is not available.")
+        raise HTTPException(503, f"LLM provider '{req.llm_provider}' is not available.")
 
     user_message = req.messages[-1].content if req.messages else ""
     if not user_message:
@@ -3383,9 +3790,10 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
         if not rag_prompt.rstrip().endswith("<think>"):
             rag_prompt = rag_prompt.rstrip() + "<think>\n"
 
-        inputs = tokenizer(rag_prompt, return_tensors="pt", truncation=True, max_length=4096)
+        inputs = tokenizer(rag_prompt, return_tensors="pt", truncation=True, max_length=_input_truncation_limit(req))
         if torch.cuda.is_available():
             inputs = {k: v.cuda() for k, v in inputs.items()}
+        input_len = inputs["input_ids"].shape[-1]
 
         streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=False)
 
@@ -3400,7 +3808,7 @@ async def _stream_rag_generate(user_message: str, history: list, req: RAGChatReq
 
         gen_kwargs = {
             **inputs,
-            "max_new_tokens": _effective_max_tokens(req),
+            "max_new_tokens": _generation_tokens_for_input(req, input_len),
             "temperature": max(req.temperature, 0.01),
             "top_p": req.top_p,
             "do_sample": req.temperature > 0,

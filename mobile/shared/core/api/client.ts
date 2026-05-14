@@ -38,6 +38,8 @@ import {
   VoiceQueryResult,
   VoiceProviders,
   VoiceProviderType,
+  AuthStatus,
+  BackupStatus,
 } from "../types";
 
 export interface ApiConfig {
@@ -519,9 +521,91 @@ async function consumeSSE(
 
 export function createApiClient(config: ApiConfig) {
   const baseUrl = ensureApiPath(config.baseUrl);
+  let authToken = "";
+
+  function getAuthHeaders(headers: Record<string, string> = {}): Record<string, string> {
+    if (!authToken) {
+      return headers;
+    }
+    return {
+      ...headers,
+      Authorization: `Bearer ${authToken}`,
+    };
+  }
+
+  function setAuthToken(token: string | null | undefined): void {
+    authToken = (token || "").trim();
+  }
+
+  function buildGoogleMobileAuthStartUrl(mobileRedirectUri: string): string {
+    const params = new URLSearchParams();
+    params.set("platform", "mobile");
+    params.set("mobile_redirect_uri", mobileRedirectUri);
+    return `${baseUrl}/auth/google/start?${params.toString()}`;
+  }
 
   async function getModelStatus(): Promise<ModelStatus> {
     const res = await fetch(`${baseUrl}/health`);
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function getAuthStatus(): Promise<AuthStatus> {
+    const res = await fetch(`${baseUrl}/auth/me`, {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function logoutAuth(): Promise<{ authenticated: boolean; status: string }> {
+    const res = await fetch(`${baseUrl}/auth/logout`, {
+      method: "POST",
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function getBackupStatus(): Promise<BackupStatus> {
+    const res = await fetch(`${baseUrl}/backup/status`, {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function listBackupHistory(): Promise<{ history: unknown[] }> {
+    const res = await fetch(`${baseUrl}/backup/history`, {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) {
+      throw await parseError(res);
+    }
+    return res.json();
+  }
+
+  async function runCloudBackup(clientSnapshot: Record<string, unknown> = {}): Promise<{
+    status: string;
+    backup_id: string;
+    size_bytes: number;
+    sha256: string;
+    remote_written: boolean;
+    manifest: Record<string, unknown>;
+  }> {
+    const res = await fetch(`${baseUrl}/backup/run`, {
+      method: "POST",
+      headers: getAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ client_snapshot: clientSnapshot }),
+    });
     if (!res.ok) {
       throw await parseError(res);
     }
@@ -2138,6 +2222,13 @@ export function createApiClient(config: ApiConfig) {
   }
 
   return {
+    setAuthToken,
+    buildGoogleMobileAuthStartUrl,
+    getAuthStatus,
+    logoutAuth,
+    getBackupStatus,
+    listBackupHistory,
+    runCloudBackup,
     getModelStatus,
     sendMessage,
     streamMessage,

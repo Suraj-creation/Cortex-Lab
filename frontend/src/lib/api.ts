@@ -27,6 +27,8 @@ import {
   RuntimeTaskReferences,
   RuntimeTaskSnapshot,
   RuntimeSelection,
+  AuthStatus,
+  BackupStatus,
 } from "./types";
 
 const API_BASE = "/api";
@@ -68,6 +70,72 @@ export function getAmbientWebSocketUrl(): string {
     }
     return "ws://localhost:8000/ws/ambient";
   }
+}
+
+export function buildGoogleAuthStartUrl(options?: {
+  nextUrl?: string;
+  platform?: "web";
+}): string {
+  const params = new URLSearchParams();
+  params.set("platform", options?.platform || "web");
+  if (options?.nextUrl) {
+    params.set("next", options.nextUrl);
+  } else if (typeof window !== "undefined") {
+    params.set("next", window.location.href);
+  }
+  return `${API_BASE}/auth/google/start?${params.toString()}`;
+}
+
+export async function getAuthStatus(): Promise<AuthStatus> {
+  const res = await fetch(`${API_BASE}/auth/status`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new Error(`Server error ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function logoutAuth(): Promise<{ authenticated: boolean; status: string }> {
+  const res = await fetch(`${API_BASE}/auth/logout`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new Error(`Server error ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function getBackupStatus(): Promise<BackupStatus> {
+  const res = await fetch(`${API_BASE}/backup/status`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new Error(`Server error ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function runBackup(clientSnapshot: Record<string, unknown> = {}): Promise<{
+  status: string;
+  backup_id: string;
+  size_bytes: number;
+  sha256: string;
+  remote_written: boolean;
+  manifest: Record<string, unknown>;
+}> {
+  const res = await fetch(`${API_BASE}/backup/run`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client_snapshot: clientSnapshot }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Server error ${res.status}`);
+  }
+  return res.json();
 }
 
 // ── Non-streaming chat ──────────────────────────────────────────

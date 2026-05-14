@@ -36,3 +36,4 @@ websockets>=12.0
 
 # Wake Word Detection (Phase 4 — optional)
 openwakeword>=0.6.0
+psycopg[binary]>=3.2.0
