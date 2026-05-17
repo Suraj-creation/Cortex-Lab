@@ -1431,6 +1431,7 @@ class RAGChatRequest(BaseModel):
         "cloud",
         description="Runtime mode: cloud | hybrid | local_offline",
     )
+    allow_cloud_fallback: Optional[bool] = True
     llm_provider: str = Field(
         default_factory=_default_request_llm_provider,
         description="'local'/'gemma_local' for on-device model or 'gemini' for Gemini API",
