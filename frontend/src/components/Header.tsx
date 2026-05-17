@@ -78,6 +78,7 @@ export function Header({ modelStatus, sidebarOpen, onToggleSidebar }: Props) {
         authenticated: false,
         name: "",
       }));
+      window.dispatchEvent(new Event("cortex-auth-changed"));
     } finally {
       setAuthBusy(false);
     }

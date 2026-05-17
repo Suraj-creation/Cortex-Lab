@@ -54,7 +54,9 @@ Before sign-in works end to end, configure:
 1. OAuth consent screen
 2. OAuth client for a web application
 3. Authorized redirect URI matching `GOOGLE_REDIRECT_URI`
-4. If mobile deep-link sign-in is used, the backend callback should redirect to `cortexlab://auth/callback`
+4. For deployed web/mobile, prefer the frontend proxy callback as `GOOGLE_REDIRECT_URI`: `https://cortex-frontend-t53t.onrender.com/api/auth/google/callback`
+5. For local backend-only testing, use the localhost callback configured in Google Cloud, for example `http://localhost:8080/api/auth/google/callback`
+6. If mobile deep-link sign-in is used, the backend callback should redirect to `cortexlab://auth/callback` after Google returns to the web callback
 
 ## Mobile deep link
 

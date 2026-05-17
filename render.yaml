@@ -28,7 +28,7 @@ services:
       - key: GOOGLE_CLIENT_SECRET
         sync: false
       - key: GOOGLE_REDIRECT_URI
-        value: https://cortex-backend-dbcv.onrender.com/api/auth/google/callback
+        value: https://cortex-frontend-t53t.onrender.com/api/auth/google/callback
       - key: GOOGLE_SCOPES
         value: openid email profile https://www.googleapis.com/auth/drive.file
       - key: CORTEX_GOOGLE_DRIVE_ROOT

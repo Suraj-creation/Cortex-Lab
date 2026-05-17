@@ -103,6 +103,7 @@ import { ChronicleScreen } from './src/screens/ChronicleScreen';
 import { AmbientVoiceScreen } from './src/screens/AmbientVoiceScreen';
 import { DocumentsScreen } from './src/screens/DocumentsScreen';
 import { OnboardingScreen } from './src/screens/OnboardingScreen';
+import { AuthLandingScreen } from './src/screens/AuthLandingScreen';
 import { ErrorBoundary } from './src/components/ErrorBoundary';
 import { NetworkStatusBanner } from './src/components/NetworkStatusBanner';
 import { NetworkProvider } from './src/providers/NetworkProvider';
@@ -292,6 +293,8 @@ function AppContent() {
   const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [backupBusy, setBackupBusy] = useState(false);
+  const [authLoadError, setAuthLoadError] = useState('');
+  const [authGateDismissed, setAuthGateDismissed] = useState(false);
 
   // ── Chat ─────────────────────────────────────────────────────────────────────
   const [conversations, setConversations] = useState<ConvSummary[]>([]);
@@ -369,8 +372,13 @@ function AppContent() {
     try {
       const status = await client.getAuthStatus();
       setAuthStatus(status);
+      setAuthLoadError('');
+      if (status.authenticated) {
+        setAuthGateDismissed(false);
+      }
     } catch {
       setAuthStatus(null);
+      setAuthLoadError('Unable to reach the auth service on the active backend.');
     }
 
     try {
@@ -585,6 +593,7 @@ function AppContent() {
         await saveAuthSessionToken(token);
         apiRef.current.setAuthToken(token);
         await refreshAuthAndBackup(apiRef.current);
+        setAuthGateDismissed(false);
         setSettingsVisible(true);
         setGlobalError('');
       } catch (error) {
@@ -1314,6 +1323,7 @@ function AppContent() {
       await apiRef.current.logoutAuth();
       await clearAuthSessionToken();
       apiRef.current.setAuthToken('');
+      setAuthGateDismissed(false);
       setAuthStatus({
         enabled: Boolean(authStatus?.enabled),
         authenticated: false,
@@ -1443,13 +1453,29 @@ function AppContent() {
   }, [activeView, loadAmbient]);
 
   const isOnline = modelStatus.status !== 'offline';
+  const shouldShowAuthLanding =
+    !settingsVisible
+    && !authGateDismissed
+    && !authStatus?.authenticated;
 
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <StatusBar style="dark" />
 
-      {settingsVisible ? (
+      {shouldShowAuthLanding ? (
+        <AuthLandingScreen
+          authStatus={authStatus}
+          loading={authBusy || testingConnection}
+          error={authLoadError}
+          onSignIn={() => void startGoogleSignIn()}
+          onContinueLocal={() => setAuthGateDismissed(true)}
+          onOpenSettings={() => {
+            setAuthGateDismissed(true);
+            setSettingsVisible(true);
+          }}
+        />
+      ) : settingsVisible ? (
         <SettingsPage
           settings={settings}
           onUpdateSettings={(patch: Partial<ChatSettings>) => setSettings((prev) => ({ ...prev, ...patch }))}
@@ -1608,7 +1634,7 @@ function AppContent() {
         </>
       )}
 
-      {showOnboarding && (
+      {showOnboarding && !shouldShowAuthLanding && (
         <OnboardingScreen onContinue={() => void completeOnboarding()} />
       )}
     </SafeAreaView>

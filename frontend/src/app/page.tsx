@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { ChatPanel } from "@/components/ChatPanel";
 import { Sidebar } from "@/components/Sidebar";
 import { Header } from "@/components/Header";
+import { AuthLanding } from "@/components/AuthLanding";
 import { MemoryBrowser } from "@/components/MemoryBrowser";
 import { KnowledgeGraph } from "@/components/KnowledgeGraph";
 import { RAGDashboard } from "@/components/RAGDashboard";
@@ -13,8 +14,8 @@ import { DocumentsPanel } from "@/components/DocumentsPanel";
 import { AgentChatPanel } from "@/components/agent/AgentChatPanel";
 import { WikiBrowser } from "@/components/agent/WikiBrowser";
 import { useGlobalAgentEvents } from "@/lib/agent/useAgentEvents";
-import { getRuntimeSafetyExecutorStatus, getRuntimeSafetyPermissions } from "@/lib/api";
-import { ModelStatus, RuntimeApprovalSummary } from "@/lib/types";
+import { buildGoogleAuthStartUrl, getAuthStatus, getRuntimeSafetyExecutorStatus, getRuntimeSafetyPermissions } from "@/lib/api";
+import { AuthStatus, ModelStatus, RuntimeApprovalSummary } from "@/lib/types";
 
 type ActiveView = "chat" | "agent" | "wiki" | "memories" | "graph" | "dashboard" | "observability" | "ambient" | "documents";
 
@@ -32,6 +33,10 @@ export default function Home() {
     { id: string; title: string; date: string }[]
   >([]);
   const [activeConversation, setActiveConversation] = useState("");
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState("");
+  const [authGateDismissed, setAuthGateDismissed] = useState(false);
   const [approvalSummary, setApprovalSummary] = useState<RuntimeApprovalSummary>({
     pending: 0,
     expired: 0,
@@ -41,6 +46,41 @@ export default function Home() {
     failed: 0,
     completed: 0,
   });
+
+  const refreshAuthStatus = async () => {
+    setAuthLoading(true);
+    try {
+      const status = await getAuthStatus();
+      setAuthStatus(status);
+      setAuthError("");
+      if (status.authenticated) {
+        setAuthGateDismissed(false);
+      }
+    } catch (error) {
+      setAuthStatus(null);
+      setAuthError(error instanceof Error ? error.message : "Unable to reach auth service.");
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refreshAuthStatus();
+
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      if (url.searchParams.get("auth") === "success") {
+        url.searchParams.delete("auth");
+        window.history.replaceState({}, "", url.toString());
+      }
+    }
+
+    const listener = () => {
+      void refreshAuthStatus();
+    };
+    window.addEventListener("cortex-auth-changed", listener);
+    return () => window.removeEventListener("cortex-auth-changed", listener);
+  }, []);
 
   // Load conversations from localStorage on mount
   useEffect(() => {
@@ -160,6 +200,27 @@ export default function Home() {
     setActiveConversation(id);
     setActiveView("chat");
   };
+
+  const shouldShowAuthLanding = !authGateDismissed && !authStatus?.authenticated;
+
+  const handleSignIn = () => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.location.href = buildGoogleAuthStartUrl({ nextUrl: window.location.origin });
+  };
+
+  if (shouldShowAuthLanding) {
+    return (
+      <AuthLanding
+        status={authStatus}
+        loading={authLoading}
+        error={authError}
+        onSignIn={handleSignIn}
+        onContinueLocal={() => setAuthGateDismissed(true)}
+      />
+    );
+  }
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#f8fafc]">
